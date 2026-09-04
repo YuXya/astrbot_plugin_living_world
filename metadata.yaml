@@ -1,0 +1,17 @@
+name: astrbot_plugin_living_world
+display_name: 我也在这个世界生活 / Living World
+short_desc: 为 AstrBot 构建模块化、可持续演进的 AI 生活世界。
+desc: >-
+  Living World 是一个规划中的 AstrBot AI 生活模拟插件。0.0.1 仅包含
+  可加载健康检查与公开的主程规划文档，不包含日程、天气、记忆或主动消息业务能力。
+version: 0.0.1
+author: YuXya
+repo: https://github.com/YuXya/astrbot_plugin_living_world
+astrbot_version: ">=4.24,<5"
+support_platforms:
+  - aiocqhttp
+tags:
+  - AI生活
+  - 世界模拟
+  - 主动能力
+  - OneBot
