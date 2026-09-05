@@ -7,7 +7,7 @@ desc: >-
 version: 0.1.0
 author: YuXya
 repo: https://github.com/YuXya/astrbot_plugin_living_world
-astrbot_version: ">=4.28.0b1,<5"
+astrbot_version: ">=4.27.5,<5"
 support_platforms:
   - aiocqhttp
 tags:

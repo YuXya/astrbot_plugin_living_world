@@ -4,7 +4,7 @@
 
 ## 安装环境
 
-- Python 3.12，AstrBot 4.28.0-beta.1 / Python 包版本 `4.28.0b1`。
+- Python 3.12，AstrBot `>=4.27.5,<5`；此前完整自动化验证基线为 `4.28.0b1`。
 - 已配置的 AstrBot 对话模型、一个可绑定的人格，以及用于实测的 OneBot QQ / `aiocqhttp` 平台。
 - 安装本插件 `requirements.txt` 中的依赖；使用 AstrBot 自身运行的环境，不要装到另一个 Python 环境。
 - B 站是可选依赖：安装并启用 `astrbot_plugin_bilibili_ai_bot`，提供 `search_bilibili`、`watch_video` 和公开记忆 API v3。登录、视频解析及模型条件由该插件自行配置。

@@ -18,7 +18,7 @@ Living World 让一个由你设定的角色沿用 AstrBot 人格，拥有连续�
 
 ## 安装与首次配置
 
-首轮验证基线为 **Python 3.12、AstrBot 4.28.0-beta.1（Python 包版本 `4.28.0b1`）**，首发面向 OneBot QQ / `aiocqhttp`。元数据声明范围为 `>=4.28.0b1,<5`，其他版本仍需验证。
+支持 **Python 3.12、AstrBot 4.27.5 及以上（低于 5）**，首发面向 OneBot QQ / `aiocqhttp`。已放开 4.27.5 安装限制并快速核对主要宿主接口；此前完整自动化验证使用 4.28.0-beta.1（`4.28.0b1`）。
 
 1. 在 AstrBot 插件管理中导入本插件 ZIP；或将插件目录放到 AstrBot 的 `data/plugins/astrbot_plugin_living_world`。插件根目录应直接包含 `main.py`、`metadata.yaml`、`living_world/` 和 `pages/`。
 2. 使用 **AstrBot 实际运行的 Python 环境**安装本插件 `requirements.txt`，再加载或重载插件。若宿主已经完成依赖安装，无需重复。
