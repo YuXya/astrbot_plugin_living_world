@@ -97,10 +97,30 @@ def test_store_claim_persistence_and_atomic_restore(tmp_path):
 async def test_scope_and_updated_memories_reach_plan(runtime):
     record = runtime.memory.remember("明天八点见", scope=PRIVATE)
     runtime.memory.update(record["id"], {"text": "明天九点见"})
-    runtime.host.answers = ['{"activities":[]}']
-    await runtime.life.plan_day(scope=PRIVATE)
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    runtime.store.put(
+        "activities",
+        "future",
+        {
+            "id": "future",
+            "date": now.date().isoformat(),
+            "start": (now + timedelta(minutes=5)).isoformat(),
+            "end": (now + timedelta(minutes=30)).isoformat(),
+            "title": "自由安排",
+            "scope": "global",
+            "kind": "fiction",
+            "status": "planned",
+            "payload": {},
+        },
+    )
+    runtime.host.answers = ['{"updates":[{"id":"future","changes":{"title":"明天九点的约定"}}]}']
+    assert await runtime.life.plan_day(scope=PRIVATE) == []
+    await runtime.life.revise(scope=PRIVATE, reason="有效约定")
     prompt = runtime.host.calls[-1][1]
     assert "九点见" in prompt and "八点见" not in prompt
+    activity = runtime.store.get("activities", "future")
+    assert activity["title"] == "自由安排"
+    assert activity["scope_overrides"][PRIVATE]["title"] == "明天九点的约定"
     assert "九点见" not in await runtime.context_text(GROUP)
     assert "九点见" not in await runtime.context_text("global")
 

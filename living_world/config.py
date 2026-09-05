@@ -18,12 +18,44 @@ MODULES = (
     "bilibili",
     "journal",
     "notes",
+    "daily_digest",
+    "debug",
 )
+NEWS_SOURCES = [
+    {"id": key, "name": name, "url": url, "enabled": True}
+    for key, name, url in (
+        ("bbc", "BBC 中文", "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml"),
+        ("google", "Google 新闻中文", "https://news.google.com/rss?hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
+        ("solidot", "Solidot", "https://www.solidot.org/index.rss"),
+        ("hn", "Hacker News", "https://hnrss.org/frontpage"),
+        ("mit", "MIT Technology Review", "https://www.technologyreview.com/feed/"),
+        ("ars", "Ars Technica", "https://feeds.arstechnica.com/arstechnica/index"),
+    )
+]
+DIGEST_SOURCES = [
+    {
+        "id": "heya",
+        "name": "黑鸦 Heya",
+        "uid": "3706929260006322",
+        "keywords": "早报 日报",
+        "time": "12:00",
+        "enabled": True,
+    },
+    {
+        "id": "juya",
+        "name": "橘鸦 Juya",
+        "uid": "285286947",
+        "keywords": "日报 早报",
+        "time": "23:00",
+        "enabled": True,
+    },
+]
 DEFAULTS = {
     "persona_id": "",
     "sessions": [],
     "modules": {
-        name: name in {"state", "life", "memory", "reply", "journal", "notes"} for name in MODULES
+        name: name in {"state", "life", "memory", "reply", "journal", "notes", "debug"}
+        for name in MODULES
     },
     "models": {
         name: "" for name in ("default", "life", "memory", "social", "exploration", "journal")
@@ -34,13 +66,18 @@ DEFAULTS = {
         "timezone": "Asia/Shanghai",
         "energy": 70,
         "mood": "平静",
+        "location": "",
+        "sleep_state": "未知",
     },
     "life": {
         "tick_seconds": 60,
         "detail_minutes": 10,
-        "max_activities": 12,
+        "daily_plan_time": "06:00",
+        "activity_count": 10,
+        "news_count": 2,
+        "search_count": 2,
+        "social_count": 3,
         "stale_action_minutes": 10,
-        "spontaneous_minutes": 30,
     },
     "social": {
         "target_count": 1,
@@ -50,10 +87,12 @@ DEFAULTS = {
         "quiet_end": "08:00",
         "interjection_interval_minutes": 30,
     },
-    "news": {"feeds": [], "limit": 5},
-    "search": {"tool_name": "", "query_argument": "query"},
-    "weather": {"url": "", "location": ""},
+    "news": {"sources": NEWS_SOURCES, "limit": 5},
+    "search": {},
+    "weather": {"location": "", "api_host": "", "auth_mode": "api_key", "credential": ""},
     "bilibili": {"plugin_name": "astrbot_plugin_bilibili_ai_bot", "recent_limit": 5},
+    "daily_digest": {"sources": DIGEST_SOURCES},
+    "debug": {"retain_per_category": 10},
     "memory": {
         "half_life_days": 30,
         "forget_after_days": 180,
@@ -93,6 +132,8 @@ def settings_from(patch=None):
         "bilibili",
         "memory",
         "journal",
+        "daily_digest",
+        "debug",
     ):
         if not isinstance(result[section], dict):
             raise TypeError(f"{section} 必须是对象")
@@ -103,6 +144,15 @@ def settings_from(patch=None):
         raise TypeError("会话白名单必须是数组")
     seen = set()
     for session in result["sessions"]:
+        if not isinstance(session, dict):
+            raise TypeError("白名单对象必须为表单记录")
+        if not session.get("umo"):
+            platform = str(session.get("platform_id", "")).strip()
+            number = str(session.get("number", "")).strip()
+            kind = {"group": "GroupMessage", "private": "FriendMessage"}.get(session.get("type"))
+            if not platform or ":" in platform or not number.isdigit() or not kind:
+                raise ValueError("请选择 QQ 连接、群聊／私聊，并填写数字号码")
+            session["umo"] = f"{platform}:{kind}:{number}"
         umo = session.get("umo", "")
         if not isinstance(umo, str) or not re.fullmatch(
             r"[^:]+:(GroupMessage|FriendMessage):[^:]+", umo
@@ -116,12 +166,20 @@ def settings_from(patch=None):
         if not math.isfinite(weight) or weight < 0:
             raise ValueError("白名单权重必须为有限非负数")
         session["weight"] = weight
+        platform, kind, number = umo.split(":", 2)
+        session.update(
+            platform_id=platform,
+            type="group" if kind == "GroupMessage" else "private",
+            number=number.split("_")[-1] if kind == "GroupMessage" else number,
+        )
     for name in MODULES:
         if not isinstance(result["modules"][name], bool):
             raise TypeError("模块开关必须为布尔值")
     for name in ("quiet_start", "quiet_end"):
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(result["social"][name])):
             raise ValueError("免打扰时间格式必须为 HH:MM")
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(result["life"]["daily_plan_time"])):
+        raise ValueError("日程生成时间格式必须为 HH:MM")
     bounds = {
         ("social", "target_count"): (1, 20),
         ("social", "daily_limit"): (0, 1000),
@@ -129,29 +187,82 @@ def settings_from(patch=None):
         ("social", "interjection_interval_minutes"): (1, 1440),
         ("life", "tick_seconds"): (10, 3600),
         ("life", "detail_minutes"): (0, 120),
-        ("life", "max_activities"): (1, 48),
+        ("life", "activity_count"): (1, 48),
+        ("life", "news_count"): (0, 48),
+        ("life", "search_count"): (0, 48),
+        ("life", "social_count"): (0, 48),
         ("life", "stale_action_minutes"): (1, 60),
         ("news", "limit"): (1, 30),
         ("journal", "hour"): (0, 23),
         ("character", "energy"): (0, 100),
+        ("debug", "retain_per_category"): (1, 1000),
+        ("bilibili", "recent_limit"): (1, 50),
     }
     for (section, key), (low, high) in bounds.items():
         value = float(result[section][key])
         if not math.isfinite(value) or not low <= value <= high:
             raise ValueError(f"{section}.{key} 必须在 {low} 到 {high} 之间")
-    if not isinstance(result["news"]["feeds"], list):
-        raise TypeError("新闻来源必须是 URL 数组")
+        if key.endswith("_count") or key in {
+            "retain_per_category",
+            "limit",
+            "hour",
+            "recent_limit",
+        }:
+            if not value.is_integer():
+                raise ValueError(f"{section}.{key} 必须为整数")
+            result[section][key] = int(value)
+    if any(
+        result["life"][key] > result["life"]["activity_count"]
+        for key in ("news_count", "search_count", "social_count")
+    ):
+        raise ValueError("每类行动次数不能超过活动数量；同一活动允许不同类型重叠")
+    original_news = (patch or {}).get("news", {})
+    if "sources" not in original_news and original_news.get("feeds"):
+        result["news"]["sources"] = [
+            {"id": f"legacy-{i}", "name": url, "url": url, "enabled": True}
+            for i, url in enumerate(original_news["feeds"])
+        ]
+    for section in ("news", "daily_digest"):
+        rows = result[section]["sources"]
+        if not isinstance(rows, list) or len(rows) > 100:
+            raise ValueError("来源必须是最多 100 项的数组")
+        ids = set()
+        for i, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise TypeError("来源记录必须为对象")
+            if section == "daily_digest" and isinstance(row.get("keywords"), list):
+                if any(not isinstance(word, str) for word in row["keywords"]):
+                    raise TypeError("日报关键词必须为文本")
+                row["keywords"] = " ".join(row["keywords"])
+            row.setdefault("id", f"{section}-{i}")
+            if not isinstance(row["id"], str) or not row["id"] or row["id"] in ids:
+                raise ValueError("来源 ID 不能为空或重复")
+            ids.add(row["id"])
+            row.setdefault("enabled", True)
+            if not isinstance(row["enabled"], bool) or not isinstance(row.get("name"), str):
+                raise TypeError("来源名称或开关无效")
+            if section == "news":
+                if not isinstance(row.get("url"), str) or not row["url"].startswith(
+                    ("https://", "http://")
+                ):
+                    raise ValueError("新闻来源需填写 HTTP(S) RSS/Atom 地址")
+            elif (
+                not str(row.get("uid", "")).isdigit()
+                or not isinstance(row.get("keywords"), str)
+                or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(row.get("time", "")))
+            ):
+                raise ValueError("日报需填写 UP 主 UID、搜索词和 HH:MM 时间")
     for section, keys in {
-        "character": ("profile", "world", "mood"),
+        "character": ("profile", "world", "mood", "location", "sleep_state"),
         "models": tuple(DEFAULTS["models"]),
-        "search": ("tool_name", "query_argument"),
-        "weather": ("url", "location"),
+        "weather": ("location", "api_host", "auth_mode", "credential"),
         "bilibili": ("plugin_name",),
     }.items():
         if any(not isinstance(result[section].get(key), str) for key in keys):
             raise TypeError(f"{section} 的文本字段无效")
-    if any(not isinstance(feed, str) for feed in result["news"]["feeds"]):
-        raise TypeError("新闻来源必须为 URL 字符串")
+    if result["weather"]["auth_mode"] not in {"api_key", "jwt"}:
+        raise ValueError("和风认证方式必须为 API Key 或 JWT")
+    result["bilibili"]["plugin_name"] = "astrbot_plugin_bilibili_ai_bot"
     timeout = float(result["model_timeout_seconds"])
     if not math.isfinite(timeout) or not 5 <= timeout <= 300:
         raise ValueError("模型超时必须在 5 到 300 秒之间")

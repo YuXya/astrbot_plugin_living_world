@@ -43,6 +43,17 @@ class Store:
             )
             return cursor.rowcount == 1
 
+    def put_many(self, namespace, records):
+        rows = [
+            (namespace, key, json.dumps(value, ensure_ascii=False, allow_nan=False), time.time())
+            for key, value in records
+        ]
+        with self.lock, self.db:
+            self.db.executemany(
+                "INSERT INTO objects VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value,updated=excluded.updated",
+                rows,
+            )
+
     def list(self, namespace):
         with self.lock:
             rows = self.db.execute(

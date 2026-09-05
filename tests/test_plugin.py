@@ -44,7 +44,7 @@ async def test_real_plugin_load_page_and_unload_preserve_data(plugin_module, tmp
     assert response.status_code == 200
     assert json.loads(response.body)["settings"]["character"]["profile"] == "测试角色资料"
     state = next(row[1] for row in ctx.registered_web_apis if row[0].endswith("/state"))
-    assert json.loads((await state()).body)["version"] == "0.1.0"
+    assert json.loads((await state()).body)["version"] == plugin_module.__version__
     await plugin.terminate()
     assert len(ctx.registered_web_apis) == 1
     assert not plugin.runtime.tasks
@@ -75,3 +75,33 @@ async def test_unmanaged_reply_keeps_other_tools_and_does_not_inject(plugin_modu
     assert req.system_prompt == "Keep original persona"
     assert [tool.name for tool in req.func_tool.tools] == ["unrelated"]
     assert len(original.tools) == 2
+
+
+async def test_observe_tracks_real_group_scope_with_interjection_off(plugin_module):
+    from unittest.mock import Mock
+
+    plugin = plugin_module.Main(SimpleNamespace())
+    runtime = SimpleNamespace(
+        scope_allowed=AsyncMock(return_value=True), enabled=lambda _: False, note_scope=Mock()
+    )
+    plugin.runtime = runtime
+    event = SimpleNamespace(
+        get_group_id=lambda: "100",
+        unified_msg_origin="qq:GroupMessage:42_100",
+        get_sender_id=lambda: "42",
+        get_self_id=lambda: "bot",
+    )
+    await plugin.observe(event)
+    runtime.note_scope.assert_called_once_with("qq:GroupMessage:42_100")
+
+
+async def test_late_host_response_does_not_access_closed_store(plugin_module):
+    from unittest.mock import Mock
+
+    plugin = plugin_module.Main(SimpleNamespace())
+    plugin.runtime = SimpleNamespace(
+        stopped=True, enabled=lambda _: False, debug=SimpleNamespace(finish=Mock())
+    )
+    event = SimpleNamespace(get_extra=lambda _: {"id": "running-request"})
+    await plugin.remember_reply(event, SimpleNamespace(completion_text="late"))
+    plugin.runtime.debug.finish.assert_not_called()

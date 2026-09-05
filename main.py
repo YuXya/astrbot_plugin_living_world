@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import uuid
 
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
@@ -10,6 +9,7 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.web import error_response, json_response, request
 
 from .living_world import __version__
+from .living_world.debug import json_value
 from .living_world.host import AstrBotHost
 from .living_world.runtime import Runtime
 
@@ -80,6 +80,7 @@ class Main(Star):
     async def living_world(self, event: AstrMessageEvent):
         """Report health without exposing the character's private records."""
         running = self.runtime is not None and not self.runtime.stopped
+        event.set_extra("living_world_owned_message", True)
         yield event.plain_result(
             f"Living World {__version__} {'运行中' if running else '未启动'}。请在 AstrBot 插件页面管理人格、日程、记忆与模块。"
         )
@@ -88,17 +89,15 @@ class Main(Star):
     async def observe(self, event: AstrMessageEvent):
         """Consider group interjections without waking the host model."""
         runtime = self.runtime
-        if (
-            not runtime
-            or not runtime.enabled("interjection")
-            or not event.get_group_id()
-            or event.is_at_or_wake_command
-        ):
+        if not runtime or not event.get_group_id():
+            return
+        if event.get_sender_id() == event.get_self_id():
             return
         scope = event.unified_msg_origin
         if not await runtime.scope_allowed(scope):
             return
-        if event.get_sender_id() == event.get_self_id():
+        runtime.note_scope(scope)
+        if not runtime.enabled("interjection") or event.is_at_or_wake_command:
             return
 
         async def consider():
@@ -126,7 +125,8 @@ class Main(Star):
             req.func_tool = type(req.func_tool)(list(req.func_tool.tools))
             for name, module in TOOL_MODULES.items():
                 if (
-                    not allowed
+                    name == "living_world_social"
+                    or not allowed
                     or (module and not runtime.enabled(module))
                     or (
                         module is None
@@ -138,6 +138,7 @@ class Main(Star):
                     req.func_tool.remove_tool(name)
         if not allowed:
             return
+        runtime.note_scope(event.unified_msg_origin)
         event.set_extra("living_world_reply", True)
         if runtime.enabled("reply"):
             context = await runtime.context_text(
@@ -152,11 +153,51 @@ class Main(Star):
                 + "\n当前场合可用资料（fiction 为角色虚构经历，计划不代表已发生）：\n"
                 + context
             )
+        if runtime.enabled("debug"):
+            captured = {
+                key: json_value(getattr(req, key, None))
+                for key in (
+                    "prompt",
+                    "system_prompt",
+                    "contexts",
+                    "image_urls",
+                    "audio_urls",
+                    "extra_user_content_parts",
+                    "session_id",
+                    "model",
+                    "tool_calls_result",
+                )
+            }
+            captured.update(
+                task="reply.request",
+                module="reply",
+                scope=event.unified_msg_origin,
+                persona_id=runtime.settings["persona_id"],
+                parameters={},
+            )
+            captured["tools"] = req.func_tool.openai_schema() if req.func_tool else []
+            if hasattr(runtime.host, "describe_model"):
+                try:
+                    model = captured["model"]
+                    captured.update(await runtime.host.describe_model("", event.unified_msg_origin))
+                    captured["model"] = model or captured["model"]
+                except Exception:  # noqa: BLE001 - Diagnostics must not prevent normal replies.
+                    captured["provider_id"] = "宿主当前提供商未能读取"
+            record = runtime.debug.begin(
+                "reply.request",
+                captured,
+                module="reply",
+                scope=event.unified_msg_origin,
+                boundary="宿主 on_llm_request 经本插件增强时的快照；后续宿主或其他插件仍可修改，不是提供商 HTTP 请求",
+            )
+            event.set_extra("living_world_debug_request", record)
 
     @filter.on_llm_response()
     async def remember_reply(self, event: AstrMessageEvent, resp: LLMResponse):
         """Extract facts from the user's words, without storing a second chat log."""
         runtime = self.runtime
+        if runtime and not runtime.stopped and event.get_extra("living_world_debug_request"):
+            runtime.debug.finish(event.get_extra("living_world_debug_request"), json_value(resp))
         if (
             not runtime
             or not runtime.enabled("memory")
@@ -173,19 +214,36 @@ class Main(Star):
             ),
         )
 
-    @filter.llm_tool(name="living_world_social")
     async def social_tool(self, event: AstrMessageEvent, reason: str):
-        """Request a natural conversation through the configured social controls.
-
-        Args:
-            reason(string): The reason or topic for wanting to talk.
-        """
-        if not self.runtime:
-            return "Living World unavailable"
-        result = await self.runtime.execute_action(
-            "social", {"reason": reason}, event.unified_msg_origin, uuid.uuid4().hex
+        """Keep legacy direct callers harmless after removing spontaneous contact."""
+        return json.dumps(
+            {"status": "skipped", "text": "主动聊天只由日程中的聊天标记触发"}, ensure_ascii=False
         )
-        return json.dumps(result, ensure_ascii=False)
+
+    @filter.after_message_sent()
+    async def record_reply_sent(self, event: AstrMessageEvent):
+        """Observe host delivery callbacks for conversations augmented by this plugin."""
+        runtime = self.runtime
+        if (
+            not runtime
+            or not runtime.enabled("debug")
+            or not (
+                event.get_extra("living_world_reply")
+                or event.get_extra("living_world_owned_message")
+            )
+        ):
+            return
+        result = event.get_result()
+        if not result:
+            return
+        entry = runtime.debug.begin(
+            "command.send" if event.get_extra("living_world_owned_message") else "reply.send",
+            {"scope": event.unified_msg_origin, "message": json_value(result.chain)},
+            scope=event.unified_msg_origin,
+            kind="message",
+            boundary="宿主 after_message_sent 回调；Living World 命令回复或使用过角色上下文的回复，发送由宿主完成",
+        )
+        runtime.debug.finish(entry, {"callback": "after_message_sent"}, status="sent")
 
     @filter.llm_tool(name="living_world_explore")
     async def explore_tool(self, event: AstrMessageEvent, source: str, query: str):
@@ -206,6 +264,13 @@ class Main(Star):
             return "Unsupported source"
         result = await self.runtime.execute_action(
             source, {"query": query}, event.unified_msg_origin
+        )
+        self.runtime.audit_external(
+            "tool.living_world_explore",
+            {"source": source, "query": query},
+            result,
+            event.unified_msg_origin,
+            "Living World 工具执行入参与结果",
         )
         return json.dumps(result, ensure_ascii=False)
 
@@ -233,6 +298,13 @@ class Main(Star):
         )
         if record:
             runtime.spawn("life", runtime.revise(event.unified_msg_origin, "主动记忆更新"))
+        runtime.audit_external(
+            "tool.living_world_remember",
+            {"text": text, "kind": kind, "important": important},
+            record,
+            event.unified_msg_origin,
+            "Living World 工具执行入参与结果",
+        )
         return json.dumps(record, ensure_ascii=False)
 
     async def terminate(self):

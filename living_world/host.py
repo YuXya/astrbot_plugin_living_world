@@ -1,4 +1,4 @@
-"""AstrBot 4.28 integration with explicit persona and transport boundaries."""
+"""AstrBot integration with explicit persona and transport boundaries."""
 
 import json
 import uuid
@@ -33,21 +33,66 @@ class AstrBotHost:
         return selected or ""
 
     async def generate(self, provider_id, prompt, system, scope):
+        text, usage, _ = await self.generate_request(
+            {"provider_id": provider_id, "prompt": prompt, "system_prompt": system, "scope": scope}
+        )
+        return text, usage
+
+    async def describe_model(self, provider_id, scope):
         provider_id = provider_id or await self.context.get_current_chat_provider_id(
             scope if scope != "global" else ""
         )
-        response = await self.context.llm_generate(
-            chat_provider_id=provider_id, prompt=prompt, system_prompt=system
+        provider = self.context.get_provider_by_id(provider_id)
+        return {
+            "provider_id": provider_id,
+            "model": getattr(provider.meta(), "model", "") if provider else "",
+        }
+
+    async def generate_request(self, request):
+        from .debug import json_value
+
+        provider_id = request.get("provider_id") or await self.context.get_current_chat_provider_id(
+            request["scope"] if request["scope"] != "global" else ""
         )
-        text = response.completion_text
-        if not text or not text.strip():
-            raise ValueError("模型没有返回文本")
+        response = await self.context.llm_generate(
+            chat_provider_id=provider_id,
+            prompt=request["prompt"],
+            system_prompt=request["system_prompt"],
+            contexts=request.get("contexts", []),
+            image_urls=request.get("image_urls", []),
+            audio_urls=request.get("audio_urls", []),
+            **({"model": request["model"]} if request.get("model") else {}),
+            **request.get("parameters", {}),
+        )
+        text = response.completion_text or ""
         usage = getattr(response, "usage", None)
         if hasattr(usage, "model_dump"):
             usage = usage.model_dump()
         if not isinstance(usage, dict):
             usage = {}
-        return text, {"provider": provider_id, **usage}
+        return text, {"provider": provider_id, **usage}, json_value(response)
+
+    async def search(self, query, scope):
+        settings = self.context.get_config(scope if scope != "global" else "").get(
+            "provider_settings", {}
+        )
+        if not settings.get("web_search", False):
+            raise ValueError("请先在 AstrBot 模型设置中开启网页搜索并配置搜索服务")
+        provider = settings.get("websearch_provider", "tavily")
+        names = {
+            "tavily": "web_search_tavily",
+            "bocha": "web_search_bocha",
+            "brave": "web_search_brave",
+            "firecrawl": "web_search_firecrawl",
+            "baidu_ai_search": "web_search_baidu",
+            "exa": "web_search_exa",
+            "anysearch": "web_search_anysearch",
+        }
+        name = names.get(provider)
+        if not name:
+            raise ValueError(f"当前 AstrBot 网页搜索服务不受支持：{provider}")
+        # Use the registered host tool rather than a private provider implementation.
+        return await self.call_tool(name, {"query": query}, scope, builtin=True)
 
     async def history(self, scope, limit=24):
         if ":GroupMessage:" in scope:
@@ -100,7 +145,7 @@ class AstrBotHost:
     def tool(self, name, plugin_name=None):
         manager = self.context.get_llm_tool_manager()
         tool = manager.get_func(name)
-        if not tool or not tool.active:
+        if not tool or not getattr(tool, "active", True):
             raise ValueError(f"工具不可用：{name}")
         if getattr(tool, "is_background_task", False):
             raise ValueError("不支持脱离当前执行周期的后台工具")
@@ -114,7 +159,7 @@ class AstrBotHost:
                 raise ValueError("工具来源与依赖插件不匹配")
         return tool
 
-    async def call_tool(self, name, arguments, scope, plugin_name=None):
+    async def call_tool(self, name, arguments, scope, plugin_name=None, *, builtin=False):
         from astrbot.core.astr_agent_context import AgentContextWrapper, AstrAgentContext
         from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
         from astrbot.core.platform.astr_message_event import AstrMessageEvent
@@ -126,7 +171,13 @@ class AstrBotHost:
             async def send(self, message):
                 raise RuntimeError("Background tools cannot send messages directly")
 
-        tool = self.tool(name, plugin_name)
+        tool = (
+            self.context.get_llm_tool_manager().get_builtin_tool(name)
+            if builtin
+            else self.tool(name, plugin_name)
+        )
+        if not getattr(tool, "active", True):
+            raise ValueError(f"工具不可用：{name}")
         session = MessageSession.from_str(
             scope if scope != "global" else "living-world:FriendMessage:background"
         )
@@ -159,7 +210,7 @@ class AstrBotHost:
                     chunks.append(block.text)
         if not chunks:
             raise ValueError("工具没有返回可用文本")
-        return "\n".join(chunks)[:20000]
+        return "\n".join(chunks)
 
     def bilibili_api(self, plugin_name):
         star = self.context.get_registered_star(plugin_name)
@@ -189,4 +240,14 @@ class AstrBotHost:
             result.append(
                 {"umo": session["umo"], "title": session["umo"], "persona_id": persona_id}
             )
-        return {"personas": personas, "providers": providers, "sessions": result}
+        platforms = [
+            {"id": p.meta().id, "name": p.meta().id}
+            for p in getattr(getattr(self.context, "platform_manager", None), "platform_insts", [])
+            if p.meta().name == "aiocqhttp"
+        ]
+        return {
+            "personas": personas,
+            "providers": providers,
+            "sessions": result,
+            "platforms": platforms,
+        }

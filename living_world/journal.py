@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC, date, datetime
 
 from .life import character_timezone, scope_allowed
+from .prompts import PROMPTS
 
 
 class JournalService:
@@ -103,19 +104,24 @@ class JournalService:
                     and (entry.get("profile") or entry.get("kind") in {"knowledge", "emotional"})
                     and not str(entry.get("source", "")).startswith("journal")
                 ]
-            prompt = (
-                f"根据以下已经记录的经历，写一篇{day}的{'轻量日记' if kind == 'journal' else '见闻笔记'}。直接输出正文。"
-                "events是唯一的当日经历依据；memories仅为理解人物与感受的背景，不是今天实际发生的证据。"
-                "source=fiction的是角色虚构日常，要明确它属于角色生活，不能写成真实网络事实。"
-                "真实行动只能描述记录中已经确认的结果：消息发出不代表对方回应，搜索不代表已观看视频。"
-                "不要补写缺失结果、未执行计划或失败行动。保留新闻、搜索和视频来源的URL或来源名称。"
-                "只在给定场合内回顾，不把私人内容转为公开内容；可写感受，但不新增事实。\n"
-                + json.dumps(
-                    {"scope": scope, "events": events, "memories": memories},
-                    ensure_ascii=False,
-                )
-            )
-            text = (await self.runtime.generate(kind, prompt, scope=scope)).strip()
+            template = PROMPTS["journal.write"]
+            data = {
+                "date": day,
+                "kind": kind,
+                "scope": scope,
+                "events": events,
+                "memories": memories,
+            }
+            if hasattr(self.runtime, "complete"):
+                text = (
+                    await self.runtime.complete(kind + ".write", kind, template, data, scope)
+                ).strip()
+            else:
+                text = (
+                    await self.runtime.generate(
+                        kind, template + json.dumps(data, ensure_ascii=False), scope=scope
+                    )
+                ).strip()
             if not self.runtime.enabled(kind) or not await scope_allowed(self.runtime, scope):
                 return {"status": "skipped", "reason": "module_disabled"}
             if not text:
