@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Living World · 生活管理</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <a class="brand" href="#overview" aria-label="Living World 概览">
+          <span class="brand-mark" aria-hidden="true">lw</span>
+          <span>Living World<small>让每一天，继续发生</small></span>
+        </a>
+        <nav id="navigation" aria-label="管理导航">
+          <a href="#overview" data-view="overview"><span>01</span>生活概览</a>
+          <a href="#settings" data-view="settings"><span>02</span>设定与模块</a>
+          <a href="#schedule" data-view="schedule"><span>03</span>日程与状态</a>
+          <a href="#memory" data-view="memory"><span>04</span>记忆与人物</a>
+          <a href="#journal" data-view="journal"><span>05</span>见闻与日记</a>
+          <a href="#social" data-view="social"><span>06</span>社交与调用</a>
+          <a href="#data" data-view="data"><span>07</span>数据管理</a>
+        </nav>
+        <div class="sidebar-note"><span class="live-dot" aria-hidden="true"></span><span id="connection">正在连接 AstrBot</span><small id="version">Living World</small></div>
+      </aside>
+      <div class="workspace">
+        <header class="topbar">
+          <div><p class="eyebrow">LIVING WORLD / CONTROL ROOM</p><h1 id="page-title">生活概览</h1></div>
+          <div class="topbar-actions"><span id="updated" class="muted"></span><button type="button" id="refresh" class="button secondary">刷新数据</button></div>
+        </header>
+        <div id="notice" role="status" aria-live="polite" hidden></div>
+        <main id="content" tabindex="-1"><div class="empty-state"><span class="loading-dot"></span><h2>正在读取这一天</h2><p>通过 AstrBot Plugin Pages 连接插件。</p></div></main>
+        <footer>核心人设保持固定 · 经历、知识和关系持续积累</footer>
+      </div>
+    </div>
+    <dialog id="editor" aria-labelledby="editor-title"><form id="editor-form"><div class="dialog-header"><h2 id="editor-title"></h2><button type="button" id="editor-close" class="icon-button" aria-label="关闭">×</button></div><div id="editor-body"></div><div class="dialog-actions"><button type="button" id="editor-cancel" class="button secondary">取消</button><button type="submit" id="editor-submit" class="button primary">保存</button></div></form></dialog>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

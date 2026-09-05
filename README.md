@@ -1,46 +1,57 @@
 # 我也在这个世界生活 / Living World
 
-> **Pre-alpha / planning scaffold:** `0.0.1` 目前只有可加载骨架、`/living_world` 健康检查和主程规划文档；尚未实现日程、天气、记忆、探索或主动消息。
+**0.1.0 可安装测试版本。** 已实现日程、记忆、外部见闻、主动社交和集中管理页面，并开展自动化验证；真实模型、QQ 收发与 B 站账号联调尚待完成，不代表已经通过生产环境验收。
 
-Living World 计划为 AstrBot 提供一套“AI 真的在生活”的模块化系统：AI 拥有自己的世界设定、现实锚定的日程与状态、可持续的生活记忆、新闻/搜索/B站观察能力，以及经过对象池筛选的个性化主动表达。
+Living World 让一个由你设定的角色沿用 AstrBot 人格，拥有连续的日常生活。例如“数学课有点无聊，找个群聊聊天”：既能提前放入日程，也能在活动中临时起意，实际调用社交能力。
 
-## 当前版本
+角色虚构经历、未来计划和已确认的真实行动分别记录。认识同一个人，谈话分场合；私聊约定不会自动成为群聊分享内容。
 
-- 插件 ID：`astrbot_plugin_living_world`
-- 展示名：`我也在这个世界生活 / Living World`
-- 许可证：MIT
-- 首个验证平台：OneBot QQ（`aiocqhttp`）
-- 最低规划基线：AstrBot `>=4.24,<5`
-- 唯一命令：`/living_world`，用于确认骨架加载成功
+## 已实现的能力
 
-当前版本不会创建数据库、后台任务、配置页面、聊天记录副本或主动消息。
+- 角色与世界资料、精力情绪作息、每日大纲、临近细化、小插曲和后续日程调整。
+- 知识、事件、技能、情感记忆，以及人物画像、中文检索、更新、合并、强化和淡化。
+- 正常聊天补充生活记忆、群聊插话、主动联系；主动对象从白名单按权重随机抽取，统一控制数量、频率和免打扰。
+- RSS/Atom 新闻、配置的搜索工具、JSON 天气接口，以及 B 站搜索、指定视频观看和公开视频记忆读取。
+- 按已有经历生成日记和见闻笔记；运行时独立开关、状态查看、记录维护、导出与恢复。
 
-## 已锁定边界
+生活和记忆无需安装 private_companion 或 Angel Memory。**B 站能力单独依赖 `astrbot_plugin_bilibili_ai_bot`，要求公开记忆 API v3。** 只使用 `search_bilibili`、`watch_video` 和公开视频记忆读取，不调用其完整自主浏览、点赞、投币、评论或私信流程。搜索、读取旧视频记忆和本次完成观看分别标记。
 
-- 单仓库、单插件、模块化单体。
-- 跨模块通信全部经过版本化消息总线。
-- 插件拥有自己的人格与世界设定；使用者为相关 AstrBot 会话选择空白人格壳。
-- 只有 AI 自己的生活、观察和事件进入全局共享记忆。
-- 群聊和私聊的原始历史、隔离与持久化继续完全由 AstrBot 管理。
-- 首发只声明 OneBot QQ 支持；其他平台验证后再加入。
-- 和风天气是第一个天气适配器。
-- B站首先只读联动 [`astrbot_plugin_bilibili_ai_bot`](https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot) 的公开能力。
-- AI 自主与其他 LLM 持续聊天不属于 1.0。
+## 安装与首次配置
 
-## 文档入口
+首轮验证基线为 **Python 3.12、AstrBot 4.28.0-beta.1（Python 包版本 `4.28.0b1`）**，首发面向 OneBot QQ / `aiocqhttp`。元数据声明范围为 `>=4.28.0b1,<5`，其他版本仍需验证。
 
-完整主程文档、架构边界、事件契约、九人工位和模块任务卡见 [`docs/README.md`](docs/README.md)。
+1. 在 AstrBot 插件管理中导入本插件 ZIP；或将插件目录放到 AstrBot 的 `data/plugins/astrbot_plugin_living_world`。插件根目录应直接包含 `main.py`、`metadata.yaml`、`living_world/` 和 `pages/`。
+2. 使用 **AstrBot 实际运行的 Python 环境**安装本插件 `requirements.txt`，再加载或重载插件。若宿主已经完成依赖安装，无需重复。
+3. 从插件卡片打开 **Plugin Pages 管理页面**，选择一个 AstrBot 人格，并填写要接入的会话白名单。到目标群或私聊发送 `/sid`，复制返回的完整 UMO；开启 `unique_session` 时群会话通常带有 `用户ID_群ID`，以 `/sid` 实际结果为准。
+4. 让所选会话在 AstrBot 中使用同一人格。群聊请开启宿主群历史；使用本插件插话时关闭宿主概率回复，否则本插件会暂停插话以避免重复。
+5. 填写角色与世界资料。模型可以留空，沿用 AstrBot 当前默认；也可设置插件默认模型和各业务模型覆盖。
+6. 按需要配置新闻、搜索、天气和 B 站来源，再打开相应模块。主动联系和插话默认关闭，首次启用使用明确的测试白名单。
 
-## 开发状态
+初次安装尚未绑定人格时不会自动行动。保存有效人格后，已启用的日程等模块开始工作。`/living_world` 可查看插件运行状态。
 
-本仓库尚未进入业务实现阶段。`0.0.1` 的目标是让未来的开发者或 AI 工位在不互相踩代码的前提下，依据同一套模块职责、事件契约和质量门禁开始工作。
+**管理页面是唯一配置入口，设置保存在插件数据库中；没有第二套 `_conf_schema.json` 配置。** 运行数据位于 AstrBot 插件数据目录的 `astrbot_plugin_living_world/living_world.sqlite3`，不要放入插件代码目录。
 
-实现阶段将遵循 AstrBot 的[插件开发指南](https://docs.astrbot.app/dev/star/plugin-new.html)、[最小实例](https://docs.astrbot.app/dev/star/guides/simple.html)和[发布规范](https://docs.astrbot.app/dev/star/plugin-publish.html)。
+## 来源与当前限制
 
-## Clean-room 声明
+| 来源 | 需要提供的配置 | 实际行为 |
+|---|---|---|
+| 新闻 | RSS/Atom 地址数组 | 读取条目，保留出处，单源失败隔离 |
+| 搜索 | 已启用的只读搜索工具名、关键词参数名 | 调用该工具，保留结果来源 |
+| 天气 | 返回 JSON 的 HTTP(S) URL，可用 `{location}` 占位，以及位置 | 读取接口数据并整理，不绑定天气供应商 |
+| B 站 | 已启用的 Bilibili AI Bot，公开记忆 API v3及所需工具 | 搜索、使用完整 BV 号观看、读取公开视频记忆 |
 
-项目会研究“我会永远陪着你”、天使之心、Angel Memory、LivingMemory 等公开项目的产品行为与架构思想，但不会复制其代码、提示词、文档、资源或私有数据结构。详细边界见 [`docs/08-references-and-license-boundaries.md`](docs/08-references-and-license-boundaries.md)。
+当前记忆采用轻量中文文本检索，不包含向量数据库；能力效果仍受模型质量、来源可用性及宿主工具配置影响。本版本不包含其他居民运行、人格自我改写、梦境或复杂技能成长。
 
-## License
+导入备份会恢复设置、合并缺失记录，但不覆盖已有 ID 与执行防重记录，并将全部业务模块关闭，检查后再启用。导出文件可能含私人记录和来源 URL 凭证，请仅本地保存，不提交仓库。
 
-[MIT](LICENSE)
+详细操作和真实联调步骤见 [安装测试说明](docs/02-install-and-test.md)；开发分工及验证进度见 [交付与验收记录](docs/03-delivery-and-validation.md)。
+
+## 文档与许可
+
+- [主程总计划](docs/01-lead-plan.md)：完整功能方向、实施顺序与最终验收场景。
+- [能力任务卡索引](docs/README.md)：八组能力的工作内容、依赖与验收效果。
+- [开发协作规则](AGENTS.md)：后续开发、验证与交接约定。
+
+能力参考来自 [private_companion](https://github.com/menglimi/astrbot_plugin_private_companion) 与 [Angel Memory](https://github.com/kawayiYokami/astrbot_plugin_angel_memory)。本项目独立编写实现、提示词、页面和测试，不复制参考项目的表达性内容。本项目许可证：[MIT](LICENSE)。
+
+0.1.0 以可安装测试交付为目标，公开发布和插件市场上架另行安排。

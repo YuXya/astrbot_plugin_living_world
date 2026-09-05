@@ -1,15 +1,20 @@
-# Changelog
+# 更新记录
 
-All notable changes to this project will be documented in this file.
+## [0.1.0] - 2026-09-05
 
-## [Unreleased]
+首轮可安装测试版本。自动化验证与真实环境验收分开记录，真实模型、QQ 收发和 B 站账号联调尚待完成。
 
-- No business implementation has started.
+- 完成 AstrBot 人格和指定会话接入、模块热开关、模型覆盖、持久化与运行恢复。
+- 加入角色生活状态、每日大纲、临近细化、生活小插曲、实际行动与未来日程调整。
+- 加入分类记忆、人物认知、场合过滤、中文检索、提炼、更新、合并和淡化。
+- 加入日程主动社交、模型临时社交、生活分享与群聊插话，统一白名单加权随机抽选和发送控制。
+- 加入可配置新闻、搜索、天气，以及依赖 Bilibili AI Bot 的搜索、指定视频观看和公开视频记忆读取。
+- 加入基于已有证据的日记、见闻笔记，以及 AstrBot Plugin Pages 集中管理、导出与恢复。
+- 补充失败隔离、过期行动跳过、重启防重复、人格绑定变更与来源停用等自动化验证。
+- 更新主程总计划、八张能力任务卡、安装测试说明及交付验收记录，保留模块分工与原定功能方向。
 
 ## [0.0.1] - 2026-09-04
 
-### Added
-
-- Minimal AstrBot plugin entry point and `/living_world` health check.
-- Public lead-engineering plan, module boundaries, event-contract plan, ADRs, and work packages.
-- MIT license and clean-room contribution boundaries.
+- 建立 AstrBot 插件入口和 `/living_world` 健康检查。
+- 建立主程规划、工程约定与 MIT 许可证。
+- 后续将旧专题、固定工位、强制消息总线和逐项 ADR 要求重构为一份总计划与八张能力任务卡。

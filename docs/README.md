@@ -1,27 +1,23 @@
-# Living World 规划文档索引
+# Living World 计划与任务索引
 
-## English Summary
+当前为 0.1.0 可安装测试版本，八组能力已有实现并纳入自动化验证。真实模型、QQ 群聊与私聊、B 站账号联调尚待完成；不能据此标记总计划已最终验收。
 
-This documentation set is the lead-engineering handoff for Living World. It defines the product boundary, modular-monolith architecture, message contracts, ownership, implementation waves, quality gates, and clean-room constraints before business development begins.
+- [安装测试说明](02-install-and-test.md)：环境、安装、首次配置、来源接入与真实联调步骤。
+- [交付与验收记录](03-delivery-and-validation.md)：实际开发分工、自动化验证范围、待完成实测。
 
-## 阅读顺序
+先读 [主程总计划](01-lead-plan.md)，再按实际分工阅读下列任务卡。每张卡只说明做什么、依赖什么、验收效果，验证细节集中记录，不规定实现算法、表结构或事件字段。
 
-1. [产品规格](00-product-spec.md)
-2. [主程计划](01-lead-plan.md)
-3. [总体架构](02-architecture.md)
-4. [事件契约](03-event-contracts.md)
-5. [记忆与上下文边界](04-memory-and-context-boundaries.md)
-6. [团队与所有权](05-team-and-ownership.md)
-7. [路线图](06-roadmap.md)
-8. [测试、联调与发布](07-testing-integration-release.md)
-9. [参考与许可证边界](08-references-and-license-boundaries.md)
+| 任务组 | 任务卡 | 主要内容 |
+|---|---|---|
+| 基础接入与模块管理 | [01 基础](tasks/01-foundation.md) | AstrBot 接入、模型配置、运行时启停与恢复 |
+| 角色资料与生活状态 | [02 角色与状态](tasks/02-character-state.md) | 角色与世界资料、精力情绪作息 |
+| 日程与生活小插曲 | [03 日常生活](tasks/03-daily-life.md) | 每日大纲、临近细化、实际行动与小插曲 |
+| 记忆与人物认知 | [04 记忆](tasks/04-memory.md) | 分类、画像、共同经历、召回和遗忘 |
+| 外部见闻 | [05 外部来源](tasks/05-external-sources.md) | 新闻、搜索、天气、B 站 |
+| 聊天与主动社交 | [06 社交](tasks/06-social.md) | 日程社交、主动调用、概率抽选、回复与插话 |
+| 日记与见闻笔记 | [07 日记与笔记](tasks/07-journal-notes.md) | 生活回顾、感想、见闻记录 |
+| 集中管理页面 | [08 管理页面](tasks/08-admin-ui.md) | 配置、开关、查看、编辑与恢复 |
 
-## 执行资料
+主程负责共用能力、依赖协调与整体验收，负责人按任务安排，不固定工位人数。开发规则见 [AGENTS.md](../AGENTS.md)。
 
-- [`modules/`](modules/)：12 个运行时模块职责卡。
-- [`work-packages/`](work-packages/)：P0–P8 九个工位任务卡。
-- [`adr/`](adr/)：已经锁定的架构决策及未来变更程序。
-
-## 当前状态
-
-`0.0.1` 仅交付可加载骨架和规划文档。本文档描述 1.0 的目标与交接方式，不代表对应业务能力已经实现。
+旧产品专题、事件契约、模块卡、固定工位任务卡和 ADR 已由本套文档替换，历史内容可从 Git 记录查看，不再作为当前实施依据。
