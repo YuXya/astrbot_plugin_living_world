@@ -2,9 +2,12 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 const { chromium } = require("playwright");
 const pageRoot = path.resolve(__dirname, "../pages/living-world");
 const browserPath = process.env.LIVING_WORLD_BROWSER || ["C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Google/Chrome/Application/chrome.exe"].find(fs.existsSync);
+const python = process.env.LIVING_WORLD_PYTHON || path.resolve(__dirname, "../.venv/Scripts/python.exe");
+const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join(__dirname, "ui_debug_fixture.py")], { encoding: "utf8" }));
 (async () => {
   const browser = await chromium.launch({ headless: true, ...(browserPath ? { executablePath: browserPath } : {}) });
   try {
@@ -43,6 +46,38 @@ const browserPath = process.env.LIVING_WORLD_BROWSER || ["C:/Program Files (x86)
         debug: { templates: [{ task: "life.plan_day", default_template: template, template }] },
         debug_records: [{ id: "debug-1", kind: "model", category: "life.plan_day", task: "life.plan_day", module: "life", scope: "global", status: "success", boundary: "本插件提交给 AstrBot 的请求", request: { module: "life", task: "life.plan_day", scope: "global", provider_id: "chat-model", system_prompt: "Full persona system", prompt_mode: "structured", prompt: "Private test context kept outside templates", contexts: [{ role: "user", content: "完整历史" }], parameters: { temperature: 0.6 }, template, dynamic_context: { memories: ["测试记忆"] } }, response: { completion_text: "{\"activities\":[]}" } }],
       };
+      window.fixture.version = "0.2.3-test";
+      window.fixture.provider_capture_available = true;
+      window.fixture.session_status = [
+        { umo: scope, actual_scope: scope, platform_id: "qq", persona_id: "student", persona_match: true, allowed: true, history_status: "found", history_count: 2, history_source: "AstrBot 当前对话", conversation_id: "current-private", reason: "可接入；已找到历史", checked_at: Date.now() / 1000 },
+        { umo: "qq:GroupMessage:42_100", actual_scope: "qq:GroupMessage:42_100", persona_id: "student", allowed: true, history_status: "empty", history_count: 0, reason: "可接入；首次对话／暂无历史" },
+      ];
+      const steps = [
+        ["chat.turn", "turn", { text: "帮我查一下数学资料" }, { sent: 1 }, "sent"],
+        ["chat.route", "event", { allowed: true }, { reason: "白名单与人格匹配" }, "success"],
+        ["chat.context", "event", { history: { count: 2 }, dynamic_context: { memories: ["本场合记忆"] } }, {}, "success"],
+        ["reply.model", "model", { provider_id: "chat-model", arguments: { prompt: "数学资料", contexts: [{ role: "user", content: "实际采用的历史" }] } }, { completion_text: "", raw_completion: { choices: [{ message: { tool_calls: [{ id: "lookup-1" }] } }] } }, "success"],
+        ["reply.tool", "tool", { name: "lookup", arguments: { query: "数学资料" } }, { content: [{ type: "text", text: "数学资料搜索结果" }] }, "success"],
+        ["reply.model", "model", { provider_id: "chat-model", arguments: { contexts: [{ role: "tool", content: "数学资料搜索结果" }] } }, { completion_text: "找到一份数学笔记", raw_completion: { choices: [{ message: { content: "找到一份数学笔记" } }] } }, "success"],
+        ["reply.send", "message", { message: { chain: [{ type: "Plain", text: "找到一份数学笔记" }] } }, { accepted: true }, "sent"],
+      ];
+      steps.forEach(([task, kind, request, response, status], index) => window.fixture.debug_records.push({ id: `chat-step-${index}`, turn_id: "round-1", parent_id: index ? "chat-step-0" : "", task, category: task, module: "reply", scope, kind, request, response, status, created_at: 1800000000 + index }));
+      window.fixture.debug_records.find((record) => record.task === "reply.model").request.arguments.temperature = 0.7;
+      const firstRequest = JSON.stringify({ model: "deepseek-chat", messages: [{ role: "system", content: "小夏喜欢天文和散步。" }, { role: "user", content: "帮我查一下数学资料" }], tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }], temperature: 0.7 }, null, 2);
+      const firstResponse = JSON.stringify({ id: "chatcmpl-first", choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "lookup-1", type: "function", function: { name: "lookup", arguments: '{"query":"数学资料"}' } }] } }], usage: { prompt_tokens: 120, completion_tokens: 18 }, extension_field: "不得丢弃这个未知字段" }, null, 2);
+      const secondRequest = JSON.stringify({ model: "deepseek-chat", messages: [{ role: "tool", tool_call_id: "lookup-1", content: "数学资料搜索结果" }] });
+      const secondResponse = JSON.stringify({ id: "chatcmpl-second", choices: [{ message: { role: "assistant", content: "找到一份数学笔记", reasoning_content: "这份笔记与本次学习活动有关。" } }], usage: { prompt_tokens: 160, completion_tokens: 22 } });
+      window.rawFixture = { firstRequest, firstResponse, secondRequest, secondResponse, sse: 'data: {"choices":[{"delta":{"content":"晚风"}}]}\n\ndata: {"choices":[{"delta":{"content":"很舒服"}}]}\n\ndata: [DONE]\n\n' };
+      window.fixture.debug_views = [
+        { id: "round-1", task: "chat.turn", scope, created_at: 1800000000, status: "sent", legacy: false, categories: ["chat.turn", "reply.model", "reply.tool"], sources: [{ title: "当前日程", source: "Living World 今日日程 · 本次私聊", placement: "本轮末尾", content: "14:00—15:00 数学课，复习函数。" }, { title: "相关记忆", source: "长期记忆 · 当前场合", placement: "本轮末尾", content: "答应朋友找一些数学资料。" }, { title: "聊天历史", source: "AstrBot 当前对话", placement: "历史消息", content: [{ role: "user", content: "<img src=x onerror=window.debugXss=true>" }] }], injected_text: "【当前时间】2026-09-06 14:30\n【当前活动】数学课，正在复习函数。\n【相关记忆】答应朋友找一些数学资料。", calls: [
+          { id: "http-1", record_id: "chat-step-3", provider_id: "chat-model", model: "deepseek-chat", method: "POST", url: "https://model.test/v1/chat/completions", status: "success", capture_status: "captured", http_status: 200, request_body: firstRequest, response_body: firstResponse, response_type: "json", reading: { text: "", tool_calls: [{ name: "lookup", arguments: { query: "数学资料" } }], usage: { prompt_tokens: 120, completion_tokens: 18 } } },
+          { id: "http-2", record_id: "chat-step-5", provider_id: "chat-model", model: "deepseek-chat", method: "POST", url: "https://model.test/v1/chat/completions", status: "success", capture_status: "captured", http_status: 200, request_body: secondRequest, response_body: secondResponse, response_type: "json", reading: { text: "找到一份数学笔记", reasoning: "这份笔记与本次学习活动有关。", usage: { prompt_tokens: 160, completion_tokens: 22 } } },
+        ], adopted: ["找到一份数学笔记"], sends: [{ status: "sent", content: "找到一份数学笔记" }, { status: "partial", content: [{ type: "Plain", text: "还有一个练习题" }], error: "第二段发送未确认" }] },
+        { id: "stream-1", task: "journal.write", scope: "global", created_at: 1800000001, status: "success", sources: [], injected_text: "", calls: [{ id: "http-stream", status: "success", request_body: '{"model":"deepseek-chat","stream":true,"messages":[]}', response_body: window.rawFixture.sse, response_type: "sse", reading: { text: "晚风很舒服" } }], adopted: [], sends: [] },
+        { id: "unavailable-1", task: "chat.turn", scope: "qq:FriendMessage:99", status: "skipped", error: "绑定人格不匹配，未进入模型阶段", sources: [], injected_text: "", calls: [], adopted: [], sends: [] },
+        { id: "debug-1", task: "life.plan_day", scope: "global", status: "success", legacy: true, sources: [{ title: "旧版日程请求", source: "宿主请求快照，非 API 原文", content: "旧版保存的提示词资料" }], injected_text: "", calls: [], adopted: [{ activities: [activities[0]] }], sends: [] },
+      ];
+      Object.assign(window.fixture.session_status[0], { platform_name: "aiocqhttp", bound_persona: "student", persona_source: "host_default", reason_code: "allowed" });
       window.AstrBotPluginPage = {
         ready: async () => ({ isDark: false }),
         apiGet: async (endpoint) => { window.calls.push({ endpoint, method: "GET" }); return structuredClone(endpoint === "export" ? { version: 1, settings: window.fixture.settings } : window.fixture); },
@@ -50,6 +85,9 @@ const browserPath = process.env.LIVING_WORLD_BROWSER || ["C:/Program Files (x86)
           window.calls.push({ endpoint, method: "POST", body: structuredClone(body) });
           if (window.failNext) { window.failNext = false; throw new Error("测试来源暂时不可用"); }
           if (endpoint === "settings") window.fixture.settings = structuredClone(body);
+          if (body.action === "inspect_session") return window.inspectError
+            ? { umo: body.scope, actual_scope: body.scope, history_status: "error", reason: "测试历史服务不可用", allowed: false }
+            : structuredClone(window.fixture.session_status.find((row) => row.umo === body.scope));
           if (body.action === "debug_build") return { request: structuredClone(window.fixture.debug_records[0].request) };
           if (body.action === "debug_test") return { status: "success", text: "测试回复", test_only: true, notice: "No business side effects" };
           return { status: "success", action: body.action };
@@ -66,6 +104,33 @@ const browserPath = process.env.LIVING_WORLD_BROWSER || ["C:/Program Files (x86)
     if (process.env.LIVING_WORLD_UI_SCREENSHOT) await page.screenshot({ path: process.env.LIVING_WORLD_UI_SCREENSHOT, fullPage: true });
     await page.locator('a[data-view="whitelist"]').click();
     assert.equal(await page.locator('.whitelist-entry').count(), 2);
+    await page.getByText("已找到历史：2 条", { exact: true }).waitFor();
+    await page.getByText("首次对话／暂无历史", { exact: true }).waitFor();
+    await page.getByText("配置允许接入", { exact: true }).first().waitFor();
+    await page.getByText("尚未观察到实际聊天接入；配置检查通过不代表已经注入上下文。", { exact: true }).first().waitFor();
+    assert.ok((await page.locator('.whitelist-entry').first().innerText()).includes("人格来源：AstrBot 默认设置"));
+    const firstTarget = page.locator('.whitelist-entry').first();
+    await firstTarget.getByRole("button", { name: "检查会话与历史", exact: true }).click();
+    await page.getByText("会话检查完成；没有调用模型或发送消息", { exact: true }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.calls.filter((call) => call.method === "POST").map((call) => call.body.action)), ["inspect_session"]);
+    await page.evaluate(() => { window.inspectError = true; });
+    await firstTarget.getByRole("button", { name: "检查会话与历史", exact: true }).click();
+    await firstTarget.getByText("历史读取失败", { exact: true }).waitFor();
+    await page.evaluate(() => { window.inspectError = false; });
+    await firstTarget.getByRole("button", { name: "检查会话与历史", exact: true }).click();
+    await firstTarget.getByText("已找到历史：2 条", { exact: true }).waitFor();
+    await page.evaluate(() => {
+      const actual = { turn_id: "round-1", status: "injected", at: Date.now() / 1000, reason: "Living World 上下文已交给宿主 Agent" };
+      window.fixture.session_status[0].context_status = { last_attempt: actual, last_injected: actual };
+    });
+    await firstTarget.getByRole("button", { name: "检查会话与历史", exact: true }).click();
+    await firstTarget.getByText("最近实际注入：", { exact: false }).waitFor();
+    await firstTarget.getByRole("link", { name: "查看这轮接入记录", exact: true }).click();
+    await page.locator('a[data-view="debug"][aria-current="page"]').waitFor();
+    assert.equal(await page.locator('.debug-round[data-turn="round-1"]').getAttribute("open"), "");
+    await page.locator('a[data-view="whitelist"]').click();
+    await firstTarget.getByText("最近实际注入：", { exact: false }).waitFor();
+    if (process.env.LIVING_WORLD_WHITELIST_SCREENSHOT) await page.screenshot({ path: process.env.LIVING_WORLD_WHITELIST_SCREENSHOT, fullPage: true });
     await page.getByRole("button", { name: "添加聊天对象", exact: true }).click();
     const added = page.locator('.whitelist-entry').last();
     await added.locator('[name="connection"]').selectOption("qq");
@@ -92,6 +157,9 @@ const browserPath = process.env.LIVING_WORLD_BROWSER || ["C:/Program Files (x86)
     assert.equal(settings.character.location, "海边小城"); assert.equal(settings.character.sleep_state, "清醒");
     assert.equal(settings.retained_unknown.keep, true); assert.equal(settings.life.retained_nested, true);
     await page.locator('a[data-view="schedule"]').click();
+    await page.getByText("生成输入快照（非 API 原文）", { exact: true }).waitFor();
+    await page.getByText("模型生成的日程文本", { exact: true }).waitFor();
+    assert.equal(await page.getByText("完整生成请求", { exact: true }).count(), 0);
     for (const [name, value] of [["daily_plan_time", "06:00"], ["activity_count", "10"], ["news_count", "2"], ["search_count", "2"], ["social_count", "3"]]) assert.equal(await page.locator(`[name="life.${name}"]`).inputValue(), value);
     assert.equal(await page.locator('[name="life.activity_count"]').getAttribute("max"), "48");
     await page.getByRole("button", { name: "保存日程生成参数", exact: true }).click();
@@ -143,6 +211,78 @@ const browserPath = process.env.LIVING_WORLD_BROWSER || ["C:/Program Files (x86)
     await page.getByText("测试来源暂时不可用", { exact: true }).waitFor();
     assert.equal(await page.getByRole("button", { name: "观看指定视频并保存", exact: true }).isEnabled(), true);
     await page.locator('a[data-view="debug"]').click();
+    const round = page.locator('.debug-round[data-turn="round-1"]');
+    assert.equal(await page.locator('.debug-round').count(), 4);
+    assert.equal(await round.getAttribute("open"), "");
+    assert.equal(await round.getByRole("tab").count(), 4);
+    assert.ok((await round.innerText()).includes("Living World 今日日程 · 本次私聊"));
+    assert.ok((await round.innerText()).includes("插件实际加入的完整文本"));
+    assert.equal(await page.evaluate(() => window.debugXss), undefined);
+    assert.equal(await round.locator("img").count(), 0);
+    assert.ok(!(await round.innerText()).includes("个步骤"));
+    assert.equal(await page.locator('#navigation a').nth(1).getAttribute("data-view"), "settings");
+    assert.ok((await page.locator('#navigation a').nth(1).innerText()).startsWith("02"));
+    const downloadedText = async (trigger) => {
+      const downloadPromise = page.waitForEvent("download");
+      await trigger(); const download = await downloadPromise;
+      const chunks = []; for await (const chunk of await download.createReadStream()) chunks.push(chunk);
+      return { text: Buffer.concat(chunks).toString("utf8"), filename: download.suggestedFilename() };
+    };
+    await round.getByRole("tab", { name: "② API 原始请求", exact: true }).click();
+    assert.equal(await round.locator(".debug-raw").textContent(), await page.evaluate(() => window.rawFixture.firstRequest));
+    const firstDownload = await downloadedText(() => round.getByRole("button", { name: "下载请求原文", exact: true }).click());
+    assert.equal(firstDownload.text, await page.evaluate(() => window.rawFixture.firstRequest));
+    assert.ok(firstDownload.filename.endsWith("-request.json"));
+    await round.getByRole("button", { name: "复制请求原文", exact: true }).click();
+    await page.locator("#editor[open]").waitFor();
+    assert.equal(await page.locator('#editor [name="copy"]').inputValue(), firstDownload.text);
+    await page.locator("#editor-cancel").click();
+    await round.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
+    assert.equal(await round.locator(".debug-raw").textContent(), await page.evaluate(() => window.rawFixture.firstResponse));
+    const responseDownload = await downloadedText(() => round.getByRole("button", { name: "下载返回原文", exact: true }).click());
+    assert.equal(responseDownload.text, await page.evaluate(() => window.rawFixture.firstResponse));
+    assert.ok(responseDownload.text.includes("不得丢弃这个未知字段"));
+    await round.getByRole("tab", { name: "④ 回复阅读版", exact: true }).click();
+    await round.getByRole("heading", { name: "模型请求调用的工具", exact: true }).waitFor();
+    await round.locator('[name="debug_call"]').selectOption("1");
+    await round.getByRole("heading", { name: "回复正文", exact: true }).waitFor();
+    await round.getByRole("heading", { name: "接口返回的推理内容", exact: true }).waitFor();
+    await round.getByRole("heading", { name: "实际聊天发送", exact: true }).waitFor();
+    assert.ok((await round.innerText()).includes("第二段发送未确认"));
+    await round.getByRole("tab", { name: "② API 原始请求", exact: true }).click();
+    assert.equal(await round.locator(".debug-raw").textContent(), await page.evaluate(() => window.rawFixture.secondRequest));
+    await round.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
+    assert.equal(await round.locator(".debug-raw").textContent(), await page.evaluate(() => window.rawFixture.secondResponse));
+    await round.getByRole("tab", { name: "① 上下文与信息来源", exact: true }).click();
+    if (process.env.LIVING_WORLD_DEBUG_SCREENSHOT) await page.screenshot({ path: process.env.LIVING_WORLD_DEBUG_SCREENSHOT, fullPage: true });
+    const stream = page.locator('.debug-round[data-turn="stream-1"]');
+    await stream.locator(':scope > summary').click();
+    await stream.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
+    const streamDownload = await downloadedText(() => stream.getByRole("button", { name: "下载返回原文", exact: true }).click());
+    assert.equal(streamDownload.text, await page.evaluate(() => window.rawFixture.sse));
+    assert.ok(streamDownload.filename.endsWith(".sse"));
+    await stream.getByRole("tab", { name: "④ 回复阅读版", exact: true }).click();
+    await stream.getByText("晚风很舒服", { exact: true }).waitFor();
+    assert.ok((await stream.innerText()).includes("合并后的阅读内容"));
+    const missing = page.locator('.debug-round[data-turn="unavailable-1"]');
+    await missing.locator(':scope > summary').click();
+    await missing.getByRole("tab", { name: "② API 原始请求", exact: true }).click();
+    await missing.getByRole("heading", { name: "没有捕获 API 原始请求", exact: true }).waitFor();
+    assert.equal(await missing.getByRole("button", { name: "下载请求原文", exact: true }).count(), 0);
+    const legacy = page.locator('.debug-round[data-turn="debug-1"]');
+    await legacy.locator(':scope > summary').click();
+    assert.ok((await legacy.innerText()).includes("旧版快照，非 API 原文"));
+    await legacy.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
+    assert.equal(await legacy.locator(".debug-raw").count(), 0);
+    await legacy.getByRole("tab", { name: "④ 回复阅读版", exact: true }).click();
+    assert.equal(await legacy.locator(".debug-activity").count(), 1, "Structured activities have a readable timeline");
+    await page.locator('[name="category"]').selectOption("reply.tool");
+    assert.equal(await page.locator('.debug-round').count(), 1, "Filtering a tool keeps its whole conversation round");
+    assert.equal(await page.locator('.debug-round [name="debug_call"] option').count(), 2);
+    await page.locator('[name="category"]').selectOption("");
+    await round.locator('[name="debug_call"]').selectOption("0");
+    await round.getByRole("button", { name: "复制到试跑编辑器", exact: true }).click();
+    assert.equal(JSON.parse(await page.locator('[name="request_json"]').inputValue()).parameters.temperature, 0.7, "Provider parameters survive copying to the test editor");
     assert.equal(await page.locator('[name="debug.retain_per_category"]').inputValue(), "10");
     await page.getByRole("button", { name: "从当前配置建立测试请求", exact: true }).click();
     await page.getByText("已建立测试请求；尚未调用模型", { exact: true }).waitFor();
@@ -167,7 +307,88 @@ const browserPath = process.env.LIVING_WORLD_BROWSER || ["C:/Program Files (x86)
     await page.getByText("操作已完成，请查看执行结果", { exact: true }).waitFor();
     const saved = await page.evaluate(() => window.calls.findLast((call) => call.body?.action === "save_template").body);
     assert.equal(saved.template, "Changed public instruction only"); assert.ok(!JSON.stringify(saved).includes("Edited private test context"));
-    assert.ok(await page.getByRole("button", { name: "下载 JSON", exact: true }).count() >= 1);
+    assert.equal(await page.getByRole("tablist", { name: "调用记录四项视图", exact: true, includeHidden: true }).count(), 4);
+    await page.evaluate(() => { window.savedViews = window.fixture.debug_views; delete window.fixture.debug_views; });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    await page.getByText("数据已刷新", { exact: true }).waitFor();
+    const legacyChat = page.locator('.debug-round[data-turn="round-1"]');
+    if (await legacyChat.getAttribute("open") === null) await legacyChat.locator(':scope > summary').click();
+    assert.ok((await legacyChat.innerText()).includes("旧版快照，非 API 原文"));
+    await legacyChat.getByRole("tab", { name: "② API 原始请求", exact: true }).click();
+    assert.equal(await legacyChat.getByRole("button", { name: "下载请求原文", exact: true }).count(), 0, "Legacy Provider arguments never become a fabricated HTTP body");
+    await legacyChat.getByRole("tab", { name: "④ 回复阅读版", exact: true }).click();
+    assert.ok((await legacyChat.innerText()).includes("找到一份数学笔记"));
+    await page.evaluate(() => { window.fixture.debug_views = window.savedViews; });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    await page.getByText("数据已刷新", { exact: true }).waitFor();
+    for (const testCase of backendContract.format_cases) {
+      const { expected, ...draft } = testCase;
+      await page.locator('[name="request_json"]').fill(JSON.stringify(draft));
+      await page.locator('[name="request_mode"]').selectOption("raw");
+      assert.equal(JSON.parse(await page.locator('[name="request_json"]').inputValue()).prompt, expected, "Structured-to-raw text exactly matches Runtime.format_task_context");
+    }
+    await page.evaluate((contract) => {
+      window.regularDebugFixture = { views: window.fixture.debug_views, records: window.fixture.debug_records };
+      window.fixture.debug_views = contract.views; window.fixture.debug_records = contract.records;
+    }, backendContract);
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    await page.getByText("数据已刷新", { exact: true }).waitFor();
+    const contractChat = page.locator('.debug-round[data-turn="contract-chat"]');
+    assert.equal(await page.locator('.debug-round').count(), 4);
+    await contractChat.getByText("契约来源清单", { exact: true }).waitFor();
+    await contractChat.getByText("角色补充资料：喜欢观察星空。", { exact: true }).waitFor();
+    await contractChat.getByRole("tab", { name: "④ 回复阅读版", exact: true }).click();
+    await contractChat.getByText("契约测试的真实阅读正文", { exact: true }).waitFor();
+    await contractChat.getByRole("heading", { name: "工具实际返回", exact: true }).waitFor();
+    await contractChat.getByText("工具真实契约返回资料", { exact: true }).waitFor();
+    await contractChat.getByRole("heading", { name: "AstrBot 采用的回复", exact: true }).waitFor();
+    await contractChat.getByText("宿主最终采用的契约回复", { exact: true }).waitFor();
+    await contractChat.getByText("实际发送的契约正文", { exact: true }).waitFor();
+    await contractChat.getByText("fixture-image.png", { exact: true }).waitFor();
+    await contractChat.getByRole("tab", { name: "② API 原始请求", exact: true }).click();
+    assert.equal(await contractChat.locator(".debug-raw").textContent(), backendContract.views[0].calls[0].request_body);
+    await contractChat.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
+    assert.equal(await contractChat.locator(".debug-raw").textContent(), backendContract.views[0].calls[0].response_body);
+    await contractChat.getByRole("tab", { name: "④ 回复阅读版", exact: true }).click();
+    if (process.env.LIVING_WORLD_BACKEND_DEBUG_SCREENSHOT) await page.screenshot({ path: process.env.LIVING_WORLD_BACKEND_DEBUG_SCREENSHOT, fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const label of ["① 上下文与信息来源", "② API 原始请求", "③ API 原始返回", "④ 回复阅读版"]) {
+      await contractChat.getByRole("tab", { name: label, exact: true }).click();
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, `Backend contract stays within mobile width: ${label}`);
+    }
+    if (process.env.LIVING_WORLD_BACKEND_DEBUG_MOBILE_SCREENSHOT) await page.screenshot({ path: process.env.LIVING_WORLD_BACKEND_DEBUG_MOBILE_SCREENSHOT, fullPage: true });
+    await page.setViewportSize({ width: 1600, height: 1050 });
+    const contractPlan = page.locator('.debug-round[data-turn="contract-plan"]');
+    await contractPlan.locator(':scope > summary').click();
+    await contractPlan.getByRole("tab", { name: "④ 回复阅读版", exact: true }).click();
+    await contractPlan.getByRole("heading", { name: "正式日程采用结果", exact: true }).waitFor();
+    await contractPlan.getByRole("heading", { name: "正式采用的数学课", exact: true }).waitFor();
+    const contractUnsupported = page.locator('.debug-round[data-turn="contract-unsupported"]');
+    await contractUnsupported.locator(':scope > summary').click();
+    await contractUnsupported.getByRole("tab", { name: "② API 原始请求", exact: true }).click();
+    await contractUnsupported.getByText("当前提供商的 HTTP 原文捕获尚未适配", { exact: true }).waitFor();
+    assert.equal(await contractUnsupported.getByRole("button", { name: "下载请求原文", exact: true }).count(), 0);
+    const contractLegacy = page.locator('.debug-round[data-turn="contract-legacy"]');
+    await contractLegacy.locator(':scope > summary').click();
+    await contractLegacy.getByText("旧版输入快照（非 API 原文）", { exact: true }).waitFor();
+    await contractLegacy.getByRole("tab", { name: "④ 回复阅读版", exact: true }).click();
+    await contractLegacy.getByText("旧版 reply 字段的返回正文", { exact: true }).waitFor();
+    await page.evaluate(() => {
+      window.fixture.life_days[0].full_request._debug_record_id = "contract-plan";
+    });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    await page.getByText("数据已刷新", { exact: true }).waitFor();
+    await page.locator('a[data-view="schedule"]').click();
+    await page.getByLabel("日程日期").fill(await page.evaluate(() => window.fixture.life_days[0].date));
+    await page.getByRole("link", { name: "查看这次调用的 API 原文", exact: true }).click();
+    assert.equal(await contractPlan.getAttribute("open"), "", "Formal day links directly to its generating model record");
+    await page.evaluate(() => {
+      window.fixture.debug_views = window.regularDebugFixture.views; window.fixture.debug_records = window.regularDebugFixture.records;
+      delete window.fixture.life_days[0].full_request._debug_record_id;
+      location.hash = "debug";
+    });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    await page.getByText("数据已刷新", { exact: true }).waitFor();
     await page.locator('a[data-view="data"]').click();
     await page.getByRole("button", { name: "恢复所选备份", exact: true }).click();
     await page.getByText("请先选择有效的 JSON 备份文件。", { exact: true }).waitFor();
@@ -178,10 +399,18 @@ const browserPath = process.env.LIVING_WORLD_BROWSER || ["C:/Program Files (x86)
       await page.evaluate((target) => { location.hash = target; }, view);
       await page.locator(`a[data-view="${view}"][aria-current="page"]`).waitFor();
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, `No mobile horizontal overflow: ${view}`);
+      if (view === "debug") {
+        const mobileRound = page.locator('.debug-round[data-turn="round-1"]');
+        for (const label of ["② API 原始请求", "③ API 原始返回", "④ 回复阅读版", "① 上下文与信息来源"]) {
+          await mobileRound.getByRole("tab", { name: label, exact: true }).click();
+          assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, `No mobile tab overflow: ${label}`);
+        }
+        if (process.env.LIVING_WORLD_DEBUG_MOBILE_SCREENSHOT) await page.screenshot({ path: process.env.LIVING_WORLD_DEBUG_MOBILE_SCREENSHOT, fullPage: true });
+      }
     }
     await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; location.hash = "overview"; });
     await page.locator('a[data-view="overview"][aria-current="page"]').waitFor();
     assert.deepEqual(errors, [], "No browser runtime errors");
-    process.stdout.write("UI smoke passed: state home, schedule quotas/archive/editor, whitelist UMO, fixed sources, independent digests, full debug JSON, test/template separation, XSS, memory scopes, error feedback, import guard, responsive layout.\n");
+    process.stdout.write("UI smoke passed: state home, schedule quotas/archive/editor, whitelist UMO, fixed sources, independent digests, four debug views, exact JSON/SSE body downloads, paired calls, old snapshot labels, test/template separation, XSS, memory scopes, error feedback, import guard, responsive layout.\n");
   } finally { await browser.close(); }
 })().catch((error) => { process.stderr.write(`${error.stack}\n`); process.exitCode = 1; });

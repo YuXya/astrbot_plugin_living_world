@@ -2,13 +2,16 @@
 
 import dataclasses
 import enum
+import functools
+import logging
 import math
 import time
 import uuid
 
+from .debug_views import build_views, record_groups
 from .prompts import PROMPTS
 
-BOUNDARY = "Living World → AstrBot 模型调用参数；不包含提供商 SDK 最终 HTTP 请求"
+BOUNDARY = "任务输入快照；API 原文以实际捕获的 HTTP 正文为准"
 DEFAULT_TEMPLATES = PROMPTS
 SECRET_FIELDS = {
     "api_key",
@@ -22,6 +25,22 @@ SECRET_FIELDS = {
     "refresh_token",
     "client_secret",
 }
+
+logger = logging.getLogger(__name__)
+
+
+def diagnostic_write(method):
+    """A debug-only storage failure must not interrupt a business operation."""
+
+    @functools.wraps(method)
+    def guarded(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except Exception:
+            logger.warning("Debug record write failed: %s", method.__name__, exc_info=True)
+            return None
+
+    return guarded
 
 
 def json_value(value):
@@ -41,11 +60,25 @@ def json_value(value):
         return [json_value(v) for v in value]
     if hasattr(value, "model_dump"):
         return json_value(value.model_dump())
+    # AstrBot message components still use Pydantic v1 on Python 3.12.
+    if hasattr(value, "dict") and callable(value.dict):
+        return json_value(value.dict())
+    if hasattr(value, "openai_schema"):
+        return json_value(value.openai_schema())
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return json_value({f.name: getattr(value, f.name) for f in dataclasses.fields(value)})
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return {"type": type(value).__name__, "captured": False}
+
+
+def response_value(response):
+    """Expose computed completion text as well as the provider's original response."""
+    value = json_value(response)
+    if isinstance(value, dict) and hasattr(response, "completion_text"):
+        value["completion_text"] = response.completion_text
+        value.pop("_completion_text", None)
+    return value
 
 
 class DebugService:
@@ -58,11 +91,24 @@ class DebugService:
                 runtime.store.put("debug_records", row["id"], row)
         self.trim()
 
-    def begin(self, task, request, *, module="", scope="global", kind="model", boundary=BOUNDARY):
+    @diagnostic_write
+    def begin(
+        self,
+        task,
+        request,
+        *,
+        module="",
+        scope="global",
+        kind="model",
+        boundary=BOUNDARY,
+        turn_id="",
+        parent_id="",
+    ):
         if not self.runtime.enabled("debug"):
             return None
         record = {
             "id": uuid.uuid4().hex,
+            "capture_version": 2,
             "task": task,
             "category": task,
             "module": module,
@@ -72,18 +118,24 @@ class DebugService:
             "created_at": time.time(),
             "request": json_value(request),
             "status": "running",
+            "turn_id": turn_id,
+            "parent_id": parent_id,
         }
         self.runtime.store.put("debug_records", record["id"], record)
         self.trim()
         return record
 
+    @diagnostic_write
     def finish(self, record, response=None, *, status="success", error=""):
-        if not record or not self.runtime.store.get("debug_records", record["id"]):
+        if (
+            not self.runtime.enabled("debug")
+            or not record
+            or not self.runtime.store.get("debug_records", record["id"])
+        ):
             return
         record = {
-            **record,
+            **self.runtime.store.get("debug_records", record["id"], record),
             "response": json_value(response),
-            "reply": json_value(response),
             "status": status,
             "error": str(error),
             "finished_at": time.time(),
@@ -94,28 +146,45 @@ class DebugService:
     def trim(self):
         limit = int(self.runtime.settings["debug"]["retain_per_category"])
         counts = {}
-        records = sorted(
-            self.runtime.store.list("debug_records"),
-            key=lambda r: r.get("created_at", 0),
+        groups = sorted(
+            record_groups(self.runtime.store.list("debug_records")).values(),
+            key=lambda rows: rows[0].get("created_at", 0),
             reverse=True,
         )
-        for row in records:
-            category = row.get("category", "unknown")
+        for rows in groups:
+            root = rows[0]
+            category = (
+                "__chat_turn__"
+                if any(r.get("turn_id") for r in rows)
+                else root.get("category", "unknown")
+            )
             counts[category] = counts.get(category, 0) + 1
             if counts[category] > limit:
-                self.runtime.store.delete("debug_records", row["id"])
+                for row in rows:
+                    self.runtime.store.delete("debug_records", row["id"])
 
     def clear(self, category=None):
         count = 0
-        for row in self.runtime.store.list("debug_records"):
-            if category is None or row.get("category") == category:
-                self.runtime.store.delete("debug_records", row["id"])
-                count += 1
+        records = self.runtime.store.list("debug_records")
+        for rows in record_groups(records).values():
+            if category is None or any(row.get("category") == category for row in rows):
+                for row in rows:
+                    self.runtime.store.delete("debug_records", row["id"])
+                    count += 1
         return {
             "status": "success",
             "deleted": count,
             "text": "仅清理调试记录；日程、记忆与执行防重记录保留",
         }
+
+    @diagnostic_write
+    def patch(self, record, **changes):
+        if not self.runtime.enabled("debug") or not record:
+            return
+        current = self.runtime.store.get("debug_records", record["id"])
+        if current:
+            current.update(json_value(changes))
+            self.runtime.store.put("debug_records", current["id"], current)
 
     def template(self, task, default):
         self.defaults[task] = default
@@ -159,3 +228,25 @@ class DebugService:
             ],
             "boundary": BOUNDARY,
         }
+
+    def views(self):
+        return build_views(
+            self.runtime.store.list("debug_records"), self.runtime.store.list("life_days")
+        )
+
+    def export_body(self, call_id, side):
+        if side not in {"request", "response"}:
+            raise ValueError("请选择请求或返回")
+        for view in self.views():
+            for call in view["calls"]:
+                if call["id"] == call_id:
+                    body = call.get(side + "_body")
+                    if body is None:
+                        raise ValueError("未捕获原始正文，不能以快照代替")
+                    kind = "json" if side == "request" else call.get("response_type", "text")
+                    return {
+                        "body": body,
+                        "filename": f"living-world-{call_id}-{side}.{kind}",
+                        "format": kind,
+                    }
+        raise ValueError("调用记录不存在或已被清理")

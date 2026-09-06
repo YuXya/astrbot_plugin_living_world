@@ -119,11 +119,12 @@ class SocialService:
             return "module_disabled"
         if not any(row["destination"] == destination(scope) for row in self._sessions()):
             return "not_whitelisted"
-        if ":GroupMessage:" in scope:
-            if not self.runtime.host.group_history_enabled(scope):
-                return "group_history_disabled"
-            if interjection and self.runtime.host.host_interjection_enabled(scope):
-                return "host_interjection_enabled"
+        if (
+            ":GroupMessage:" in scope
+            and interjection
+            and self.runtime.host.host_interjection_enabled(scope)
+        ):
+            return "host_interjection_enabled"
         now = self._now()
         if self._quiet(now):
             return "quiet_hours"
@@ -221,7 +222,11 @@ class SocialService:
                 record["reason"] = blocked
                 self.runtime.store.put("deliveries", key, record)
                 return record
-            history = await self.runtime.host.history(scope)
+            history = (
+                (await self.runtime.chat.history(scope, initialize=True))["text"]
+                if hasattr(self.runtime, "chat")
+                else await self.runtime.host.history(scope)
+            )
             context = await self.runtime.context_text(
                 scope, person_id=person_id or self._person_id(scope), query=reason
             )
@@ -420,7 +425,11 @@ class SocialService:
                 ):
                     return self._result(reason="event_already_considered")
                 self.runtime.store.put("social_interjections", target, decision)
-                history = await self.runtime.host.history(scope)
+                history = (
+                    (await self.runtime.chat.history(scope, initialize=True))["text"]
+                    if hasattr(self.runtime, "chat")
+                    else await self.runtime.host.history(scope)
+                )
                 context = await self.runtime.context_text(scope, person_id=person_id, query=message)
                 blocked = await self._control_reason(scope, True)
                 if blocked:

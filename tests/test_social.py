@@ -359,12 +359,8 @@ class SocialTests(unittest.IsolatedAsyncioTestCase):
             (await self.social.interject(GROUP, "几何作业", event_id="one"))["status"], "success"
         )
 
-    async def test_interjection_requires_group_history_and_real_boolean(self):
+    async def test_interjection_accepts_disabled_host_history_and_requires_real_boolean(self):
         self.runtime.host.group_history_on = False
-        result = await self.social.interject(GROUP, "hello")
-        self.assertEqual(result["reason"], "group_history_disabled")
-        self.assertEqual(self.runtime.model_calls, [])
-        self.runtime.host.group_history_on = True
         self.runtime.decision = {"should_reply": "true"}
         result = await self.social.interject(GROUP, "hello")
         self.assertEqual(result["reason"], "no_relevant_contribution")

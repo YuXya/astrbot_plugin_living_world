@@ -65,7 +65,7 @@ async def test_unmanaged_reply_keeps_other_tools_and_does_not_inject(plugin_modu
     from astrbot.core.agent.tool import FunctionTool, ToolSet
 
     plugin = plugin_module.Main(SimpleNamespace())
-    plugin.runtime = SimpleNamespace(scope_allowed=AsyncMock(return_value=False))
+    plugin.runtime = SimpleNamespace(scope_status=AsyncMock(return_value={"allowed": False}))
     schema = {"type": "object", "properties": {}}
     owned = FunctionTool(name="living_world_social", description="social", parameters=schema)
     unrelated = FunctionTool(name="unrelated", description="other", parameters=schema)
@@ -77,22 +77,28 @@ async def test_unmanaged_reply_keeps_other_tools_and_does_not_inject(plugin_modu
     assert len(original.tools) == 2
 
 
-async def test_observe_tracks_real_group_scope_with_interjection_off(plugin_module):
-    from unittest.mock import Mock
+async def test_observe_tracks_real_group_scope_with_interjection_off(plugin_module, tmp_path):
+    from test_chat import Event
+    from test_runtime import FakeHost
 
+    from living_world.runtime import Runtime
+
+    host = FakeHost()
+    host.session_persona = AsyncMock(return_value="student")
+    runtime = Runtime(tmp_path / "chat.sqlite", host)
+    await runtime.update_settings(
+        {"persona_id": "student", "sessions": [{"umo": "qq:GroupMessage:100"}]}
+    )
     plugin = plugin_module.Main(SimpleNamespace())
-    runtime = SimpleNamespace(
-        scope_allowed=AsyncMock(return_value=True), enabled=lambda _: False, note_scope=Mock()
-    )
     plugin.runtime = runtime
-    event = SimpleNamespace(
-        get_group_id=lambda: "100",
-        unified_msg_origin="qq:GroupMessage:42_100",
-        get_sender_id=lambda: "42",
-        get_self_id=lambda: "bot",
-    )
-    await plugin.observe(event)
-    runtime.note_scope.assert_called_once_with("qq:GroupMessage:42_100")
+    event = Event("qq:GroupMessage:42_100", "群里讨论数学")
+    try:
+        await plugin.observe(event)
+        assert runtime.chat.resolve("qq:GroupMessage:100") == event.unified_msg_origin
+        assert "群里讨论数学" in (await runtime.chat.history(event.unified_msg_origin))["text"]
+        assert not runtime.enabled("interjection") and not host.sent
+    finally:
+        await runtime.stop()
 
 
 async def test_late_host_response_does_not_access_closed_store(plugin_module):

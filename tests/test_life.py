@@ -769,7 +769,8 @@ async def test_previous_private_commitment_refines_existing_slots_once_per_day()
 
 
 @pytest.mark.asyncio
-async def test_scoped_daily_revision_failure_has_persistent_retry_cooldown():
+async def test_scoped_daily_revision_failure_has_persistent_retry_cooldown(monkeypatch):
+    monkeypatch.setattr("living_world.life.monotonic", lambda: 0.0)
     runtime = Runtime()
     service, rows = await publish(runtime)
     for row in rows:

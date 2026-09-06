@@ -33,6 +33,7 @@ class Main(Star):
         self.runtime = Runtime(
             StarTools.get_data_dir(PLUGIN) / "living_world.sqlite3", AstrBotHost(self.context)
         )
+        self.runtime.chat.install()
         for route, method in (
             ("state", "GET"),
             ("settings", "POST"),
@@ -87,16 +88,13 @@ class Main(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def observe(self, event: AstrMessageEvent):
-        """Consider group interjections without waking the host model."""
+        """Observe selected private and group conversations without forcing a reply."""
         runtime = self.runtime
-        if not runtime or not event.get_group_id():
+        if not runtime or runtime.stopped:
             return
-        if event.get_sender_id() == event.get_self_id():
+        allowed = await runtime.chat.observe(event)
+        if not allowed or not event.get_group_id():
             return
-        scope = event.unified_msg_origin
-        if not await runtime.scope_allowed(scope):
-            return
-        runtime.note_scope(scope)
         if not runtime.enabled("interjection") or event.is_at_or_wake_command:
             return
 
@@ -108,7 +106,7 @@ class Main(Star):
                 and not event._has_send_oper
             ):
                 await runtime.social.interject(
-                    scope,
+                    event.unified_msg_origin,
                     event.message_str,
                     person_id="qq:" + event.get_sender_id(),
                     event_id=str(event.message_obj.message_id),
@@ -120,7 +118,28 @@ class Main(Star):
     async def augment(self, event: AstrMessageEvent, req: ProviderRequest):
         """Supply only records visible in the current conversation."""
         runtime = self.runtime
-        allowed = bool(runtime and await runtime.scope_allowed(event.unified_msg_origin))
+        allowed = False
+        if runtime and not getattr(runtime, "stopped", False):
+            if hasattr(runtime, "chat") and runtime.chat.configured(event.unified_msg_origin):
+                runtime.chat.ensure_trace(event)
+            try:
+                route = await runtime.scope_status(event.unified_msg_origin)
+                allowed = route["allowed"]
+                if hasattr(runtime, "chat"):
+                    trace = event.get_extra("living_world_trace")
+                    if trace:
+                        runtime.chat.record(
+                            trace, "chat.route", route, status="success" if allowed else "skipped"
+                        )
+                        if not allowed:
+                            runtime.chat.note_context(trace, "skipped", route["reason"])
+            except Exception as exc:  # noqa: BLE001 - Unavailable routing leaves the host request intact.
+                if hasattr(runtime, "chat"):
+                    trace = event.get_extra("living_world_trace")
+                    if trace:
+                        runtime.chat.record(
+                            trace, "chat.route", {"error": str(exc)}, status="failed"
+                        )
         if req.func_tool:
             req.func_tool = type(req.func_tool)(list(req.func_tool.tools))
             for name, module in TOOL_MODULES.items():
@@ -137,67 +156,45 @@ class Main(Star):
                 ):
                     req.func_tool.remove_tool(name)
         if not allowed:
+            if runtime and hasattr(runtime, "chat"):
+                trace = event.get_extra("living_world_trace")
+                if trace:
+                    runtime.chat.record(
+                        trace,
+                        "chat.route",
+                        {"reason": "未通过会话接入检查；具体原因见本轮 chat.route"},
+                        status="skipped",
+                    )
             return
         runtime.note_scope(event.unified_msg_origin)
-        event.set_extra("living_world_reply", True)
-        if runtime.enabled("reply"):
-            context = await runtime.context_text(
-                event.unified_msg_origin, "qq:" + event.get_sender_id(), event.message_str
-            )
-            character = runtime.settings["character"]
-            req.system_prompt += (
-                "\nLiving World 角色补充资料："
-                + character["profile"]
-                + "\n世界设定："
-                + character["world"]
-                + "\n当前场合可用资料（fiction 为角色虚构经历，计划不代表已发生）：\n"
-                + context
-            )
-        if runtime.enabled("debug"):
-            captured = {
-                key: json_value(getattr(req, key, None))
-                for key in (
-                    "prompt",
-                    "system_prompt",
-                    "contexts",
-                    "image_urls",
-                    "audio_urls",
-                    "extra_user_content_parts",
-                    "session_id",
-                    "model",
-                    "tool_calls_result",
-                )
-            }
-            captured.update(
-                task="reply.request",
-                module="reply",
-                scope=event.unified_msg_origin,
-                persona_id=runtime.settings["persona_id"],
-                parameters={},
-            )
-            captured["tools"] = req.func_tool.openai_schema() if req.func_tool else []
-            if hasattr(runtime.host, "describe_model"):
-                try:
-                    model = captured["model"]
-                    captured.update(await runtime.host.describe_model("", event.unified_msg_origin))
-                    captured["model"] = model or captured["model"]
-                except Exception:  # noqa: BLE001 - Diagnostics must not prevent normal replies.
-                    captured["provider_id"] = "宿主当前提供商未能读取"
-            record = runtime.debug.begin(
-                "reply.request",
-                captured,
-                module="reply",
-                scope=event.unified_msg_origin,
-                boundary="宿主 on_llm_request 经本插件增强时的快照；后续宿主或其他插件仍可修改，不是提供商 HTTP 请求",
-            )
-            event.set_extra("living_world_debug_request", record)
+        await runtime.chat.augment(event, req)
+
+    @filter.on_agent_begin()
+    async def trace_agent_begin(self, event, run_context):
+        if self.runtime:
+            self.runtime.chat.agent_begin(event, run_context)
+
+    @filter.on_agent_done(priority=1000000)
+    async def restore_group_history(self, event, run_context, resp):
+        if self.runtime:
+            self.runtime.chat.restore_history(event, run_context)
+
+    @filter.on_using_llm_tool()
+    async def trace_tool_start(self, event, tool, tool_args):
+        if self.runtime and not self.runtime.stopped:
+            self.runtime.chat.tool_start(event, tool, tool_args)
+
+    @filter.on_llm_tool_respond()
+    async def trace_tool_end(self, event, tool, tool_args, tool_result):
+        if self.runtime and not self.runtime.stopped:
+            self.runtime.chat.tool_end(event, tool, tool_args, tool_result)
 
     @filter.on_llm_response()
     async def remember_reply(self, event: AstrMessageEvent, resp: LLMResponse):
         """Extract facts from the user's words, without storing a second chat log."""
         runtime = self.runtime
-        if runtime and not runtime.stopped and event.get_extra("living_world_debug_request"):
-            runtime.debug.finish(event.get_extra("living_world_debug_request"), json_value(resp))
+        if runtime and not runtime.stopped:
+            runtime.chat.response(event, resp)
         if (
             not runtime
             or not runtime.enabled("memory")
@@ -222,28 +219,29 @@ class Main(Star):
 
     @filter.after_message_sent()
     async def record_reply_sent(self, event: AstrMessageEvent):
-        """Observe host delivery callbacks for conversations augmented by this plugin."""
+        """Record the callback separately; only event.send confirms transport success."""
         runtime = self.runtime
-        if (
-            not runtime
-            or not runtime.enabled("debug")
-            or not (
-                event.get_extra("living_world_reply")
-                or event.get_extra("living_world_owned_message")
+        if not runtime or runtime.stopped:
+            return
+        trace = event.get_extra("living_world_trace")
+        if trace:
+            runtime.chat.record(
+                trace,
+                "reply.sent_callback",
+                {},
+                status="observed",
+                response={"sent": trace["sent"], "failed_or_unknown": trace["failed_sends"]},
+                boundary="宿主发送阶段完成回调，不单独作为发送成功依据",
             )
-        ):
-            return
-        result = event.get_result()
-        if not result:
-            return
-        entry = runtime.debug.begin(
-            "command.send" if event.get_extra("living_world_owned_message") else "reply.send",
-            {"scope": event.unified_msg_origin, "message": json_value(result.chain)},
-            scope=event.unified_msg_origin,
-            kind="message",
-            boundary="宿主 after_message_sent 回调；Living World 命令回复或使用过角色上下文的回复，发送由宿主完成",
-        )
-        runtime.debug.finish(entry, {"callback": "after_message_sent"}, status="sent")
+        elif event.get_extra("living_world_owned_message"):
+            entry = runtime.debug.begin(
+                "command.send",
+                {"message": json_value(event.get_result())},
+                kind="message",
+                scope=event.unified_msg_origin,
+                boundary="宿主命令发送回调，传输详情未捕获",
+            )
+            runtime.debug.finish(entry, status="observed")
 
     @filter.llm_tool(name="living_world_explore")
     async def explore_tool(self, event: AstrMessageEvent, source: str, query: str):

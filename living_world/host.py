@@ -19,18 +19,70 @@ class AstrBotHost:
         return self.context.get_platform_inst(platform_id)
 
     async def session_persona(self, scope):
-        platform = self.platform(scope)
-        if not platform or platform.meta().name != "aiocqhttp":
-            return ""
-        manager = self.context.conversation_manager
-        cid = await manager.get_curr_conversation_id(scope)
-        conversation = await manager.get_conversation(scope, cid) if cid else None
-        selected, _, _, _ = await self.context.persona_manager.resolve_selected_persona(
-            umo=scope,
-            conversation_persona_id=getattr(conversation, "persona_id", None),
-            platform_name=platform.meta().name,
-        )
-        return selected or ""
+        result = await self.resolve_session(scope)
+        return result["persona_id"] if result["reason_code"] == "resolved" else ""
+
+    async def resolve_session(self, scope):
+        """Use the host's persona precedence, including 4.27's provider default."""
+        result = {
+            "platform_id": scope.split(":", 1)[0],
+            "platform_name": "",
+            "platform_available": False,
+            "conversation_id": "",
+            "persona_id": "",
+            "persona_exists": False,
+            "persona_source": "unresolved",
+        }
+
+        def finish(code, reason):
+            return {**result, "reason_code": code, "reason": reason}
+
+        try:
+            platform = self.platform(scope)
+            if platform is None:
+                return finish(
+                    "connection_missing", f"QQ 连接不存在或尚未加载：{result['platform_id']}"
+                )
+            result.update(platform_available=True, platform_name=platform.meta().name)
+            if result["platform_name"] != "aiocqhttp":
+                return finish(
+                    "platform_unsupported", f"平台不支持：{result['platform_name']}，需要 OneBot QQ"
+                )
+            manager = self.context.conversation_manager
+            cid = await manager.get_curr_conversation_id(scope)
+            result["conversation_id"] = cid or ""
+            conversation = await manager.get_conversation(scope, cid) if cid else None
+            conversation_persona = getattr(conversation, "persona_id", None)
+            config = self.context.get_config(scope)
+            (
+                selected,
+                persona,
+                forced,
+                _,
+            ) = await self.context.persona_manager.resolve_selected_persona(
+                umo=scope,
+                conversation_persona_id=conversation_persona,
+                platform_name=result["platform_name"],
+                provider_settings=config.get("provider_settings", {}),
+            )
+            result.update(
+                persona_id=selected or "",
+                persona_exists=persona is not None,
+                persona_source="session_rule"
+                if forced
+                else "conversation"
+                if conversation_persona is not None
+                else "host_default",
+            )
+            if selected == "[%None]":
+                return finish("persona_disabled", "AstrBot 当前会话明确禁用了人格")
+            if not selected:
+                return finish("persona_unconfigured", "AstrBot 当前会话和默认设置均未解析出人格")
+            if persona is None:
+                return finish("persona_missing", f"AstrBot 人格不存在：{selected}")
+            return finish("resolved", "已按 AstrBot 规则解析人格")
+        except Exception as exc:  # noqa: BLE001 - Keep route diagnostics available after host failures.
+            return finish("resolution_error", "连接或人格读取异常：" + str(exc)[:200])
 
     async def generate(self, provider_id, prompt, system, scope):
         text, usage, _ = await self.generate_request(
@@ -49,7 +101,7 @@ class AstrBotHost:
         }
 
     async def generate_request(self, request):
-        from .debug import json_value
+        from .debug import response_value
 
         provider_id = request.get("provider_id") or await self.context.get_current_chat_provider_id(
             request["scope"] if request["scope"] != "global" else ""
@@ -70,7 +122,7 @@ class AstrBotHost:
             usage = usage.model_dump()
         if not isinstance(usage, dict):
             usage = {}
-        return text, {"provider": provider_id, **usage}, json_value(response)
+        return text, {"provider": provider_id, **usage}, response_value(response)
 
     async def search(self, query, scope):
         settings = self.context.get_config(scope if scope != "global" else "").get(
@@ -95,31 +147,73 @@ class AstrBotHost:
         return await self.call_tool(name, {"query": query}, scope, builtin=True)
 
     async def history(self, scope, limit=24):
+        snapshot = await self.history_snapshot(scope, limit)
+        return snapshot["text"]
+
+    async def history_snapshot(self, scope, limit=24):
+        """Read the selected conversation only; never create one for diagnostics."""
+
+        def text_of(content):
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                from .chat import _text
+
+                return _text(content)
+            return ""
+
+        result = {
+            "scope": scope,
+            "conversation_id": "",
+            "count": 0,
+            "status": "empty",
+            "messages": [],
+            "text": "",
+            "source": "AstrBot 当前对话",
+        }
         if ":GroupMessage:" in scope:
             if not self.group_history_enabled(scope):
-                return ""
+                result["source"] = "宿主群历史未开启"
+                return result
             rows = await self.context.message_history_manager.get(
                 scope.split(":", 1)[0], scope, page_size=limit
             )
-            lines = []
+            result["source"] = "AstrBot 群历史"
             for row in rows:
                 content = row.content if isinstance(row.content, dict) else {}
-                parts = content.get("message", [])
-                value = " ".join(str(p.get("text", "")) for p in parts if isinstance(p, dict))
-                lines.append(
-                    f"{row.sender_name or row.sender_id or content.get('type', '')}: {value}"
+                result["messages"].append(
+                    {
+                        "id": str(getattr(row, "id", "")),
+                        "sender_id": str(row.sender_id or ""),
+                        "sender_name": str(row.sender_name or row.sender_id or ""),
+                        "text": text_of(content.get("message", [])),
+                        "time": str(getattr(row, "created_at", "")),
+                        "scope": scope,
+                    }
                 )
-            return "\n".join(lines)[-12000:]
-        manager = self.context.conversation_manager
-        cid = await manager.get_curr_conversation_id(scope)
-        conversation = await manager.get_conversation(scope, cid) if cid else None
-        if not conversation:
-            return ""
-        history = conversation.history
-        history = json.loads(history) if isinstance(history, str) else history
-        return "\n".join(
-            f"{row.get('role', '')}: {row.get('content', '')}" for row in (history or [])[-limit:]
+            result["messages"].sort(key=lambda row: row["time"])
+        else:
+            manager = self.context.conversation_manager
+            cid = await manager.get_curr_conversation_id(scope)
+            conversation = await manager.get_conversation(scope, cid) if cid else None
+            result["conversation_id"] = cid or ""
+            if conversation:
+                history = conversation.history
+                history = json.loads(history) if isinstance(history, str) else history
+                if not isinstance(history, list):
+                    raise TypeError("当前会话历史格式无效")
+                result["messages"] = [
+                    row
+                    for row in history
+                    if isinstance(row, dict) and row.get("role") in {"user", "assistant", "tool"}
+                ][-limit:]
+        result["count"] = len(result["messages"])
+        result["status"] = "found" if result["count"] else "empty"
+        result["text"] = "\n".join(
+            f"{row.get('sender_name') or row.get('role', '')}: {row.get('text') or text_of(row.get('content'))}"
+            for row in result["messages"]
         )[-12000:]
+        return result
 
     def group_history_enabled(self, scope):
         return bool(
@@ -141,6 +235,33 @@ class AstrBotHost:
         from astrbot.api.message_components import Plain
 
         return await self.context.send_message(scope, MessageChain([Plain(text)]))
+
+    async def send_with_history(self, scope, text, persona_id):
+        """Serialize private sends with the host's reply and history-writing lock."""
+        from astrbot.core.utils.session_lock import session_lock_manager
+
+        async with session_lock_manager.acquire_lock(scope):
+            sent = await self.send(scope, text)
+            result = {"accepted": bool(sent), "history_status": "not_sent"}
+            if not sent:
+                return result
+            try:
+                manager = self.context.conversation_manager
+                cid = await manager.get_curr_conversation_id(scope)
+                if not cid:
+                    cid = await manager.new_conversation(scope, persona_id=persona_id)
+                conversation = await manager.get_conversation(scope, cid)
+                history = conversation.history if conversation else []
+                history = json.loads(history) if isinstance(history, str) else history
+                if not isinstance(history, list):
+                    raise TypeError("当前会话历史格式无效")
+                history.append({"role": "assistant", "content": text})
+                await manager.update_conversation(scope, cid, history=history)
+                result.update(history_status="saved", conversation_id=cid)
+            except Exception as exc:  # noqa: BLE001 - A storage error must never cause a resend.
+                # Sending already succeeded. Do not turn a storage failure into a resend.
+                result.update(history_status="failed", history_error=str(exc))
+            return result
 
     def tool(self, name, plugin_name=None):
         manager = self.context.get_llm_tool_manager()

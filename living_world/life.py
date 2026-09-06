@@ -166,6 +166,34 @@ class LifeService:
         ]
         return self._view(matches[-1], scope) if matches else None
 
+    def schedule_context(self, scope: str = "global") -> dict:
+        """Project today's visible schedule without exposing other scopes' overrides."""
+        day = str(self._now().date())
+        fields = (
+            "id",
+            "start",
+            "end",
+            "title",
+            "description",
+            "location",
+            "sleep_state",
+            "status",
+            "kind",
+        )
+        rows = [
+            self._view(row, scope)
+            for row in self.list_activities()
+            if row.get("date") == day and row.get("scope") in {"global", scope}
+        ]
+        return {
+            "date": day,
+            "status": "available" if rows else "missing",
+            "notice": "这是角色今天的生活日程；计划不代表已发生。"
+            if rows
+            else "今天尚未生成可用日程，不代表角色没有日程能力。",
+            "activities": [{key: row[key] for key in fields if key in row} for row in rows],
+        }
+
     def _parse_time(self, value: str, day: date) -> datetime:
         if not isinstance(value, str):
             raise TypeError("Activity time must be an ISO datetime or HH:MM.")

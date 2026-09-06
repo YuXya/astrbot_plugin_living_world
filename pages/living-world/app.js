@@ -19,6 +19,8 @@ let selectedMemories = new Set();
 let debugCategory = "";
 let testRequest = "";
 let debugTask = "life.plan";
+const debugSelections = new Map();
+const debugTaskNames = { "chat.turn": "聊天回复", "reply.model": "聊天回复", "reply.request": "聊天回复", "reply.tool": "聊天工具", "life.plan": "生成日程", "life.plan_day": "生成今日日程", "life.detail": "细化活动", "life.adjust": "调整日程", "news.select": "挑选新闻", "news.read": "阅读新闻", "search.topic": "选择搜索主题", "search.note": "搜索见闻笔记", "journal.write": "生成日记", "debug.test": "模型试跑", "test": "模型试跑" };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -36,6 +38,7 @@ function button(text, callback, style = "secondary", small = false) {
   node.addEventListener("click", callback);
   return node;
 }
+Object.assign(statusNames, { observed: "已观察", captured: "已捕获", generated: "已生成", partial: "部分完成", unknown: "结果未确认", interrupted: "已中断" });
 function badge(value, forceStyle) {
   const good = ["enabled", "ready", "running", "completed", "done", "sent", "success", "ok"];
   const bad = ["failed", "error"];
@@ -399,11 +402,46 @@ function renderWhitelist() {
     const weightField = field("抽选权重", "weight", original.weight ?? 1, { type: "number", min: 0, step: 0.1 });
     const enabledField = checkField("启用此对象", "enabled", original.enabled !== false);
     const preview = el("p", "muted");
+    const sessionInfo = el("div", "stack session-status");
+    const showStatus = (value) => {
+      if (!value) { sessionInfo.replaceChildren(el("p", "hint", "尚未检查会话。没有历史也可以接入；检查只读，不调用模型或发送消息。")); return; }
+      const historyLabel = value.history_status === "found" ? `已找到历史：${value.history_count} 条` : value.history_status === "error" ? "历史读取失败" : "首次对话／暂无历史";
+      const source = { host_default: "AstrBot 默认设置", conversation: "当前对话指定", session_rule: "宿主会话规则", unresolved: "尚未解析" }[value.persona_source] || value.persona_source || "未知";
+      const contextStatus = value.context_status || {};
+      const attempt = contextStatus.last_attempt;
+      const injected = contextStatus.last_injected;
+      sessionInfo.replaceChildren(append(el("div", "actions"), badge(historyLabel, value.history_status === "error" ? "bad" : ""), badge(value.allowed ? "配置允许接入" : "配置未通过", value.allowed ? "good" : "bad")),
+        el("p", "hint", `真实会话：${value.actual_scope || "未知"} · 连接类型：${value.platform_name || "未知"}`),
+        el("p", "hint", `实际人格：${value.persona_id || "未解析"} · 插件绑定：${value.bound_persona || settings.persona_id || "未设置"} · 人格来源：${source}`),
+        el("p", "hint", `${value.reason || ""}${value.reason_code ? `（${value.reason_code}）` : ""}`),
+        el("p", "hint", `历史来源：${value.history_source || "未知"} · 对话：${value.conversation_id || "暂无"} · ${stamp(value.checked_at)}`));
+      if (value.history_error) sessionInfo.append(el("p", "danger-copy", value.history_error));
+      sessionInfo.append(el("p", "hint", attempt ? `最近处理：${stamp(attempt.at)} · ${attempt.reason}` : "尚未观察到实际聊天接入；配置检查通过不代表已经注入上下文。"));
+      if (injected) sessionInfo.append(el("p", "hint", `最近实际注入：${stamp(injected.at)} · ${injected.reason}`));
+      const turn = attempt?.turn_id || injected?.turn_id;
+      if (turn) {
+        sessionInfo.append(el("p", "hint", `对应聊天轮次：${turn}`));
+        if (rows("debug_records").some((row) => row.turn_id === turn)) {
+          const link = linkButton("查看这轮接入记录", `debug?turn=${encodeURIComponent(turn)}`);
+          link.addEventListener("click", () => { debugCategory = ""; });
+          sessionInfo.append(link);
+        }
+        else sessionInfo.append(el("p", "hint", "该轮调试记录已清理、超出保留数量或当时未开启调试；接入状态仍保留。"));
+      }
+    };
     const controls = append(el("div", "form-grid whitelist-fields"), connectionField, typeField, numberField, weightField);
     const entry = { original, originalUMO, connection, type, numberValue, box, controls, enabledField }; entries.push(entry);
-    const update = () => { const v = readFields(controls); preview.textContent = `会话标识：${v.connection}:${v.type}:${v.number} · 自动填写，无需手工拼接`; };
+    const currentScope = () => { const v = readFields(controls); return v.connection === connection && v.type === type && v.number === numberValue && originalUMO ? originalUMO : `${v.connection}:${v.type}:${v.number.trim()}`; };
+    const update = () => { preview.textContent = `会话标识：${currentScope()} · 自动填写，无需手工拼接`; showStatus(rows("session_status").find((row) => row.umo === currentScope())); };
     controls.addEventListener("input", update); update();
     append(box, controls, append(el("div", "section-toolbar"), enabledField, button("移除这个对象", () => { entries.splice(entries.indexOf(entry), 1); box.remove(); dirty = true; }, "danger", true)), preview);
+    box.append(sessionInfo, button("检查会话与历史", async () => {
+      const result = await request(() => bridge.apiPost("action", { action: "inspect_session", scope: currentScope() }), "会话检查完成；没有调用模型或发送消息");
+      if (result !== false) {
+        snapshot.session_status = [...rows("session_status").filter((row) => row.umo !== result.umo), clone(result)];
+        showStatus(result);
+      }
+    }, "secondary", true));
     if (number.includes("_")) box.append(el("p", "hint", "已有配置包含群成员会话标识；不改目标时保留该标识。聊天记录和人格判断仍使用真实场合。"));
     holder.append(box);
   };
@@ -476,8 +514,12 @@ function renderSchedule() {
   const list = recordList(activities, { timeline: true, emptyTitle: "这一天还没有安排", emptyDescription: "到生成时间自动生成；首次启动缺少当天日程时才补生成。", actions: (record) => editable.includes(record) ? append(el("div", "actions"), button("编辑", () => editActivity(record), "secondary", true), !record.detailed ? button("调用 AI 细化活动", () => action("detail_activity", { id: record.id }), "secondary", true) : null) : null });
   root.append(card("日程与实际行动", "按新闻 → 搜索 → 聊天执行；每个标记只执行一次。数量表示计划机会，实际发送仍遵守白名单与发送限制。", append(el("div", "stack"), toolbar, scheduleSummary(activities), list)));
   const day = rows("life_days").find((item) => (item.date || item.day || item.id?.slice(0, 10)) === date.value && (!item.scope || item.scope === "global"));
-  const original = day ? append(el("div", "stack"), details(day.parameters || day.params || {}, "当日采用的生成参数"), details(day.full_request || day.request || {}, "完整生成请求"), details(day.raw_json ?? day.raw_response ?? "升级前日程未记录模型原始 JSON", "模型原始 JSON"), details(day.adopted_activities || day.adopted || activities, "校验后采用的日程"), jsonButtons(day, `living-world-schedule-${date.value}.json`)) : empty("尚无正式生成记录", "生成参数、完整请求和原始 JSON 会随正式日程长期保存，不受调试保留次数限制。");
-  root.append(card("正式日程生成档案", "用于核对 AI 收到什么、输出什么，以及最终采用什么。", original, linkButton("调试与调用记录", "debug")));
+  const original = day ? append(el("div", "stack"), details(day.parameters || day.params || {}, "当日采用的生成参数"), details(day.full_request || day.request || {}, "生成输入快照（非 API 原文）"), details(day.raw_json ?? day.raw_response ?? "升级前日程未记录模型生成文本", "模型生成的日程文本"), details(day.adopted_activities || day.adopted || activities, "校验后采用的日程"), jsonButtons(day, `living-world-schedule-${date.value}.json`)) : empty("尚无正式生成记录", "生成参数、输入快照和模型生成文本会随正式日程长期保存，不受调试保留次数限制。");
+  const debugId = day?.full_request?._debug_record_id;
+  const debugView = debugId ? rows("debug_views").find((view) => view.id === debugId || view.record_ids?.includes(debugId)) : null;
+  const archiveLink = linkButton(debugId ? "查看这次调用的 API 原文" : "调试与调用记录", debugId ? `debug?turn=${encodeURIComponent(debugView?.id || debugId)}` : "debug");
+  archiveLink.addEventListener("click", () => { debugCategory = ""; });
+  root.append(card("正式日程生成档案", "保存生成输入、模型生成文本和采用结果。实际 API 请求与返回请到调试记录查看；调试记录过期后原文可能已清理。", original, archiveLink));
   root.append(card("当前生活状态", "调整状态只保存生活数据，不触发模型调用或真实消息。", details(snapshot.state || {}, "查看状态数据"), button("调整当前状态", () => openEditor("调整当前状态", [field("精力", "energy", snapshot.state?.energy ?? 70, { type: "number", min: 0, max: 100 }), field("心情", "mood", snapshot.state?.mood || "平静"), field("当前作息", "routine", snapshot.state?.routine || "", { type: "textarea" })], (patch) => action("update_state", { patch })), "secondary", true)));
   return root;
 }
@@ -597,14 +639,210 @@ function jsonButtons(value, filename) {
     catch { openEditor("复制 JSON", field("完整 JSON", "copy", stringify(value), { type: "textarea", rows: 18, readOnly: true }), () => true, "关闭"); }
   }, "secondary", true), button("下载 JSON", () => downloadJSON(value, filename), "secondary", true));
 }
+function debugLabel(task) {
+  if (debugTaskNames[task]) return debugTaskNames[task];
+  const module = String(task || "").split(".")[0];
+  return moduleNames[module] || "模型调用";
+}
+function rawBodyButtons(body, filename, direction, type = "json") {
+  const label = direction === "request" ? "请求" : "返回";
+  return append(el("div", "actions"), button(`复制${label}原文`, async () => {
+    try { await navigator.clipboard.writeText(body); notice(`${label}原文已复制`); }
+    catch { openEditor(`复制${label}原文`, field("原始正文", "copy", body, { type: "textarea", rows: 18, readOnly: true }), () => true, "关闭"); }
+  }, "secondary", true), button(`下载${label}原文`, () => {
+    const mime = type === "json" ? "application/json" : "text/plain";
+    const url = URL.createObjectURL(new Blob([body], { type: `${mime};charset=utf-8` }));
+    const link = el("a"); link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }, "secondary", true));
+}
+function readableValue(value, depth = 0) {
+  if (value == null || value === "") return el("p", "muted", "暂无内容");
+  if (typeof value !== "object") return el("div", "debug-prose", value);
+  if (depth > 7) return el("pre", "", stringify(value));
+  if (Array.isArray(value)) {
+    const list = el("div", "debug-value-list");
+    value.forEach((item) => list.append(readableValue(item, depth + 1)));
+    return list.childElementCount ? list : el("p", "muted", "暂无内容");
+  }
+  if (Array.isArray(value.activities)) {
+    const timeline = el("div", "debug-value-list");
+    value.activities.forEach((activity) => timeline.append(append(el("div", "debug-activity"),
+      el("p", "timeline-time", `${activity.start || ""} — ${activity.end || ""}`),
+      el("h4", "", activity.title || activity.content || "活动"),
+      el("p", "debug-prose", activity.description || ""),
+      el("p", "muted", [activity.location, activity.sleep_state].filter(Boolean).join(" · ")),
+      activity.actions ? el("p", "muted", Object.entries(activity.actions).filter(([, action]) => action?.enabled).map(([key]) => ({ news: "阅读新闻", search: "搜索", social: "主动聊天" })[key] || key).join(" · ")) : null)));
+    const remaining = { ...value }; delete remaining.activities;
+    if (Object.keys(remaining).length) timeline.append(readableValue(remaining, depth + 1));
+    return timeline;
+  }
+  const names = { role: "角色", content: "内容", text: "正文", name: "名称", title: "标题", description: "说明", source: "来源", sources: "来源", intent: "意图", arguments: "参数", function: "工具", type: "类型", status: "状态", prompt_tokens: "输入 token", completion_tokens: "输出 token", total_tokens: "总 token", input_tokens: "输入 token", output_tokens: "输出 token", cached_tokens: "缓存 token", reasoning_tokens: "推理 token", query: "搜索内容", factual_summary: "事实摘要", impression: "角色感想", selection_reason: "选题理由", reading_basis: "阅读依据", reason: "原因", message: "消息", chain: "消息内容" };
+  const list = el("dl", "debug-value");
+  for (const [key, item] of Object.entries(value)) {
+    const shown = key === "role" ? ({ user: "用户", assistant: "AI", system: "系统指令", developer: "开发者指令", tool: "工具结果" })[item] || item : item;
+    append(list, el("dt", "", names[key] || key), append(el("dd"), readableValue(shown, depth + 1)));
+  }
+  return list.childElementCount ? list : el("p", "muted", "暂无内容");
+}
+function copyRecordToTrial(record) {
+  let draft = clone(record.request);
+  if (draft.arguments) {
+    const args = draft.arguments;
+    const parameters = { ...args };
+    for (const key of ["prompt", "system_prompt", "contexts", "image_urls", "audio_urls", "func_tool", "model", "session_id", "extra_user_content_parts", "tool_calls_result"]) delete parameters[key];
+    draft = { task: record.task, module: record.module || "reply", scope: record.scope, provider_id: draft.provider_id, model: args.model || draft.model, prompt_mode: "raw", prompt: args.prompt || "", system_prompt: args.system_prompt || "", contexts: args.contexts || [], image_urls: args.image_urls || [], audio_urls: args.audio_urls || [], tools: args.func_tool || [], extra_user_content_parts: args.extra_user_content_parts || [], tool_calls_result: args.tool_calls_result || [], positional_arguments: draft.positional_arguments || [], parameters };
+  }
+  testRequest = stringify(draft); render(); $("[name=request_json]")?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+function formatTaskContext(context) {
+  if (context == null) return "";
+  const text = (value) => typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  if (typeof context === "object" && !Array.isArray(context)) return Object.entries(context).map(([key, value]) => `【${key}】\n${text(value)}`).join("\n\n");
+  return text(context);
+}
+function toolArguments(value) {
+  if (typeof value !== "string") return value;
+  try { return JSON.parse(value); } catch { return value; }
+}
+function toolResultContent(value) {
+  if (value && typeof value === "object" && Array.isArray(value.content)) {
+    const list = el("div", "debug-value-list");
+    value.content.forEach((part) => list.append(part?.type === "text" && typeof part.text === "string" ? el("div", "debug-prose", part.text) : readableValue(part)));
+    list.append(details(value, "工具返回详情（第三方公开结果）"));
+    return list;
+  }
+  return readableValue(value);
+}
+function legacyDebugViews(records) {
+  const grouped = new Map();
+  for (const record of records) {
+    const id = record.turn_id || record.id;
+    if (!grouped.has(id)) grouped.set(id, []);
+    grouped.get(id).push(record);
+  }
+  return [...grouped.entries()].map(([id, group]) => {
+    const first = group.find((record) => record.kind === "turn") || group[0];
+    return { id, task: first.task, scope: first.scope, created_at: first.created_at, status: first.status, error: first.error, legacy: true, categories: [...new Set(group.map((record) => record.category || record.task))],
+      sources: group.filter((record) => ["chat.context", "reply.request"].includes(record.task) || (!record.turn_id && record.request)).map((record) => ({ title: debugLabel(record.task), source: "旧版请求快照（非 API 原文）", content: record.request })),
+      calls: [], adopted: group.filter((record) => ["model", "test"].includes(record.kind)).map((record) => record.response ?? record.reply ?? record.result),
+      sends: group.filter((record) => record.task === "reply.send").map((record) => ({ status: record.status, content: record.request?.message })) };
+  });
+}
+function renderDebugView(view, records, initiallyOpen) {
+  const container = el("details", "debug-round"); container.dataset.turn = view.id;
+  const focused = new URLSearchParams(location.hash.split("?")[1] || "").get("turn");
+  container.open = focused ? focused === view.id || view.record_ids?.includes(focused) : initiallyOpen;
+  const related = records.filter((record) => record.turn_id === view.id || record.id === view.id);
+  const calls = Array.isArray(view.calls) ? view.calls : [];
+  const selected = debugSelections.get(view.id) || { call: 0, tab: 0 };
+  if (selected.call >= calls.length) selected.call = 0;
+  debugSelections.set(view.id, selected);
+  append(container, append(el("summary", "debug-round-summary"), append(el("span"), el("strong", "", view.title || debugLabel(view.task)), el("small", "muted", `${scopeLabel(view.scope)} · ${stamp(view.created_at) || "时间未记录"}${calls.length ? ` · ${calls.length} 次请求` : ""}`)), badge(view.status)));
+  const body = el("div", "debug-round-body");
+  if (view.legacy) body.append(el("p", "hint warning", "旧版快照，非 API 原文。升级前没有捕获实际 HTTP 正文，不能补成原始请求或返回。"));
+  if (view.error) body.append(el("p", "danger-copy", stringify(view.error)));
+  const controls = el("div", "debug-call-controls");
+  const callSelector = field("查看第几次请求", "debug_call", String(selected.call), { options: calls.length ? calls.map((call, index) => ({ value: String(index), label: `第 ${index + 1} 次 · ${call.model || call.provider_id || "模型"} · ${statusNames[call.status] || call.status || "等待返回"}` })) : [{ value: "0", label: "没有可查看的 API 请求" }] });
+  callSelector.querySelector("select").disabled = calls.length < 2;
+  controls.append(callSelector); body.append(controls);
+  const tabs = el("div", "debug-tabs"); tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "调用记录四项视图");
+  const panel = el("div", "debug-tab-panel"); panel.setAttribute("role", "tabpanel");
+  const names = ["① 上下文与信息来源", "② API 原始请求", "③ API 原始返回", "④ 回复阅读版"];
+  const buttons = names.map((name, index) => {
+    const tab = button(name, () => { selected.tab = index; update(); }, "secondary", true);
+    tab.setAttribute("role", "tab"); tab.id = `debug-tab-${view.id}-${index}`; tab.setAttribute("aria-controls", `debug-panel-${view.id}`);
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault(); selected.tab = event.key === "Home" ? 0 : event.key === "End" ? 3 : (index + (event.key === "ArrowRight" ? 1 : 3)) % 4; update(); buttons[selected.tab].focus();
+    }); tabs.append(tab); return tab;
+  });
+  panel.id = `debug-panel-${view.id}`;
+  const update = () => {
+    const call = calls[selected.call];
+    buttons.forEach((tab, index) => { tab.setAttribute("aria-selected", String(index === selected.tab)); tab.tabIndex = index === selected.tab ? 0 : -1; });
+    panel.setAttribute("aria-labelledby", buttons[selected.tab].id); panel.replaceChildren();
+    if (selected.tab === 0) {
+      panel.append(el("p", "muted", "这里展示组装时记录的信息来源与实际选用资料；最终发往接口的内容以②为准。"));
+      const sources = el("div", "debug-sources");
+      for (const source of view.sources || []) sources.append(append(el("section", "debug-source"), el("h4", "", source.title || "上下文资料"), el("p", "debug-source-origin", `来源：${source.source || "未记录"}${source.placement ? ` · 放入：${source.placement}` : ""}`), readableValue(source.content)));
+      panel.append(sources.childElementCount ? sources : empty("没有可用的信息来源清单", "本次尚未组装上下文，或这条旧记录没有保存来源。"));
+      const injection = append(el("section", "debug-injection"), el("h4", "", "插件实际加入的完整文本"));
+      if (view.stable_injected_text) append(injection, el("p", "muted", "稳定角色资料 · system 消息"), el("div", "debug-prose", stringify(view.stable_injected_text)));
+      if (view.injected_text) append(injection, el("p", "muted", "本轮动态资料"), el("div", "debug-prose", stringify(view.injected_text)));
+      if (!view.stable_injected_text && !view.injected_text) injection.append(el("p", "muted", "未记录注入文本；不根据其他字段推测。"));
+      panel.append(injection);
+      if (view.legacy && view.legacy_snapshot != null) panel.append(details(view.legacy_snapshot, "旧版输入快照（非 API 原文）"));
+    } else if (selected.tab === 1 || selected.tab === 2) {
+      const isRequest = selected.tab === 1;
+      const raw = isRequest ? call?.request_body : call?.response_body;
+      if (typeof raw === "string") {
+        const type = isRequest ? "json" : call.response_type || "text";
+        const safeId = String(call.id || `${view.id}-${selected.call + 1}`).replace(/[^\w.-]/g, "_");
+        panel.append(el("p", "muted", isRequest ? "实际发往模型接口的请求正文，仅隐藏认证凭据。复制和下载直接保留正文，不加包装。" : type === "sse" ? "这是接口实际返回的事件流（SSE），不是一份单独 JSON。④提供合并阅读，合并结果不是原文。" : "接口实际返回的正文，保留原有字段；下方内容没有经过回复提取。"));
+        if (call.url || call.http_status) panel.append(el("p", "debug-endpoint", [call.method, call.url, call.http_status ? `HTTP ${call.http_status}` : ""].filter(Boolean).join(" · ")));
+        append(panel, rawBodyButtons(raw, `living-world-${safeId}-${isRequest ? "request" : "response"}.${type === "sse" ? "sse" : type === "json" ? "json" : "txt"}`, isRequest ? "request" : "response", type), el("pre", "debug-raw", raw));
+        if (call.error) panel.append(el("p", "danger-copy", stringify(call.error)));
+      } else {
+        panel.append(empty(isRequest ? "没有捕获 API 原始请求" : "没有收到可用的 API 原始返回", view.legacy ? "旧版只保存了宿主快照，不能当作 API 原文。" : call?.error || view.error || (call ? `捕获状态：${statusNames[call.capture_status] || call.capture_status || "未知"}。不使用中间参数代替原文。` : "本次没有记录到模型 HTTP 请求；请查看接入结果或捕获状态。")));
+      }
+    } else {
+      const reading = call?.reading || {};
+      if (call?.response_type === "sse") panel.append(el("p", "hint", "以下为事件流合并后的阅读内容；接口原文保留在③。"));
+      if (view.legacy) panel.append(el("p", "muted", "以下来自旧版解析结果，不代表接口原始返回。"));
+      const section = (title, value) => panel.append(append(el("section", "debug-reading-section"), el("h4", "", title), readableValue(value)));
+      if (reading.text) section("回复正文", reading.text);
+      if (reading.reasoning) section("接口返回的推理内容", reading.reasoning);
+      if (reading.tool_calls?.length) {
+        const tools = append(el("section", "debug-reading-section"), el("h4", "", "模型请求调用的工具"));
+        for (const tool of reading.tool_calls) {
+          const fn = tool.function || tool;
+          tools.append(append(el("div", "debug-tool-result"), el("h4", "", fn.name || "工具调用"), readableValue(toolArguments(fn.arguments ?? fn.input ?? {}))));
+        }
+        panel.append(tools);
+      }
+      if (reading.structured != null) section("结构化结果", reading.structured);
+      if (reading.usage && Object.keys(reading.usage).length) section("本次模型用量", reading.usage);
+      if (reading.error) section("接口返回的错误", reading.error);
+      if (!panel.childElementCount || (!reading.text && !reading.reasoning && !reading.tool_calls?.length && reading.structured == null)) panel.append(el("p", "muted", "本次没有可提取的模型回复；失败、取消和空返回不会生成替代内容。"));
+      if (view.tool_results?.length) {
+        const results = append(el("section", "debug-reading-section"), el("h4", "", "工具实际返回"), el("p", "muted", "这里只展示工具参数和公开返回，不表示已捕获第三方工具内部的模型调用。"));
+        for (const tool of view.tool_results) results.append(append(el("div", "debug-tool-result"), append(el("div", "record-head"), el("h4", "", tool.request?.name || tool.task || "工具调用"), badge(tool.status)), el("p", "muted", "调用参数"), readableValue(toolArguments(tool.request?.arguments ?? tool.request)), el("p", "muted", "返回内容"), toolResultContent(tool.result)));
+        panel.append(results);
+      }
+      if (view.adopted?.length) {
+        const adopted = append(el("section", "debug-reading-section"), el("h4", "", "插件最终采用的内容"));
+        for (const item of view.adopted) {
+          if (item && typeof item === "object" && Object.hasOwn(item, "content")) {
+            const result = append(el("div", "debug-adopted"), item.title ? el("h4", "", item.title) : null, item.status ? badge(item.status) : null, readableValue(item.content));
+            if (item.error) result.append(el("p", "danger-copy", stringify(item.error)));
+            adopted.append(result);
+          } else adopted.append(readableValue(item));
+        }
+        panel.append(adopted);
+      }
+      if (view.legacy && view.legacy_response != null) panel.append(append(el("section", "debug-reading-section"), el("h4", "", "旧版保存的回复结果"), readableValue(view.legacy_response)));
+      if (view.sends?.length) {
+        const sends = el("section", "debug-reading-section"); sends.append(el("h4", "", "实际聊天发送"));
+        for (const send of view.sends) sends.append(append(el("div", "debug-send"), badge(send.status), readableValue(send.content || send.text || send.message), send.error ? el("p", "danger-copy", stringify(send.error)) : null));
+        panel.append(sends);
+      }
+    }
+    const oldTrial = controls.querySelector(".debug-trial-copy"); if (oldTrial) oldTrial.remove();
+    const replay = records.find((record) => record.id === call?.record_id) || related.filter((record) => ["model", "test"].includes(record.kind))[selected.call];
+    if (replay?.request) { const copy = button("复制到试跑编辑器", () => copyRecordToTrial(replay), "secondary", true); copy.classList.add("debug-trial-copy"); controls.append(copy); }
+  };
+  callSelector.querySelector("select").addEventListener("change", (event) => { selected.call = Number(event.target.value); update(); });
+  append(body, tabs, panel); container.append(body); update(); return container;
+}
 function renderDebug() {
   const root = el("div", "stack");
-  root.append(el("p", "hint", "本页捕获本插件交给 AstrBot 的完整请求与返回值，不是供应商 HTTP 报文。外部插件只记录调用参数和公开返回结果，不表示已捕获其内部模型调用。管理员可查看所有场合的记录。"));
+  root.append(el("p", "hint", "每次调用只看四项：信息来源、API 原始请求、API 原始返回、回复阅读版。原文来自实际 HTTP 收发，仅隐藏认证凭据；管理员可查看所有场合。"));
   const settings = snapshot.settings || {};
-  const retention = settingsForm("保存记录数量", "按任务类别保留最近 N 次完整记录。只清理调试明细，正式日程、记忆和执行防重凭据不受影响。");
+  const retention = settingsForm("保存记录数量", "聊天按完整轮次保留最近 N 轮；后台任务按类别保留最近 N 次。清理不影响正式数据。");
   retention.append(field("每类保留次数", "debug.retain_per_category", settings.debug?.retain_per_category ?? 10, { type: "number", min: 1, max: 1000 }));
   retention.addEventListener("submit", (event) => { event.preventDefault(); saveSettings(applyFields(clone(settings), retention)); });
-  root.append(card("调试记录保留", "默认每类最近 10 次，可独立关闭调试模块。", retention));
+  root.append(card("调试记录保留", "默认最近 10 轮聊天及每类 10 次后台调用；工具后的模型调用也保留。", retention));
+  if (snapshot.provider_capture_available === false) root.append(el("p", "hint warning", "当前模型捕获适配不可用，未捕获内容会明确标注；旧版快照不会冒充 API 原文。"));
   const templates = snapshot.debug?.templates || [];
   const records = rows("debug_records");
   const options = [...new Set([...templates.map((item) => item.task), ...records.map((item) => item.task).filter(Boolean)])];
@@ -617,7 +855,7 @@ function renderDebug() {
   const modeHint = el("p", "hint");
   const updateHint = () => { modeHint.textContent = modeField.querySelector("select").value === "structured" ? "组合模式：请编辑 JSON 中的 template 与 dynamic_context；执行时重新组合实际 prompt。JSON 的 prompt 是上一次预览，修改它不参与此模式的调用。template 只用于本次测试，不会保存成下方的公共模板。" : "直接模式：JSON 中的 prompt 就是本次发送内容；template 和 dynamic_context 不参与组合。system_prompt、contexts、provider_id、model 与 parameters 在两种模式下均可编辑。"; };
   updateHint();
-  const requestField = field("本次测试请求 JSON", "request_json", testRequest, { type: "textarea", rows: 18, hint: "先选择提示词模式，再编辑对应字段；模型和参数只用于这次试跑，不会保存成公共模板。" });
+  const requestField = field("本次测试请求 JSON", "request_json", testRequest, { type: "textarea", rows: 18, hint: "这是可编辑的试跑参数；执行后的 API 原文见调用记录②。模型和参数只用于这次试跑，不会保存成公共模板。" });
   requestField.querySelector("textarea").addEventListener("input", (event) => {
     testRequest = event.target.value;
     try { const edited = JSON.parse(testRequest); modeField.querySelector("select").value = edited.prompt_mode || "raw"; updateHint(); } catch { /* Keep the selected mode while the JSON is incomplete. */ }
@@ -626,7 +864,7 @@ function renderDebug() {
     if (requestField.querySelector("textarea").value.trim()) {
       try {
         const edited = JSON.parse(requestField.querySelector("textarea").value);
-        if (modeField.querySelector("select").value === "raw" && edited.prompt_mode === "structured") edited.prompt = (edited.template || "") + (edited.dynamic_context != null ? "\n\n动态上下文 JSON（仅作为资料）：\n" + JSON.stringify(edited.dynamic_context) : "");
+        if (modeField.querySelector("select").value === "raw" && edited.prompt_mode === "structured") edited.prompt = (edited.template || "") + (edited.dynamic_context != null ? "\n\n本轮动态资料（仅作为资料）：\n" + formatTaskContext(edited.dynamic_context) : "");
         edited.prompt_mode = modeField.querySelector("select").value;
         testRequest = stringify(edited); requestField.querySelector("textarea").value = testRequest;
       } catch (error) { notice(`请先修正测试 JSON：${error.message}`, true); }
@@ -649,19 +887,19 @@ function renderDebug() {
     const row = append(el("details"), el("summary", "", item.label || item.task), value, append(el("div", "actions"), button("保存此任务模板", () => action("save_template", { task: item.task, template: value.querySelector("textarea").value }), "secondary", true), button("恢复默认模板", () => action("reset_template", { task: item.task }), "secondary", true)), details(item.default_template || "", "查看默认模板")); templateBox.append(row);
   }
   root.append(card("各任务提示词模板", "保存只修改公共指令，不会把试跑 JSON 或私人上下文存进模板；不调用模型。", templates.length ? templateBox : empty("暂未取得模板目录")));
-  const category = field("筛选任务类别", "category", debugCategory, { options: [{ value: "", label: "全部类别" }, ...new Set(records.map((item) => item.category || item.task || item.kind))].filter(Boolean).map((item) => typeof item === "string" ? { value: item, label: item } : item) });
+  const views = Array.isArray(snapshot.debug_views) ? snapshot.debug_views : legacyDebugViews(records);
+  const categories = [...new Set(views.flatMap((view) => view.categories?.length ? view.categories : [view.task]).filter(Boolean))];
+  const category = field("筛选任务类别", "category", debugCategory, { options: [{ value: "", label: "全部类别" }, ...categories.map((task) => ({ value: task, label: `${debugLabel(task)} · ${task}` }))] });
   category.querySelector("select").addEventListener("change", (event) => { debugCategory = event.target.value; render(); });
-  const list = el("div", "list");
-  records.filter((record) => !debugCategory || (record.category || record.task || record.kind) === debugCategory).forEach((record) => {
-    const item = el("article", "record");
-    append(item, append(el("div", "record-head"), el("h3", "", record.task || record.category || record.kind || "调用"), badge(record.status)), el("p", "muted", `${stamp(record.created_at || record.timestamp)} · ${record.module || record.kind || ""} · ${scopeLabel(record.scope)}`), el("p", "hint", record.boundary || "AstrBot 调用边界"), details(record.request || {}, "完整请求 / 人格 / 提示词 / 上下文 / 记忆 / 参数"), details(record.response ?? record.reply ?? record.result ?? {}, "原始回复 / 返回结果"));
-    if (record.error) item.append(el("p", "danger-copy", stringify(record.error)));
-    const buttons = jsonButtons(record, `living-world-call-${record.id || "record"}.json`);
-    if (["model", "test"].includes(record.kind) && record.request) buttons.append(button("复制到试跑编辑器", () => { testRequest = stringify(record.request); render(); $("[name=request_json]")?.scrollIntoView({ behavior: "smooth", block: "center" }); }, "secondary", true));
-    append(item, buttons, details(record, "查看完整调用 JSON")); list.append(item);
-  });
-  root.append(card("全部调用明细", "模型请求、工具返回和实际发送分别记录，失败也保留状态。清空只删除当前筛选类别的调试记录。", append(el("div", "stack"), category, list.childElementCount ? list : empty("此类别暂时没有调用记录")), button(debugCategory ? "清空此类调试记录" : "清空全部调试记录", () => confirmAction("清空调试明细", "仅删除选定的调试明细，不删除正式日程、记忆、消息历史或执行防重记录；不发起模型或来源调用。", () => action("debug_clear", debugCategory ? { category: debugCategory } : {}), true, "清空调试记录"), "danger", true)));
-  root.append(card("模型调用用量", "用量来自宿主返回，未返回的字段显示为空。", usageTable()));
+  const list = el("div", "debug-round-list");
+  const filtered = views.filter((view) => !debugCategory || (view.categories || [view.task]).includes(debugCategory));
+  const focused = new URLSearchParams(location.hash.split("?")[1] || "").get("turn");
+  if (focused && !views.some((view) => view.id === focused || view.record_ids?.includes(focused))) list.append(el("p", "hint warning", "这次调用的调试记录已清理或尚未产生；正式日程档案仍保留。"));
+  filtered.forEach((view, index) => list.append(renderDebugView(view, records, index === 0)));
+  const callPanel = card("调用记录", "选择一次聊天或后台任务；多次模型请求使用下拉框切换，请求与返回始终成对。",
+    append(el("div", "stack"), category, list.childElementCount ? list : empty("此类别暂时没有调用记录")),
+    button(debugCategory ? "清空此类调试记录" : "清空全部调试记录", () => confirmAction("清空调试记录", "删除选定类别的完整聊天轮次和后台任务记录；不删除正式日程、记忆、消息历史或执行防重记录，不产生真实调用。", () => action("debug_clear", debugCategory ? { category: debugCategory } : {}), true, "清空调试记录"), "danger", true));
+  root.insertBefore(callPanel, root.children[1] || null);
   return root;
 }
 
@@ -722,7 +960,8 @@ function renderData() {
 }
 
 function render() {
-  const view = Object.hasOwn(titles, location.hash.slice(1)) ? location.hash.slice(1) : "overview";
+  const route = location.hash.slice(1).split("?")[0];
+  const view = Object.hasOwn(titles, route) ? route : "overview";
   $("#page-title").textContent = titles[view];
   document.title = `${titles[view]} · Living World`;
   document.querySelectorAll("#navigation a").forEach((link) => { if (link.dataset.view === view) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current"); });
