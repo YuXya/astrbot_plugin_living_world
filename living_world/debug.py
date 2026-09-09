@@ -189,7 +189,9 @@ class DebugService:
     def template(self, task, default):
         self.defaults[task] = default
         # Only the static instruction is kept here; never store the dynamic context.
-        self.runtime.store.put("prompt_defaults", task, {"id": task, "template": default})
+        self.runtime.store.put(
+            "prompt_defaults", task, {"id": task, "template": default, "schema_version": 3}
+        )
         return self.runtime.store.get("prompt_templates", task, {}).get("template", default)
 
     def get_default(self, task):
@@ -202,7 +204,9 @@ class DebugService:
             raise ValueError("未知提示词任务")
         if not isinstance(template, str) or not template.strip() or len(template) > 100000:
             raise ValueError("模板需要填写非空文本，最多 100000 字符")
-        self.runtime.store.put("prompt_templates", task, {"id": task, "template": template})
+        self.runtime.store.put(
+            "prompt_templates", task, {"id": task, "template": template, "schema_version": 3}
+        )
         return {
             "status": "success",
             "task": task,
@@ -210,7 +214,11 @@ class DebugService:
         }
 
     def reset_template(self, task):
-        self.runtime.store.delete("prompt_templates", task)
+        self.runtime.store.put(
+            "prompt_templates",
+            task,
+            {"id": task, "template": self.get_default(task), "schema_version": 3},
+        )
         return {"status": "success", "task": task, "template": self.get_default(task)}
 
     def snapshot(self):

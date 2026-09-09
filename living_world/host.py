@@ -124,7 +124,8 @@ class AstrBotHost:
             usage = {}
         return text, {"provider": provider_id, **usage}, response_value(response)
 
-    async def search(self, query, scope):
+    def search_tool(self, scope):
+        """Resolve host search configuration without making a network or model call."""
         settings = self.context.get_config(scope if scope != "global" else "").get(
             "provider_settings", {}
         )
@@ -143,6 +144,17 @@ class AstrBotHost:
         name = names.get(provider)
         if not name:
             raise ValueError(f"当前 AstrBot 网页搜索服务不受支持：{provider}")
+        tool = self.context.get_llm_tool_manager().get_builtin_tool(name)
+        if tool is None or not getattr(tool, "active", True):
+            raise ValueError("AstrBot 网页搜索工具不可用")
+        return name
+
+    def search_ready(self, scope):
+        self.search_tool(scope)
+        return True
+
+    async def search(self, query, scope):
+        name = self.search_tool(scope)
         # Use the registered host tool rather than a private provider implementation.
         return await self.call_tool(name, {"query": query}, scope, builtin=True)
 

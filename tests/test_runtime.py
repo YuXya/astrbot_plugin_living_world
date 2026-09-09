@@ -160,19 +160,31 @@ async def test_scheduled_social_sends_and_records_only_target_scope(runtime):
         "start": (now - timedelta(seconds=5)).isoformat(),
         "end": (now + timedelta(minutes=5)).isoformat(),
         "title": "数学课无聊，找群聊天",
-        "kind": "social",
+        "kind": "fiction",
+        "schema_version": 3,
         "payload": {"reason": "数学课无聊"},
         "scope": "global",
         "status": "planned",
         "detailed": True,
+        "actions": runtime.life._empty_actions(),
+    }
+    activity["actions"]["social"] = {
+        "enabled": True,
+        "intent": "数学课无聊",
+        "reason": "课间休息聊聊",
+        "at": now.isoformat(),
+        "execution": {"status": "pending"},
     }
     runtime.store.put("activities", activity["id"], activity)
     for scope in ("global", GROUP):
         runtime.store.put("life_days", f"{now.date().isoformat()}:{scope}", {"status": "completed"})
     await runtime.life.tick(now)
     assert len(runtime.host.sent) == 1
-    assert runtime.store.get("activities", activity["id"])["status"] == "completed"
-    events = runtime.store.list("events")
+    assert (
+        runtime.store.get("activities", activity["id"])["actions"]["social"]["execution"]["status"]
+        == "success"
+    )
+    events = [event for event in runtime.store.list("events") if event["kind"] == "social"]
     assert len(events) == 1 and events[0]["scope"] == GROUP
     assert not [e for e in events if e["scope"] == "global"]
     await runtime.life.tick(now)

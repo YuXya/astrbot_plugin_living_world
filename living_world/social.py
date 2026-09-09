@@ -194,7 +194,13 @@ class SocialService:
         )
 
     async def _deliver(
-        self, target: dict, reason: str, action_id: str, interjection: bool, person_id: str = ""
+        self,
+        target: dict,
+        reason: str,
+        action_id: str,
+        interjection: bool,
+        person_id: str = "",
+        before_start=None,
     ) -> dict:
         scope = target["scope"]
         key = _digest(f"{action_id}\0{target['destination']}")
@@ -215,6 +221,7 @@ class SocialService:
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
             "reason": "",
+            "schema_version": 3,
         }
         try:
             blocked = await self._control_reason(scope, interjection)
@@ -242,6 +249,10 @@ class SocialService:
                 "context": context,
                 "interjection": interjection,
             }
+            if before_start is not None and not before_start():
+                record["reason"] = "daily_budget_or_activity_changed"
+                self.runtime.store.put("deliveries", key, record)
+                return record
             if hasattr(self.runtime, "complete"):
                 text = await self.runtime.complete(
                     "social.message", "social", template, data, scope
@@ -310,6 +321,7 @@ class SocialService:
         interjection: bool,
         target_scope: str | None,
         person_id: str = "",
+        before_start=None,
     ) -> dict:
         module = "interjection" if interjection else "proactive"
         if not self.runtime.enabled(module):
@@ -343,6 +355,14 @@ class SocialService:
         selected = self._draw(
             candidates, 1 if target_scope else min(20, int(self._number("target_count", 1, 1)))
         )
+        started = False
+
+        def start_once():
+            nonlocal started
+            if not started:
+                started = before_start is None or before_start()
+            return started
+
         action = {
             "id": action_key,
             "action_id": action_id,
@@ -350,6 +370,7 @@ class SocialService:
             "status": "pending",
             "targets": [item["scope"] for item in selected],
             "created_at": self._now().isoformat(),
+            "schema_version": 3,
         }
         if not self.runtime.store.claim("social_actions", action_key, action):
             return self._result(reason="already_attempted")
@@ -357,7 +378,9 @@ class SocialService:
         try:
             for item in selected:
                 deliveries.append(
-                    await self._deliver(item, reason, action_id, interjection, person_id)
+                    await self._deliver(
+                        item, reason, action_id, interjection, person_id, start_once
+                    )
                 )
         except asyncio.CancelledError:
             action.update({"status": "unknown", "updated_at": self._now().isoformat()})
@@ -382,11 +405,12 @@ class SocialService:
         action_id: str = "",
         interjection: bool = False,
         target_scope: str | None = None,
+        before_start=None,
     ) -> dict:
         """Initiate social contact without widening the caller's trusted scope."""
         async with self._lock:
             return await self._send_locked(
-                str(reason), scope, action_id, interjection, target_scope
+                str(reason), scope, action_id, interjection, target_scope, before_start=before_start
             )
 
     async def interject(

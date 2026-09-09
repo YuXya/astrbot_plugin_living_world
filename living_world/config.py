@@ -211,11 +211,6 @@ def settings_from(patch=None):
             if not value.is_integer():
                 raise ValueError(f"{section}.{key} 必须为整数")
             result[section][key] = int(value)
-    if any(
-        result["life"][key] > result["life"]["activity_count"]
-        for key in ("news_count", "search_count", "social_count")
-    ):
-        raise ValueError("每类行动次数不能超过活动数量；同一活动允许不同类型重叠")
     original_news = (patch or {}).get("news", {})
     if "sources" not in original_news and original_news.get("feeds"):
         result["news"]["sources"] = [

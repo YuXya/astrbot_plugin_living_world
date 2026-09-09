@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from living_world.store import Store
-from test_life import NOW, Runtime, fixed_service, plan_rows
+from test_life import NOW, Runtime, fixed_service, plan_rows, prepared_activity
 
 
 @pytest.fixture
@@ -41,6 +41,8 @@ async def seed_day(runtime, life):
 async def test_repeated_regeneration_archives_execution_and_uses_latest_parameters(world):
     runtime, life, _ = world
     old = await seed_day(runtime, life)
+    old[0] = prepared_activity(runtime, old[0], ("news",))
+    assert life.consume_action(old[0]["id"], "news", now=NOW)
     old[0]["actions"]["news"]["execution"] = {"status": "success", "result": {"text": "read"}}
     runtime.store.put("activities", old[0]["id"], old[0])
     runtime.store.put("activities", "child", {**old[1], "id": "child", "parent_id": old[0]["id"]})
@@ -59,7 +61,6 @@ async def test_repeated_regeneration_archives_execution_and_uses_latest_paramete
     previous_marker = runtime.store.get("life_days", f"{NOW.date()}:global")
     runtime.settings["life"].update(activity_count=5, news_count=1, search_count=2, social_count=3)
     proposal = plan_rows(count=5)
-    proposal[1]["actions"]["news"] = {"enabled": False, "intent": "", "at": None}
     proposal[0]["title"] = "新计划中的数学课"
     runtime.responses = [model_result(proposal), model_result(proposal)]
     first = await life.regenerate_day()
@@ -69,7 +70,12 @@ async def test_repeated_regeneration_archives_execution_and_uses_latest_paramete
     assert not (ids[0] & ids[1] or ids[1] & ids[2] or ids[0] & ids[2])
     marker = runtime.store.get("life_days", f"{NOW.date()}:global")
     assert marker["parameters"]["activity_count"] == 5
-    assert marker["request"]["context"]["parameters"]["news_count"] == 1
+    assert marker["request"]["context"]["parameters"] == {
+        "daily_plan_time": "06:00",
+        "activity_count": 5,
+    }
+    assert life.limits() == {"news": 1, "search": 2, "social": 3}
+    assert all(not a["enabled"] for row in second for a in row["actions"].values())
     assert marker["adopted_activities"] == second
     history = runtime.store.list("life_day_history")
     assert len(history) == 2
@@ -83,6 +89,8 @@ async def test_repeated_regeneration_archives_execution_and_uses_latest_paramete
         row["title"] for row in second
     ]
     assert life.day_summary()["activity_count"] == 5
+    assert life.budget()["news"]["used"] == 1
+    assert len(runtime.store.list("life_action_usage")) == 1
     for namespace in protected:
         assert runtime.store.get(namespace, "keep")["count"] == 4
     calls = len(runtime.calls)
@@ -141,7 +149,7 @@ async def test_generation_failure_or_environment_change_never_publishes(world, c
     assert not life.regenerating
 
 
-async def test_publication_time_controls_overdue_flags(world):
+async def test_late_publication_does_not_invent_actions_for_started_activities(world):
     runtime, life, clock = world
 
     async def generate(*args, **kwargs):
@@ -150,9 +158,11 @@ async def test_publication_time_controls_overdue_flags(world):
 
     runtime.generate = generate
     result = await life.regenerate_day()
-    assert result[0]["actions"]["news"]["execution"]["reason"] == "overdue_at_regeneration"
-    assert result[1]["actions"]["social"]["execution"]["status"] == "skipped"
-    assert result[2]["actions"]["social"]["execution"]["status"] == "pending"
+    assert all(not a["enabled"] for row in result for a in row["actions"].values())
+    for row in result[:2]:
+        with pytest.raises(ValueError):
+            await life.detail(row["id"])
+    assert not runtime.actions
 
 
 async def test_regeneration_rejects_wrong_date_scope_and_unavailable_module(world):
@@ -265,10 +275,12 @@ async def test_atomic_store_failure_rolls_back_archive_and_activity_replacement(
 async def test_running_tick_finishes_before_replacement_and_new_flags_run_once(world):
     runtime, life, clock = world
     old = await seed_day(runtime, life)
+    old[0] = prepared_activity(runtime, old[0])
     life._first_tick = False
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def execute(kind, payload, scope, action_id):
+        assert runtime.consume(kind, payload)
         runtime.actions.append((kind, payload, scope, action_id))
         entered.set()
         await release.wait()
@@ -288,15 +300,14 @@ async def test_running_tick_finishes_before_replacement_and_new_flags_run_once(w
     history = runtime.store.list("life_day_history")[0]
     retired = next(row for row in history["activities"] if row["id"] == old[0]["id"])
     assert all(action["execution"]["status"] == "success" for action in retired["actions"].values())
-    for row in new:
-        row["detailed"] = True
-        runtime.store.put("activities", row["id"], row)
+    prepared_activity(runtime, new[1])
     clock[0] += timedelta(hours=1)
     await life.tick()
     await life.tick()
     keys = [call[3] for call in runtime.actions]
     assert len(keys) == len(set(keys)) == 6
     assert [call[0] for call in runtime.actions] == ["news", "search", "social"] * 2
+    assert all(value["used"] == 2 for value in life.budget().values())
     restarted = fixed_service(runtime, clock[0])
     await restarted.tick(clock[0] + timedelta(seconds=1))
     assert len(runtime.actions) == 6
@@ -362,3 +373,50 @@ async def test_old_backup_cannot_reactivate_retired_activities(world):
     assert life.list_activities() == new
     assert life.day_summary()["activity_count"] == 10
     assert await fixed_service(runtime).plan_day() == new
+
+
+async def test_actual_result_totals_survive_regeneration_and_deduplicate_history(world):
+    runtime, life, clock = world
+    rows = await seed_day(runtime, life)
+    prepared_activity(runtime, rows[0])
+    life._first_tick = False
+
+    async def execute(kind, payload, scope, action_id):
+        runtime.actions.append((kind, payload, scope, action_id))
+        if kind == "social":
+            return {"status": "skipped", "reason": "quiet_hours"}
+        assert runtime.consume(kind, payload)
+        return {"status": "success" if kind == "news" else "failed", "reason": "fixture"}
+
+    runtime.execute_action = execute
+    await life.tick()
+    first_result = life.day_summary()["counts"]
+    assert first_result["news"]["success"] == first_result["news"]["used"] == 1
+    assert first_result["search"]["failed"] == first_result["search"]["used"] == 1
+    assert first_result["social"]["skipped"] == 1 and first_result["social"]["used"] == 0
+    retired = runtime.store.get("activities", rows[0]["id"])
+    for _ in range(2):
+        runtime.responses = [model_result()]
+        current = await life.regenerate_day()
+    duplicate = copy.deepcopy(runtime.store.list("life_day_history")[-1])
+    duplicate.update(id="duplicate-import", activities=[retired])
+    runtime.store.put("life_day_history", duplicate["id"], duplicate)
+    runtime.store.put(
+        "life_detail_history",
+        "duplicate-detail",
+        {
+            "id": "duplicate-detail",
+            "activity_id": retired["id"],
+            "activity": retired,
+        },
+    )
+    historical = life.day_summary()["counts"]
+    for kind, outcome in (("news", "success"), ("search", "failed"), ("social", "skipped")):
+        assert historical[kind][outcome] == 1
+        assert historical[kind]["used"] == int(kind != "social")
+    prepared_activity(runtime, current[1], ("news",))
+    clock[0] += timedelta(hours=1)
+    await life.tick()
+    final = life.day_summary()["counts"]
+    assert final["news"]["used"] == final["news"]["success"] == 2
+    assert final["search"]["failed"] == final["social"]["skipped"] == 1

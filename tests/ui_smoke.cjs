@@ -28,17 +28,19 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
         const start = new Date(new Date(`${day}T00:00:00+08:00`).getTime() + i * 8640000);
         const end = new Date(start.getTime() + 8640000);
         const actions = {};
-        for (const [key, marked] of [["news", [1, 5]], ["search", [3, 6]], ["social", [0, 4, 8]]]) actions[key] = { enabled: marked.includes(i), intent: `${key} 活动意图`, at: start.toISOString(), execution: i === 0 && key === "social" ? { status: "skipped", reason: "处于免打扰时段" } : {} };
-        return { id: `a${i}`, date: day, start: start.toISOString(), end: end.toISOString(), title: `活动 ${i + 1}：上课、散步与阅读`, description: "看看窗外的云，记得把借来的笔还给同桌。", kind: "fiction", status: end.getTime() < Date.now() ? "completed" : "planned", location: "教室", sleep_state: "awake", scope: "global", actions };
+        for (const [key, marked] of [["news", [1, 5]], ["search", [3, 6]], ["social", [0, 4, 8]]]) actions[key] = { enabled: marked.includes(i), reason: marked.includes(i) ? "活动适合这项行动" : "当前没有具体需要，不凑数", intent: `${key} 活动意图`, at: marked.includes(i) ? start.toISOString() : null, execution: i === 0 && key === "social" ? { status: "skipped", reason: "处于免打扰时段" } : { status: marked.includes(i) ? "pending" : "disabled" } };
+        return { id: `a${i}`, schema_version: 3, detailed: true, detail_version: `a${i}-detail`, date: day, start: start.toISOString(), end: end.toISOString(), title: `活动 ${i + 1}：上课、散步与阅读`, description: "看看窗外的云，记得把借来的笔还给同桌。", kind: "fiction", status: end.getTime() < Date.now() ? "completed" : "planned", location: "教室", sleep_state: "awake", scope: "global", actions };
       });
-      activities.push({ id: "future", date: tomorrow, start: `${tomorrow}T09:00:00+08:00`, end: `${tomorrow}T10:00:00+08:00`, title: "明天的数学课", description: "复习函数", location: "教室", sleep_state: "awake", kind: "fiction", status: "planned", scope: "global", actions: { news: { enabled: false, intent: "", at: `${tomorrow}T09:00:00+08:00` }, search: { enabled: true, intent: "搜索函数学习方法", at: `${tomorrow}T09:10:00+08:00` }, social: { enabled: true, intent: "课间聊聊天", at: `${tomorrow}T09:20:00+08:00` } } });
+      activities.push({ id: "future", schema_version: 3, detailed: false, detail_error: "模型返回不完整", detail_attempts: 2, date: tomorrow, start: `${tomorrow}T09:00:00+08:00`, end: `${tomorrow}T10:00:00+08:00`, title: "明天的数学课", content: "复习函数", location: "教室", sleep_state: "awake", kind: "fiction", status: "planned", scope: "global" });
       const template = "Return a validated daily activity JSON plan.";
       window.fixture = {
         version: "0.2.0-test", personas: [{ id: "student", name: "小夏" }], providers: [{ id: "chat-model", name: "默认聊天模型" }], platforms: [{ id: "qq", name: "测试 QQ 连接" }],
         settings: { persona_id: "student", retained_unknown: { keep: true }, modules: { life: true, state: true, memory: true, reply: true, journal: true, debug: true }, models: { default: "chat-model" }, character: { profile: "喜欢天文学和散步的高中生。", world: "在靠海的小城上学。", timezone: "Asia/Shanghai", energy: 75, mood: "平静" }, sessions: [{ umo: scope, enabled: true, weight: 1, retained: "keep" }, { umo: "qq:GroupMessage:42_100", enabled: true, weight: 2 }], news: { sources: ["BBC 中文", "Google 新闻中文", "Solidot", "Hacker News", "MIT Technology Review", "Ars Technica"].map((name, i) => ({ id: `rss-${i}`, name, url: `https://example.test/feed-${i}.xml`, enabled: true })), limit: 5 }, weather: { location: "北京", api_host: "test.re.qweatherapi.com", auth_mode: "api_key", credential: "fixture-credential" }, bilibili: { recent_limit: 5 }, daily_digest: { sources: [{ id: "heya", name: "黑鸦 Heya", uid: "3706929260006322", keywords: "早报 日报", time: "12:00", enabled: true }, { id: "juya", name: "橘鸦 Juya", uid: "285286947", keywords: "日报", time: "23:00", enabled: true }] }, social: { target_count: 1, cooldown_minutes: 60, daily_limit: 5, interjection_interval_minutes: 30, quiet_start: "23:00", quiet_end: "08:00" }, life: { tick_seconds: 60, detail_minutes: 10, daily_plan_time: "06:00", activity_count: 10, news_count: 2, search_count: 2, social_count: 3, retained_nested: true }, debug: { retain_per_category: 10 } },
         sessions: [{ umo: scope, title: "与朋友的私聊", persona_id: "student" }], state: { energy: 75, mood: "有点期待", routine: "上午上课，傍晚散步。" },
         modules: [{ id: "life", enabled: true, status: "ready" }, { id: "memory", enabled: true, status: "ready" }, { id: "bilibili", enabled: false, status: "disabled", error: "依赖插件尚未启用" }], bilibili_dependency: { available: false, text: "依赖插件尚未启用" },
-        activities,
+        activities, action_usage: [{ id: "news-used", kind: "news", date: day }, { id: "social-used", kind: "social", date: day }, { id: "future-used", kind: "search", date: tomorrow }], detail_history: [],
+        day_summary: { date: day, counts: { news: { limit: 2, used: 1, reserved: 1, available: 0, success: 0, failed: 1, skipped: 2 }, search: { limit: 2, used: 0, reserved: 2, available: 0, success: 0, failed: 0, skipped: 0 }, social: { limit: 3, used: 1, reserved: 0, available: 2, success: 1, failed: 0, skipped: 1 } } },
+        prompt_template_history: [{ id: "life.detail", task: "life.detail", template: "旧版指令：不能新增行动。", archived_at: new Date().toISOString() }],
         life_days: [{ date: day, scope: "global", parameters: { activity_count: 10, news_count: 2, search_count: 2, social_count: 3 }, full_request: { prompt: "daily plan complete request" }, raw_json: JSON.stringify({ activities: activities.slice(0, 10) }), adopted_activities: activities.slice(0, 10) }],
         memories: [{ id: "m1", text: "约好了明天一起聊流星雨", kind: "event", scope, person_id: "42", important: true }, { id: "m2", text: "朋友最近喜欢看天文纪录片", kind: "knowledge", scope, person_id: "42" }, { id: "m3", text: "<img src=x onerror=window.xss=true>", kind: "event", scope: "global" }],
         observations: [{ id: "o1", module: "news", title: "今晚试着看看星空", selection_reason: "喜欢天文", factual_summary: "本周有流星雨观测窗口。", impression: "想在放学后看看天空。", reading_basis: "RSS 摘要", sources: [{ url: "https://example.test/story" }], scope: "global" }, { id: "o2", module: "search", title: "流星雨观测地点", query: "城市周边 观星", factual_summary: "搜索提供了两处公园的信息。", impression: "下次想和朋友讨论路线。", reading_basis: "搜索结果摘要", sources: ["https://example.test/search"], scope: "global" }, { id: "o3", module: "weather", text: "晴，26°C，适合散步。", scope: "global" }],
@@ -84,7 +86,12 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
         apiPost: async (endpoint, body) => {
           window.calls.push({ endpoint, method: "POST", body: structuredClone(body) });
           if (window.failNext) { window.failNext = false; throw new Error("测试来源暂时不可用"); }
-          if (endpoint === "settings") window.fixture.settings = structuredClone(body);
+          if (endpoint === "settings") {
+            window.fixture.settings = structuredClone(body);
+            for (const key of ["news", "search", "social"]) {
+              const count = window.fixture.day_summary.counts[key]; count.limit = body.life[`${key}_count`]; count.available = Math.max(0, count.limit - count.used - count.reserved);
+            }
+          }
           if (body.action === "inspect_session") return window.inspectError
             ? { umo: body.scope, actual_scope: body.scope, history_status: "error", reason: "测试历史服务不可用", allowed: false }
             : structuredClone(window.fixture.session_status.find((row) => row.umo === body.scope));
@@ -94,10 +101,23 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
             const old = window.fixture.life_days[0];
             const previous = window.fixture.activities.filter((row) => row.date === body.date);
             window.fixture.life_day_history = [{ ...structuredClone(old), id: "previous-day", archived_at: new Date().toISOString(), activities: structuredClone(previous) }];
-            const replacement = previous.map((row) => ({ ...row, id: `regenerated-${row.id}`, title: `重生成：${row.title}` }));
+            const replacement = previous.map((row) => ({ ...row, id: `regenerated-${row.id}`, title: `重生成：${row.title}`, actions: {}, detailed: false, description: "", detail_version: "" }));
             window.fixture.activities = [...window.fixture.activities.filter((row) => row.date !== body.date), ...replacement];
             window.fixture.life_days[0] = { ...old, adopted_activities: replacement, raw_json: JSON.stringify({ activities: replacement }) };
             return replacement;
+          }
+          if (body.action === "detail_activity") {
+            const row = window.fixture.activities.find((item) => item.id === body.id);
+            if (row.detailed) window.fixture.detail_history.push({ id: `history-${row.detail_version}`, activity_id: row.id, archived_at: new Date().toISOString(), activity: structuredClone(row), reason: "重新细化" });
+            row.detail_version = `detail-${window.calls.length}`; row.detailed = true; row.description = body.instruction || "围绕函数学习生成的活动细节"; delete row.detail_error;
+            row.actions = { news: { enabled: false, reason: "课堂不需要新闻", intent: "", at: null, execution: { status: "disabled" } }, search: { enabled: true, reason: "遇到具体学习疑问，需要核对函数概念", intent: "搜索函数学习方法", at: `${tomorrow}T09:10:00+08:00`, execution: { status: "pending" } }, social: { enabled: false, reason: "本次要求不安排主动聊天", intent: "", at: null, execution: { status: "disabled" } } };
+            return structuredClone(row);
+          }
+          if (body.action === "update_activity") {
+            const row = window.fixture.activities.find((item) => item.id === body.id);
+            if (row.detailed) window.fixture.detail_history.push({ id: `history-${row.detail_version}`, activity_id: row.id, archived_at: new Date().toISOString(), activity: structuredClone(row), reason: "大纲已修改" });
+            Object.assign(row, body.patch, { detailed: false, actions: {}, description: "", detail_version: "" });
+            return structuredClone(row);
           }
           return { status: "success", action: body.action };
         },
@@ -225,15 +245,23 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.equal(await page.getByText("完整生成请求", { exact: true }).count(), 0);
     for (const [name, value] of [["daily_plan_time", "06:00"], ["activity_count", "10"], ["news_count", "2"], ["search_count", "2"], ["social_count", "3"]]) assert.equal(await page.locator(`[name="life.${name}"]`).inputValue(), value);
     assert.equal(await page.locator('[name="life.activity_count"]').getAttribute("max"), "48");
-    await page.getByRole("button", { name: "保存日程生成参数", exact: true }).click();
+    assert.equal(await page.getByRole("heading", { name: "大纲生成参数", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("heading", { name: "行动每日上限", exact: true }).count(), 1);
+    assert.match(await page.locator(".schedule-counts").innerText(), /新闻 · 每日上限 2 次[\s\S]*1 次[\s\S]*已使用 · 已预留 1 · 可安排 0[\s\S]*成功 0 · 失败 1 · 跳过 2/);
+    await page.locator('[name="life.news_count"]').fill("11");
+    await page.getByRole("button", { name: "保存日程设置", exact: true }).click();
+    await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.fixture.settings.life.news_count), 11, "Action caps can exceed the activity count");
+    await page.locator('[name="life.news_count"]').fill("2");
+    await page.getByRole("button", { name: "保存日程设置", exact: true }).click();
     await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor();
     assert.equal(await page.evaluate(() => window.calls.some((call) => ["plan_day", "regenerate_day"].includes(call.body?.action))), false, "Saving parameters must not regenerate");
     assert.equal(await page.getByRole("button", { name: "补生成缺失日程", exact: true }).count(), 0);
     await page.locator('[name="life.activity_count"]').fill("11");
     await page.getByRole("button", { name: "重新生成日程", exact: true }).click();
-    await page.getByText("请先保存日程生成参数，再重新生成日程。", { exact: true }).waitFor();
+    await page.getByText("请先保存日程设置，再重新生成日程。", { exact: true }).waitFor();
     await page.locator('[name="life.activity_count"]').fill("10");
-    await page.getByRole("button", { name: "保存日程生成参数", exact: true }).click();
+    await page.getByRole("button", { name: "保存日程设置", exact: true }).click();
     await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor();
     await page.getByRole("button", { name: "重新生成日程", exact: true }).click();
     await page.getByText("重新生成今天的日程", { exact: true }).waitFor();
@@ -257,15 +285,49 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await page.getByRole("button", { name: "刷新数据", exact: true }).click();
     await page.getByLabel("日程日期").fill(await page.evaluate(() => window.testTomorrow));
     assert.equal(await page.getByRole("button", { name: "重新生成日程", exact: true }).isDisabled(), true);
+    assert.match(await page.locator(".schedule-counts").innerText(), /搜索 · 每日上限 2 次[\s\S]*1 次[\s\S]*已使用 · 已预留 0 · 可安排 1/);
+    assert.match(await page.locator(".activity-detail").innerText(), /自动重试已结束/);
+    await page.getByRole("button", { name: "细化活动", exact: true }).click();
+    assert.equal(await page.evaluate(() => window.calls.some((call) => call.body?.action === "detail_activity")), false, "Opening the detail dialog must not call a model");
+    await page.locator('#editor [name="instruction"]').fill("这次专心复习函数，不安排主动聊天。<img src=x onerror=window.detailXss=true>");
+    await page.locator("#editor-submit").click(); await page.locator("#editor").waitFor({ state: "hidden" });
+    const firstDetail = await page.evaluate(() => window.calls.findLast((call) => call.body?.action === "detail_activity").body);
+    assert.equal(firstDetail.id, "future"); assert.equal(firstDetail.regenerate, false); assert.ok(firstDetail.instruction.startsWith("这次专心复习函数"));
+    assert.equal(await page.evaluate(() => window.detailXss), undefined); assert.equal(await page.locator(".activity-detail img").count(), 0);
+    await page.locator(".activity-decisions > summary").click();
+    assert.match(await page.locator(".activity-decisions").innerText(), /遇到具体学习疑问，需要核对函数概念/);
+    assert.match(await page.locator(".activity-decisions").innerText(), /主动聊天 · 不安排/);
+    await page.getByRole("button", { name: "重新细化", exact: true }).click();
+    assert.equal(await page.locator('#editor [name="instruction"]').inputValue(), "", "A one-time instruction is not reused automatically");
+    await page.locator('#editor [name="instruction"]').fill("保留搜索，稍后读一本数学书。");
+    await page.evaluate(() => { window.failNext = true; });
+    await page.locator("#editor-submit").click();
+    await page.getByText("测试来源暂时不可用", { exact: true }).waitFor();
+    assert.equal(await page.locator("#editor").isVisible(), true, "A rejected refinement retains the draft for retry");
+    assert.ok((await page.evaluate(() => window.fixture.activities.find((item) => item.id === "future").description)).startsWith("这次专心复习函数"));
+    await page.locator("#editor-submit").click(); await page.locator("#editor").waitFor({ state: "hidden" });
+    const secondDetail = await page.evaluate(() => window.calls.findLast((call) => call.body?.action === "detail_activity").body);
+    assert.equal(secondDetail.regenerate, true); assert.equal(secondDetail.instruction, "保留搜索，稍后读一本数学书。");
+    assert.equal(await page.locator(".activity-detail-history").getAttribute("open"), null);
+    await page.locator(".activity-detail-history > summary").click();
+    assert.equal(await page.locator(".activity-detail-history details").count(), 1);
+    await page.locator(".activity-decisions > summary").click();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, "No desktop schedule overflow");
+    if (process.env.LIVING_WORLD_DETAIL_SCREENSHOT) await page.locator("#content").screenshot({ path: process.env.LIVING_WORLD_DETAIL_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, "No mobile detail overflow");
+    if (process.env.LIVING_WORLD_DETAIL_MOBILE_SCREENSHOT) await page.locator("#content").screenshot({ path: process.env.LIVING_WORLD_DETAIL_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+    await page.setViewportSize({ width: 1600, height: 1050 });
     await page.getByRole("button", { name: "编辑", exact: true }).click();
     await page.locator('#editor [name="title"]').fill("数学课，今天复习函数");
     await page.locator("#editor-submit").click(); await page.locator("#editor").waitFor({ state: "hidden" });
     const edit = await page.evaluate(() => window.calls.findLast((call) => call.body?.action === "update_activity").body);
-    assert.equal(edit.patch.title, "数学课，今天复习函数"); assert.equal(edit.patch.actions.social.enabled, true);
+    assert.equal(edit.patch.title, "数学课，今天复习函数"); assert.equal(Object.hasOwn(edit.patch, "actions"), false);
     assert.ok(!Object.hasOwn(edit.patch, "scope") && !Object.hasOwn(edit.patch, "status"));
+    assert.equal(await page.getByRole("button", { name: "细化活动", exact: true }).count(), 1, "An outline edit invalidates the old detail");
     await page.getByRole("button", { name: "批量调整未来活动", exact: true }).click();
     const batch = JSON.parse(await page.locator('#editor [name="json"]').inputValue());
-    assert.equal(batch.updates.length, 1); assert.ok(!Object.hasOwn(batch.updates[0].changes.actions.social, "execution"));
+    assert.equal(batch.updates.length, 1); assert.ok(!Object.hasOwn(batch.updates[0].changes, "actions"), "Batch edits only submit the outline");
     await page.locator("#editor-submit").click(); await page.locator("#editor").waitFor({ state: "hidden" });
     await page.locator('a[data-view="memory"]').click();
     assert.equal(await page.evaluate(() => window.xss), undefined); assert.equal(await page.locator("#content img").count(), 0);
@@ -486,6 +548,9 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await page.getByText("操作已完成，请查看执行结果", { exact: true }).waitFor();
     const saved = await page.evaluate(() => window.calls.findLast((call) => call.body?.action === "save_template").body);
     assert.equal(saved.template, "Changed public instruction only"); assert.ok(!JSON.stringify(saved).includes("Edited private test context"));
+    await page.locator(".template-history > summary").click();
+    assert.match(await page.locator(".template-history").textContent(), /旧版指令：不能新增行动/);
+    assert.equal(await page.locator(".template-history button").count(), 0, "Archived templates are read-only");
     assert.equal(await page.getByRole("tablist", { name: "调用记录四项视图", exact: true, includeHidden: true }).count(), 4);
     await page.evaluate(() => { window.savedViews = window.fixture.debug_views; delete window.fixture.debug_views; });
     await page.getByRole("button", { name: "刷新数据", exact: true }).click();
@@ -606,6 +671,6 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; location.hash = "overview"; });
     await page.locator('a[data-view="overview"][aria-current="page"]').waitFor();
     assert.deepEqual(errors, [], "No browser runtime errors");
-    process.stdout.write("UI smoke passed: state home, schedule quotas/archive/editor, whitelist UMO, fixed sources, independent digests, four debug views, single-column source disclosures, 14 JSON/SSE formatting cases, nested JSON folding, per-call and direction fold state, changed-body reset, keyboard/mobile controls, original-view toggle, exact JSON/SSE body downloads, paired calls, old snapshot labels, test/template separation, XSS, memory scopes, error feedback, import guard, responsive layout.\n");
+    process.stdout.write("UI smoke passed: state home, outline settings and independent action caps, persistent day usage, detail/re-detail instruction and failure flow, decisions and detail history, outline-only edits, regeneration archives, old template viewer, whitelist UMO, fixed sources, independent digests, four debug views, single-column source disclosures, 14 JSON/SSE formatting cases, nested JSON folding, per-call and direction fold state, changed-body reset, keyboard/mobile controls, original-view toggle, exact JSON/SSE body downloads, paired calls, old snapshot labels, test/template separation, XSS, memory scopes, error feedback, import guard, responsive layout.\n");
   } finally { await browser.close(); }
 })().catch((error) => { process.stderr.write(`${error.stack}\n`); process.exitCode = 1; });

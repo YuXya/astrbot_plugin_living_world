@@ -6,7 +6,7 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from . import __version__
@@ -15,6 +15,7 @@ from .context import normalize_context, source_item
 from .debug import DebugService, json_value
 from .journal import JournalService
 from .life import LifeService
+from .life_migration import migrate_life
 from .memory import MemoryService
 from .store import Store
 
@@ -50,6 +51,7 @@ class Runtime:
         self.chat = ChatService(self)
         self.memory = MemoryService(self)
         self.life = LifeService(self)
+        migrate_life(self.life)
         self.journal = JournalService(self)
         from .social import SocialService
         from .sources import SourceService
@@ -443,6 +445,30 @@ class Runtime:
                 draft = await draft
             template, context = draft["template"], draft["context"]
             context["parameters"] = self.life.parameters()
+        elif task == "life.detail":
+            now = self.life._now()
+            candidates = [
+                row
+                for row in self.life.list_activities()
+                if row.get("scope") in {"global", scope} and self.life._editable(row, now)
+            ]
+            activity = (
+                candidates[0]
+                if candidates
+                else {
+                    "id": "test-detail",
+                    "date": str(now.date()),
+                    "scope": scope,
+                    "start": (now + timedelta(minutes=10)).isoformat(),
+                    "end": (now + timedelta(minutes=70)).isoformat(),
+                    "title": "本次测试活动",
+                    "content": "在这里填写希望细化的活动",
+                    "status": "planned",
+                }
+            )
+            activity = {**self.life._view(activity, scope), "scope": scope}
+            draft = self.life.detail_request(activity, now=now)
+            template, context = draft["template"], draft["context"]
         else:
             records = self.memory.recall(scope=scope, limit=10, reinforce=False)
             activity = self.life.current(scope)
@@ -704,10 +730,20 @@ class Runtime:
             "scope": scope,
             "status": "running",
             "created_at": time.time(),
+            "schema_version": 3,
         }
         if not self.store.claim("actions", action_id, row):
             return {"status": "skipped", "text": "该行动已受理，不重复执行"}
         try:
+            start_options = {}
+            if (
+                payload.get("planned")
+                and payload.get("activity_id")
+                and kind in {"news", "search", "social"}
+            ):
+                start_options["before_start"] = lambda: self.life.consume_action(
+                    payload["activity_id"], kind
+                )
             if kind == "social":
                 result = await self.run(
                     module,
@@ -715,13 +751,17 @@ class Runtime:
                         reason=str(payload.get("reason") or payload.get("topic") or "想找人聊聊"),
                         scope=scope,
                         action_id=action_id,
+                        **start_options,
                     ),
                 )
             else:
                 result = await self.run(
                     module,
                     self.sources.explore(
-                        kind, str(payload.get("query") or payload.get("bvid") or ""), scope=scope
+                        kind,
+                        str(payload.get("query") or payload.get("bvid") or ""),
+                        scope=scope,
+                        **start_options,
                     ),
                 )
             if not self.enabled(module):
@@ -796,17 +836,22 @@ class Runtime:
         plan_keys = (
             "daily_plan_time",
             "activity_count",
-            "news_count",
-            "search_count",
-            "social_count",
         )
         if any(old["life"][key] != proposed["life"][key] for key in plan_keys):
             self.life.freeze_parameters()
+        limit_keys = {"news_count", "search_count", "social_count"}
+        operational_old = {k: v for k, v in old["life"].items() if k not in limit_keys}
+        operational_new = {k: v for k, v in proposed["life"].items() if k not in limit_keys}
         changed = {
             m
             for m in MODULES
             if old["modules"][m] != proposed["modules"][m] or old.get(m) != proposed.get(m)
         }
+        if (
+            operational_old == operational_new
+            and old["modules"]["life"] == proposed["modules"]["life"]
+        ):
+            changed.discard("life")
         if (
             old["persona_id"] != proposed["persona_id"]
             or old["sessions"] != proposed["sessions"]
@@ -820,11 +865,22 @@ class Runtime:
         if old["modules"]["debug"] and not proposed["modules"]["debug"]:
             # Finalize partial evidence while diagnostic writes are still enabled.
             self.chat.audit.close()
-        self.settings = proposed
-        self.config_version += 1
+        only_limits = {
+            **old,
+            "life": proposed["life"],
+        } == proposed and operational_old == operational_new
+        try:
+            with self.store.transaction():
+                self.settings = proposed
+                self.store.put("settings", "current", proposed)
+                self.life.reconcile_reservations()
+        except BaseException:
+            self.settings = old
+            raise
+        if not only_limits:
+            self.config_version += 1
         if not old["modules"]["debug"] and proposed["modules"]["debug"]:
             self.chat.install()
-        self.store.put("settings", "current", proposed)
         self.debug.trim()
         tasks = [
             task
@@ -941,6 +997,9 @@ class Runtime:
             "life_day_history": self.store.list("life_day_history"),
             "day_regenerating": self.life.regenerating,
             "day_summary": self.life.day_summary() if hasattr(self.life, "day_summary") else {},
+            "action_usage": self.store.list("life_action_usage"),
+            "detail_history": self.store.list("life_detail_history"),
+            "prompt_template_history": self.store.list("prompt_template_history"),
             "actions": self.store.list("actions")[:200],
             "daily_digest_runs": self.store.list("daily_digest_runs")[:100],
             "bilibili_dependency": dependency,
@@ -975,8 +1034,15 @@ class Runtime:
         self.store.validate_records(backup.get("records"))
         # Imported automatic behavior stays disabled until explicitly configured.
         await self.update_settings({"modules": {m: False for m in MODULES}})
-        self.store.restore(backup["records"])
         restored["modules"] = {m: False for m in MODULES}
+        before = self.settings
+        try:
+            with self.store.transaction():
+                self.store.restore(backup["records"])
+                self.settings = restored
+                migrate_life(self.life)
+        finally:
+            self.settings = before
         await self.update_settings(restored)
         return {
             "status": "success",
@@ -1021,7 +1087,12 @@ class Runtime:
                 "life", self.life.regenerate_day(day=data.get("date"), scope=scope)
             )
         if action == "detail_activity":
-            return await self.run("life", self.life.detail(data["id"]))
+            return await self.run(
+                "life",
+                self.life.detail(
+                    data["id"], data.get("instruction", ""), data.get("regenerate", False)
+                ),
+            )
         if action == "update_activity":
             return self.life.update_activity(data["id"], data["patch"])
         if action == "update_state":
@@ -1070,7 +1141,7 @@ class Runtime:
         if action == "social":
             return {
                 "status": "skipped",
-                "text": "主动联系由今日活动的聊天标记执行；请在日程页调整未开始活动",
+                "text": "主动联系由活动细化决定；请在日程页细化尚未开始的活动",
             }
         raise ValueError("未知管理操作")
 

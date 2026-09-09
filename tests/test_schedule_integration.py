@@ -26,24 +26,6 @@ def generated_day():
     activities = []
     for index in range(10):
         start = DAY.replace(hour=9) + timedelta(hours=index)
-        actions = {}
-        for kind, indices, minute in (
-            ("news", {0, 4}, 0),
-            ("search", {0, 5}, 1),
-            ("social", {0, 6, 7}, 2),
-        ):
-            enabled = index in indices
-            actions[kind] = {
-                "enabled": enabled,
-                "intent": {
-                    "news": "了解今天感兴趣的科学新闻",
-                    "search": "搜索天文馆的开放时间",
-                    "social": "数学课有些无聊，去群里聊聊新见闻",
-                }[kind]
-                if enabled
-                else "",
-                "at": (start + timedelta(minutes=minute)).isoformat() if enabled else None,
-            }
         activities.append(
             {
                 "start": start.isoformat(),
@@ -52,7 +34,6 @@ def generated_day():
                 "content": "继续当天生活，不把尚未执行的行动记成经历。",
                 "location": "教室",
                 "sleep_state": "清醒",
-                "actions": actions,
             }
         )
     return {"activities": activities}
@@ -66,6 +47,8 @@ class ExternalHost:
         self.history_scopes = []
         self.http_urls = []
         self.searches = []
+        self.detail_row = generated_day()["activities"][0]
+        self.detail_kinds = ("news", "search", "social")
 
     async def persona(self, persona_id):
         assert persona_id == "student"
@@ -84,11 +67,31 @@ class ExternalHost:
         if task == "life.plan":
             response = generated_day()
         elif task == "life.detail":
+            start = datetime.fromisoformat(self.detail_row["start"])
             response = {
                 "description": "数学课间看了看窗外。",
                 "incident": "忘带笔，先借一支。",
                 "energy_delta": -1,
                 "mood": "好奇",
+                "actions": {
+                    kind: {
+                        "enabled": kind in self.detail_kinds,
+                        "intent": {
+                            "news": "了解今天感兴趣的科学新闻",
+                            "search": "搜索天文馆的开放时间",
+                            "social": "数学课有些无聊，去群里聊聊新见闻",
+                        }[kind]
+                        if kind in self.detail_kinds
+                        else "",
+                        "reason": "当前活动有具体兴趣"
+                        if kind in self.detail_kinds
+                        else "当前不需要",
+                        "at": (start + timedelta(minutes=index)).isoformat()
+                        if kind in self.detail_kinds
+                        else None,
+                    }
+                    for index, kind in enumerate(("news", "search", "social"))
+                },
             }
         elif task == "life.revise":
             response = {"updates": []}
@@ -203,10 +206,19 @@ async def test_real_pipeline_orders_overlapping_actions_and_does_not_replay(tmp_
         assert [
             sum(item["actions"][kind]["enabled"] for item in plan)
             for kind in ("news", "search", "social")
-        ] == [2, 2, 3]
+        ] == [0, 0, 0]
         assert len([request for request in host.requests if request["task"] == "life.plan"]) == 1
         assert not host.sent and not host.http_urls
 
+        clock[0] = DAY.replace(hour=8, minute=50)
+        await runtime.life.tick()
+        await drain(runtime)
+        assert len([request for request in host.requests if request["task"] == "life.detail"]) == 1
+        assert all(
+            value["reserved"] == 1 and value["used"] == 0
+            for value in runtime.life.budget().values()
+        )
+        assert not host.sent and not host.http_urls
         clock[0] = DAY.replace(hour=9, minute=2)
         await runtime.life.tick()
         await drain(runtime)
@@ -237,6 +249,10 @@ async def test_real_pipeline_orders_overlapping_actions_and_does_not_replay(tmp_
             for item in observations
         )
         assert len(runtime.store.list("actions")) == 3
+        assert all(
+            value["used"] == 1 and value["reserved"] == 0
+            for value in runtime.life.budget().values()
+        )
         archive = runtime.store.get("life_days", f"{DAY.date()}:global")
         assert archive["raw_json"] and archive["full_request"]["task"] == "life.plan"
 
@@ -245,6 +261,9 @@ async def test_real_pipeline_orders_overlapping_actions_and_does_not_replay(tmp_
         await runtime.life.tick()
         await drain(runtime)
         assert (len(host.sent), len(host.http_urls), len(host.searches)) == counts
+        for index, kind in ((4, "news"), (5, "search"), (6, "social")):
+            host.detail_row, host.detail_kinds = plan[index], (kind,)
+            await runtime.life.detail(plan[index]["id"])
     finally:
         await runtime.stop()
 
@@ -263,6 +282,10 @@ async def test_real_pipeline_orders_overlapping_actions_and_does_not_replay(tmp_
             assert item["actions"][kind]["execution"]["status"] == "skipped"
             assert item["actions"][kind]["execution"]["reason"] == "overdue_after_restart"
         assert len(runtime.store.list("observations")) == 2
+        assert all(
+            value["used"] == 1 and value["reserved"] == 0
+            for value in runtime.life.budget().values()
+        )
     finally:
         await runtime.stop()
 
@@ -274,9 +297,13 @@ async def test_disabled_action_modules_skip_flags_without_external_io_or_later_r
     try:
         await runtime.life.tick()
         await drain(runtime)
+        clock[0] = DAY.replace(hour=8, minute=50)
+        await runtime.life.tick()
+        await drain(runtime)
         await runtime.update_settings(
             {"modules": {"news": False, "search": False, "proactive": False}}
         )
+        disabled_at = clock[0]
         clock[0] = DAY.replace(hour=9, minute=2)
         await runtime.life.tick()
         await drain(runtime)
@@ -285,11 +312,17 @@ async def test_disabled_action_modules_skip_flags_without_external_io_or_later_r
             execution = action["execution"]
             assert execution["status"] == "skipped"
             assert execution["reason"] == "module_disabled"
-            elapsed = (datetime.fromisoformat(execution["finished_at"]) - clock[0]).total_seconds()
+            elapsed = (
+                datetime.fromisoformat(execution["finished_at"]) - disabled_at
+            ).total_seconds()
             assert 0 <= elapsed < 5
         assert first["status"] == "running" and runtime.enabled("life")
         assert not host.sent and not host.http_urls and not host.searches
         assert not runtime.store.list("observations") and not runtime.store.list("actions")
+        assert all(
+            value["used"] == 0 and value["reserved"] == 0
+            for value in runtime.life.budget().values()
+        )
         assert runtime.store.list("memories"), "Disabling behavior must retain business data"
 
         await runtime.update_settings(
@@ -300,5 +333,127 @@ async def test_disabled_action_modules_skip_flags_without_external_io_or_later_r
         await drain(runtime)
         assert not host.sent and not host.http_urls and not host.searches
         assert len([request for request in host.requests if request["task"] == "life.plan"]) == 1
+    finally:
+        await runtime.stop()
+
+
+class BudgetHost(ExternalHost):
+    """Keep generated messages independent of source successes for budget boundary tests."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_social = False
+
+    async def session_persona(self, scope):
+        return "student" if scope in {GROUP, ACTUAL_GROUP, "qq:GroupMessage:200"} else "other"
+
+    async def history(self, scope):
+        self.history_scopes.append(scope)
+        return "群友在聊今天的课程。"
+
+    async def generate_request(self, request):
+        if request["task"] != "social.message":
+            return await super().generate_request(request)
+        self.requests.append(copy.deepcopy(request))
+        self.timeline.append("social.message")
+        if self.fail_social:
+            raise OSError("Fixture model unavailable")
+        text = "课间休息了，大家今天学得怎么样？"
+        return text, {}, {"completion_text": text}
+
+
+async def prepare_first_detail(runtime, host, clock, kinds):
+    await runtime.life.tick()
+    await drain(runtime)
+    host.detail_kinds = kinds
+    clock[0] = DAY.replace(hour=8, minute=50)
+    await runtime.life.tick()
+    await drain(runtime)
+    assert all(value["used"] == 0 for value in runtime.life.budget().values())
+    clock[0] = DAY.replace(hour=9, minute=2)
+
+
+@pytest.mark.parametrize("fail_social", [False, True])
+async def test_one_chat_round_with_two_targets_consumes_one_attempt_even_on_failure(
+    tmp_path, fail_social
+):
+    host, clock = BudgetHost(), [DAY.replace(hour=6)]
+    host.fail_social = fail_social
+    runtime = await configured_runtime(tmp_path / "world.sqlite", host, clock)
+    try:
+        await runtime.update_settings(
+            {
+                "sessions": [
+                    {"umo": GROUP, "enabled": True, "weight": 1},
+                    {"umo": "qq:GroupMessage:200", "enabled": True, "weight": 1},
+                ],
+                "social": {"target_count": 2},
+            }
+        )
+        await prepare_first_detail(runtime, host, clock, ("social",))
+        await runtime.life.tick()
+        await drain(runtime)
+        assert len([r for r in host.requests if r["task"] == "social.message"]) == 2
+        assert len(host.sent) == (0 if fail_social else 2)
+        assert runtime.life.budget()["social"]["used"] == 1
+        assert runtime.life.budget()["social"]["reserved"] == 0
+        assert len(runtime.store.list("life_action_usage")) == 1
+        await runtime.life.tick()
+        assert len([r for r in host.requests if r["task"] == "social.message"]) == 2
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("blocking", ["quiet_hours", "no_targets", "changed_before_generation"])
+async def test_chat_skipped_before_message_generation_releases_its_reservation(tmp_path, blocking):
+    host, clock = BudgetHost(), [DAY.replace(hour=6)]
+    runtime = await configured_runtime(tmp_path / "world.sqlite", host, clock)
+    try:
+        await prepare_first_detail(runtime, host, clock, ("social",))
+        if blocking == "quiet_hours":
+            await runtime.update_settings(
+                {"social": {"quiet_start": "08:00", "quiet_end": "10:00"}}
+            )
+        elif blocking == "no_targets":
+            await runtime.update_settings({"sessions": []})
+        else:
+            checks = 0
+
+            async def changed_control(scope, interjection=False):
+                nonlocal checks
+                checks += 1
+                return "" if checks == 1 else "cooldown"
+
+            runtime.social._control_reason = changed_control
+        await runtime.life.tick()
+        await drain(runtime)
+        assert not any(r["task"] == "social.message" for r in host.requests)
+        assert not host.sent
+        assert runtime.life.budget()["social"]["used"] == 0
+        assert runtime.life.budget()["social"]["reserved"] == 0
+        assert not runtime.store.list("life_action_usage")
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("capability", ["news", "search", "search_unconfigured"])
+async def test_missing_source_capability_does_not_start_or_charge_an_action(tmp_path, capability):
+    host, clock = BudgetHost(), [DAY.replace(hour=6)]
+    runtime = await configured_runtime(tmp_path / "world.sqlite", host, clock)
+    kind = "news" if capability == "news" else "search"
+    try:
+        await prepare_first_detail(runtime, host, clock, (kind,))
+        if kind == "news":
+            await runtime.update_settings({"news": {"sources": []}})
+        elif capability == "search":
+            host.search = None
+        else:
+            host.search_ready = lambda scope: False
+        await runtime.life.tick()
+        await drain(runtime)
+        assert not host.sent and not host.searches and not host.http_urls
+        assert not any(r["task"] in {"news.select", "search.topic"} for r in host.requests)
+        assert runtime.life.budget()[kind]["used"] == 0
+        assert runtime.life.budget()[kind]["reserved"] == 0
     finally:
         await runtime.stop()

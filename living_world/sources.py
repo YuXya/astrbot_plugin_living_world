@@ -258,13 +258,15 @@ class SourceService:
                 break
         return articles
 
-    async def _news(self, query: str, scope="global") -> dict:
+    async def _news(self, query: str, scope="global", before_start=None) -> dict:
         settings = self.runtime.settings.get("news", {})
         feeds = [item["url"] for item in settings.get("sources", []) if item.get("enabled", True)]
         if "sources" not in settings:
             feeds = settings.get("feeds", [])
         if not feeds:
             return self._skip("not_configured", "尚未配置新闻 RSS/Atom 来源。")
+        if before_start is not None and not before_start():
+            return self._skip("daily_budget_or_activity_changed")
         limit = max(1, min(30, int(settings.get("limit", 5))))
         urls = list(dict.fromkeys(str(feed) for feed in feeds))[:20]
         results = await asyncio.gather(
@@ -342,7 +344,23 @@ class SourceService:
             "errors": errors,
         }
 
-    async def _search(self, query: str, scope: str) -> dict:
+    async def _search(self, query: str, scope: str, before_start=None) -> dict:
+        if getattr(self.runtime.host, "search", None) is None:
+            return self._skip("not_configured", "AstrBot 网页搜索服务不可用。")
+        ready = getattr(self.runtime.host, "search_ready", None)
+        if ready is not None:
+            try:
+                available = ready(scope)
+                if inspect.isawaitable(available):
+                    available = await available
+                if not available:
+                    return self._skip("not_configured", "AstrBot 网页搜索服务不可用。")
+            except Exception:
+                return self._skip("not_configured", "AstrBot 网页搜索服务不可用。")
+        if not await self._allowed("search", scope):
+            return self._skip("module_disabled")
+        if before_start is not None and not before_start():
+            return self._skip("daily_budget_or_activity_changed")
         topic = parse_json(
             await self._complete(
                 "search.topic",
@@ -701,7 +719,9 @@ class SourceService:
         self.runtime.store.put("observations", record["id"], record)
         return record
 
-    async def explore(self, kind: str, query: str = "", scope: str = "global") -> dict:
+    async def explore(
+        self, kind: str, query: str = "", scope: str = "global", *, before_start=None
+    ) -> dict:
         module = "bilibili" if kind in {"bilibili", "bilibili_watch", "bilibili_recent"} else kind
         if module not in {"news", "search", "weather", "bilibili"}:
             return self._fail("unknown_source", "未知外部来源。")
@@ -713,11 +733,11 @@ class SourceService:
             return self._skip("scope_not_allowed")
         try:
             if module == "news":
-                data = await self._news(str(query), scope)
+                data = await self._news(str(query), scope, before_start)
             elif module == "weather":
                 data = await self._weather(str(query), scope)
             elif module == "search":
-                data = await self._search(str(query), scope)
+                data = await self._search(str(query), scope, before_start)
             else:
                 data = await self._bilibili(kind, str(query), scope)
             if data["status"] != "success":

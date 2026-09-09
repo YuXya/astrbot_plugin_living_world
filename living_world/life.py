@@ -1,4 +1,4 @@
-"""Daily plans with fixed action quotas, persistent claims and scoped refinements."""
+"""Daily outlines, activity details, durable action budgets and scoped refinements."""
 
 from __future__ import annotations
 
@@ -14,13 +14,11 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .prompts import PROMPTS
+from .life_budget import ActionBudget
+from .context import activity_text
 
 ACTION_ORDER = ("news", "search", "social")
-ACTION_KINDS = frozenset(
-    {"social", "news", "search", "weather", "bilibili", "bilibili_watch", "bilibili_recent"}
-)
-ACTIVITY_KINDS = ACTION_KINDS | {"fiction"}
-FINAL_STATUSES = frozenset({"completed", "failed", "skipped"})
+FINAL_STATUSES = frozenset({"completed", "failed", "skipped", "cancelled"})
 PLAN_TEMPLATE = PROMPTS["life.plan"]
 DETAIL_TEMPLATE = PROMPTS["life.detail"]
 REVISE_TEMPLATE = PROMPTS["life.revise"]
@@ -61,7 +59,7 @@ def elapsed_clock(now):
     return lambda: now + timedelta(seconds=max(0, monotonic() - started))
 
 
-class LifeService:
+class LifeService(ActionBudget):
     def __init__(self, runtime):
         self.runtime = runtime
         self._tick_lock = asyncio.Lock()
@@ -69,6 +67,7 @@ class LifeService:
         self._detail_lock = asyncio.Lock()
         self._first_tick = True
         self.regenerating = False
+        self._detailing = set()
 
     def _now(self, now: datetime | None = None) -> datetime:
         tz = character_timezone(self.runtime.settings)
@@ -85,20 +84,14 @@ class LifeService:
 
     def parameters(self) -> dict:
         result = {
-            "daily_plan_time": self.runtime.settings.get("life", {}).get("daily_plan_time", "06:00")
+            "daily_plan_time": self.runtime.settings.get("life", {}).get(
+                "daily_plan_time", "06:00"
+            ),
+            "activity_count": int(self._setting("activity_count", 10)),
         }
-        for key, default in (
-            ("activity_count", 10),
-            ("news_count", 2),
-            ("search_count", 2),
-            ("social_count", 3),
-        ):
-            result[key] = int(self._setting(key, default))
         time.fromisoformat(result["daily_plan_time"])
-        if not 1 <= result["activity_count"] <= 48 or any(
-            not 0 <= result[f"{k}_count"] <= result["activity_count"] for k in ACTION_ORDER
-        ):
-            raise ValueError("日程数量或行动数量无效，每类行动数量不能超过活动数量")
+        if not 1 <= result["activity_count"] <= 48:
+            raise ValueError("每天活动数必须在 1 到 48 之间")
         return result
 
     async def _complete(self, task, template, context, scope="global", *, frozen_template=False):
@@ -209,7 +202,7 @@ class LifeService:
             parsed = datetime.combine(day, time.fromisoformat(value))
         return self._now(parsed)
 
-    def _make_activity(self, data: dict, day: date, scope: str, key: str, *, modern=False) -> dict:
+    def _make_activity(self, data: dict, day: date, scope: str, key: str) -> dict:
         if not isinstance(data, dict):
             raise TypeError("An activity must be an object.")
         title = data.get("title", "")
@@ -223,55 +216,63 @@ class LifeService:
             end += timedelta(days=1)
         if start.date() != day or end <= start or end - start > timedelta(days=1):
             raise ValueError("An activity must start on its planned day and last at most a day.")
-        kind = "fiction" if modern else data.get("kind", "fiction")
-        if kind not in ACTIVITY_KINDS or not isinstance(data.get("payload", {}), dict):
-            raise ValueError("Unsupported activity kind or payload.")
         row = {
             "id": key,
             "date": str(day),
             "start": start.isoformat(),
             "end": end.isoformat(),
             "title": title.strip(),
-            "kind": kind,
-            "payload": copy.deepcopy(data.get("payload", {})),
+            "kind": "fiction",
             "scope": scope,
             "status": "planned",
             "detailed": False,
+            "schema_version": 3,
             "created_at": self._now().isoformat(),
+            "actions": self._empty_actions(),
         }
-        for field in ("content", "location", "sleep_state", "description", "incident"):
-            value = data.get(field, "未知" if field in {"location", "sleep_state"} else "")
+        for field in ("content", "location", "sleep_state"):
+            value = data.get(field, "未知" if field != "content" else "")
             if not isinstance(value, str):
                 raise TypeError(f"{field} must be text.")
             row[field] = value
-        if modern:
-            raw = data.get("actions")
-            if not isinstance(raw, dict) or set(raw) != set(ACTION_ORDER):
-                raise ValueError("每个活动必须包含 actions.news/search/social")
-            actions, last_at = {}, None
-            for action_kind in ACTION_ORDER:
-                action = raw[action_kind]
-                if not isinstance(action, dict) or type(action.get("enabled")) is not bool:
-                    raise ValueError("行动 enabled 必须为布尔值")
-                intent = action.get("intent", action.get("reason", ""))
-                if not isinstance(intent, str) or (action["enabled"] and not intent.strip()):
-                    raise ValueError("启用行动必须提供执行意图")
-                at = None
-                if action["enabled"]:
-                    at = self._parse_time(action.get("at"), day)
-                    if at < start and end.date() > start.date() and "T" not in action["at"]:
-                        at += timedelta(days=1)
-                    if not start <= at < end or (last_at and at < last_at):
-                        raise ValueError("行动时间必须位于活动内，并按新闻、搜索、聊天排序")
-                    last_at = at
-                actions[action_kind] = {
-                    "enabled": action["enabled"],
-                    "intent": intent.strip(),
-                    "at": at.isoformat() if at else None,
-                    "execution": {"status": "pending" if action["enabled"] else "disabled"},
-                }
-            row.update(schema_version=2, actions=actions)
         return row
+
+    def _parse_actions(self, raw, activity):
+        if not isinstance(raw, dict) or set(raw) != set(ACTION_ORDER):
+            raise ValueError("细化结果必须包含 actions.news/search/social 三项决定")
+        actions, previous = {}, None
+        day = date.fromisoformat(activity["date"])
+        start, end = (
+            self._parse_time(activity["start"], day),
+            self._parse_time(activity["end"], day),
+        )
+        for kind in ACTION_ORDER:
+            item = raw[kind]
+            if not isinstance(item, dict) or type(item.get("enabled")) is not bool:
+                raise ValueError("行动 enabled 必须为布尔值")
+            intent, reason = item.get("intent", ""), item.get("reason", "")
+            if not isinstance(intent, str) or not isinstance(reason, str):
+                raise ValueError("行动意图与理由必须为文本")
+            at = None
+            if item["enabled"]:
+                if not intent.strip() or not reason.strip():
+                    raise ValueError("启用行动必须提供执行意图与理由")
+                at = self._parse_time(item.get("at"), day)
+                if at < start and end.date() > start.date() and "T" not in item["at"]:
+                    at += timedelta(days=1)
+                if not start <= at < end or (previous and at < previous):
+                    raise ValueError("行动时间必须位于活动内，并按新闻、搜索、聊天排序")
+                previous = at
+            elif item.get("at") is not None:
+                raise ValueError("未安排的行动时间必须为空")
+            actions[kind] = {
+                "enabled": item["enabled"],
+                "intent": intent.strip(),
+                "reason": reason.strip(),
+                "at": at.isoformat() if at else None,
+                "execution": {"status": "pending" if item["enabled"] else "disabled"},
+            }
+        return actions
 
     def _memories(self, scope: str, *, reinforce=False) -> list[dict]:
         if not self.runtime.enabled("memory"):
@@ -299,18 +300,12 @@ class LifeService:
     def _validate_day(self, activities, parameters):
         if len(activities) != parameters["activity_count"]:
             raise ValueError(f"日程需要恰好 {parameters['activity_count']} 个活动")
-        for kind in ACTION_ORDER:
-            if (
-                sum(bool(a.get("actions", {}).get(kind, {}).get("enabled")) for a in activities)
-                != parameters[f"{kind}_count"]
-            ):
-                raise ValueError(f"{kind} 标记数量必须为 {parameters[f'{kind}_count']}")
         ordered = sorted(activities, key=lambda a: a["start"])
         if any(left["end"] > right["start"] for left, right in pairwise(ordered)):
             raise ValueError("日程活动不能重叠；同一活动内可包含多类行动")
 
     def freeze_parameters(self, now: datetime | None = None) -> dict:
-        """Freeze today's budget before configuration changes can affect tomorrow."""
+        """Freeze only the daily outline settings before a configuration change."""
         now = self._now(now)
         key = f"{now.date()}:global"
         marker = self.runtime.store.get("life_days", key, {}) or {}
@@ -318,7 +313,7 @@ class LifeService:
             marker = {
                 "date": str(now.date()),
                 "scope": "global",
-                "schema_version": 2,
+                "schema_version": 3,
                 "status": "waiting",
                 "parameters": self.parameters(),
             }
@@ -370,8 +365,8 @@ class LifeService:
                             "date": str(day),
                             "scope": scope,
                             "status": "completed",
-                            "schema_version": 1,
-                            "legacy": True,
+                            "schema_version": 3,
+                            "parameters": self.parameters(),
                         },
                     )
                 return existing
@@ -386,7 +381,7 @@ class LifeService:
             marker = {
                 "date": str(day),
                 "scope": scope,
-                "schema_version": 2,
+                "schema_version": 3,
                 "status": "generating",
                 "parameters": parameters,
                 "request": copy.deepcopy(request),
@@ -415,19 +410,10 @@ class LifeService:
                         day,
                         scope,
                         uuid.uuid5(uuid.NAMESPACE_URL, f"living-world:plan:{key}:{i}").hex,
-                        modern=True,
                     )
                     for i, item in enumerate(raw)
                 ]
                 self._validate_day(rows, parameters)
-                for row in rows:
-                    for action in row["actions"].values():
-                        if action["enabled"] and self._parse_time(action["at"], day) < now:
-                            action["execution"] = {
-                                "status": "skipped",
-                                "reason": "overdue_at_generation",
-                                "finished_at": now.isoformat(),
-                            }
                 marker.update(status="prepared", adopted_activities=copy.deepcopy(rows))
                 self.runtime.store.put("life_days", key, marker)
                 for row in rows:
@@ -488,7 +474,6 @@ class LifeService:
                         now.date(),
                         "global",
                         uuid.uuid5(uuid.NAMESPACE_URL, f"living-world:plan:{version}:{i}").hex,
-                        modern=True,
                     )
                     for i, item in enumerate(raw)
                 ]
@@ -498,20 +483,10 @@ class LifeService:
                 adopted_at = self._check_regeneration(now, binding, timezone_name)
                 for row in rows:
                     row["plan_version"] = version
-                    for action in row["actions"].values():
-                        if (
-                            action["enabled"]
-                            and self._parse_time(action["at"], now.date()) <= adopted_at
-                        ):
-                            action["execution"] = {
-                                "status": "skipped",
-                                "reason": "overdue_at_regeneration",
-                                "finished_at": adopted_at.isoformat(),
-                            }
                 marker = {
                     "date": str(now.date()),
                     "scope": "global",
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "status": "completed",
                     "version_id": version,
                     "origin": "manual_regeneration",
@@ -581,98 +556,89 @@ class LifeService:
             and self._parse_time(activity["start"], date.fromisoformat(activity["date"])) > now
         )
 
+    def _invalidate_detail(self, row):
+        for field in (
+            "description",
+            "incident",
+            "energy_delta",
+            "mood",
+            "detail_version",
+            "detail_error",
+            "detail_retry_after",
+            "detail_request",
+            "detail_raw",
+        ):
+            row.pop(field, None)
+        row.update(detailed=False, detail_attempts=0, actions=self._empty_actions())
+
     def update_activities(self, updates: list[dict]) -> list[dict]:
-        """Validate a complete future-only batch before writing any changes."""
+        """Apply future-only edits atomically, invalidating decisions tied to changed outlines."""
         if self.regenerating:
             raise ValueError("正在重新生成日程，暂时不能编辑活动")
         if not isinstance(updates, list) or not updates:
             raise ValueError("需要待调整的活动列表")
-        now, proposed, days = self._now(), {}, set()
-        allowed = {
-            "title",
-            "start",
-            "end",
-            "content",
-            "location",
-            "sleep_state",
-            "kind",
-            "payload",
-            "description",
-            "incident",
-            "actions",
-        }
-        for update in updates:
-            if not isinstance(update, dict):
-                raise TypeError("日程调整必须为对象")
-            key, changes = update.get("id"), update.get("changes", {})
-            if key in proposed or not isinstance(changes, dict) or set(changes) - allowed:
-                raise ValueError("Unsupported or duplicate activity changes.")
-            old = self.runtime.store.get("activities", key)
-            if old is None:
-                raise KeyError(key)
-            if not self._editable(old, now):
-                raise ValueError("只能修改尚未开始的活动")
-            modern = old.get("schema_version") == 2
-            if modern and (
-                ("kind" in changes and changes["kind"] != "fiction") or "payload" in changes
-            ):
-                raise ValueError("新日程的行动只能通过 actions 配置")
-            if not modern and "actions" in changes:
-                raise ValueError("旧日程不能追加新的行动配额，新规则用于下一份正式日程")
-            validated = self._make_activity(
-                {**old, **changes},
-                date.fromisoformat(old["date"]),
-                old["scope"],
-                key,
-                modern=modern,
-            )
-            if not self._editable(validated, now):
-                raise ValueError("调整后的开始时间必须在现在之后")
-            merged = {
-                **old,
-                **validated,
-                "created_at": old.get("created_at"),
-                "updated_at": now.isoformat(),
-            }
-            if modern:
-                for kind in ACTION_ORDER:
-                    previous, current = old["actions"][kind], merged["actions"][kind]
-                    status = previous.get("execution", {}).get("status", "pending")
-                    if status not in {"pending", "disabled"} and any(
-                        previous.get(f) != current.get(f) for f in ("enabled", "intent", "at")
-                    ):
-                        raise ValueError("已经处理过的行动记录不能修改")
-                    current["execution"] = copy.deepcopy(
-                        previous.get("execution", {"status": "pending"})
-                    )
-                    if status in {"pending", "disabled"}:
-                        current["execution"] = {
-                            "status": "pending" if current["enabled"] else "disabled"
-                        }
-                days.add(old["date"])
-            for field in ("description", "incident", "energy_delta", "mood"):
-                if field not in changes:
-                    merged.pop(field, None)
-            proposed[key] = merged
-        for day in days:
-            rows = [
-                proposed.get(row["id"], row)
-                for row in self._day_activities(date.fromisoformat(day))
-            ]
-            parameters = (self.runtime.store.get("life_days", f"{day}:global", {}) or {}).get(
-                "parameters"
-            )
-            if parameters is None:
-                raise ValueError("缺少该日正式生成参数，不能修改行动配额")
-            self._validate_day(rows, parameters)
-        batch_write = getattr(self.runtime.store, "put_many", None)
-        if batch_write:
-            batch_write("activities", list(proposed.items()))
-        else:
-            for key, row in proposed.items():
-                self.runtime.store.put("activities", key, row)
-        for key in proposed:
-            self._cancel_children(key, now)
+        store, now = self.runtime.store, self._now()
+        outlines = {"title", "start", "end", "content", "location", "sleep_state"}
+        with store.transaction():
+            proposed, writes, days = {}, [], set()
+            for update in updates:
+                if not isinstance(update, dict):
+                    raise TypeError("日程调整必须为对象")
+                key, changes = update.get("id"), update.get("changes", {})
+                if key in self._detailing:
+                    raise ValueError("该活动正在细化，请稍后编辑")
+                if (
+                    key in proposed
+                    or not isinstance(changes, dict)
+                    or set(changes) - outlines - {"actions"}
+                ):
+                    raise ValueError("活动调整包含不支持或重复的字段")
+                old = store.get("activities", key)
+                if not old or not self._editable(old, now) or old.get("schema_version") != 3:
+                    raise ValueError("只能修改尚未开始的活动")
+                outline = self._make_activity(
+                    {**old, **changes}, date.fromisoformat(old["date"]), old["scope"], key
+                )
+                if not self._editable(outline, now):
+                    raise ValueError("调整后的开始时间必须在现在之后")
+                row = copy.deepcopy(old)
+                row.update({f: outline[f] for f in outlines})
+                changed = any(row[f] != old.get(f) for f in outlines)
+                if changed:
+                    writes.append(self._detail_archive(old, "outline_changed"))
+                    self._invalidate_detail(row)
+                elif "actions" in changes:
+                    if not old.get("detailed"):
+                        raise ValueError("请先细化活动，再调整行动")
+                    actions = self._parse_actions(changes["actions"], row)
+                    for kind in ACTION_ORDER:
+                        previous = old["actions"][kind]
+                        if previous.get("execution", {}).get("status") not in {
+                            "pending",
+                            "disabled",
+                        }:
+                            if any(
+                                actions[kind][f] != previous.get(f)
+                                for f in ("enabled", "at", "intent")
+                            ):
+                                raise ValueError("已经处理过的行动不能重新安排")
+                            actions[kind]["execution"] = copy.deepcopy(previous["execution"])
+                    writes.append(self._detail_archive(old, "actions_edited"))
+                    row["actions"] = actions
+                row["updated_at"] = now.isoformat()
+                proposed[key] = row
+                if row["scope"] == "global":
+                    days.add(row["date"])
+            for day in days:
+                rows = [
+                    proposed.get(row["id"], row)
+                    for row in self._day_activities(date.fromisoformat(day))
+                ]
+                marker = store.get("life_days", f"{day}:global", {}) or {}
+                self._validate_day(rows, marker.get("parameters") or {"activity_count": len(rows)})
+            self._validate_reservations(proposed)
+            writes.extend(("activities", key, row) for key, row in proposed.items())
+            store.apply_batch(writes)
         return list(proposed.values())
 
     def update_activity(self, activity_id: str, changes: dict) -> dict:
@@ -730,7 +696,7 @@ class LifeService:
                     result["updated"] = [a["id"] for a in self.update_activities(updates)]
             else:
                 allowed = {"title", "content", "description", "incident", "location", "sleep_state"}
-                prepared = []
+                prepared, archives = [], []
                 for update in updates:
                     changes = update.get("changes", {})
                     if (
@@ -738,82 +704,217 @@ class LifeService:
                         or set(changes) - allowed
                         or any(not isinstance(v, str) for v in changes.values())
                     ):
-                        raise ValueError("私人场合调整只能修改活动说明，不改变公共时间或行动配额")
+                        raise ValueError("私人场合调整只能修改活动说明，不改变公共时间或行动")
                     row = editable[update["id"]]
                     if not self._editable(row, self._now()):
                         continue
+                    if row["id"] in self._detailing:
+                        continue
                     if row.get("scope") == scope:
+                        if any(row.get(f) != v for f, v in changes.items()):
+                            archives.append(self._detail_archive(row, "scoped_outline_changed"))
+                            self._invalidate_detail(row)
                         row.update(changes)
                     else:
-                        row.setdefault("scope_overrides", {}).setdefault(scope, {}).update(changes)
+                        override = row.setdefault("scope_overrides", {}).setdefault(scope, {})
+                        if any(override.get(f, row.get(f)) != v for f, v in changes.items()):
+                            override.update(description="", incident="")
+                        override.update(changes)
                     prepared.append(row)
-                for row in prepared:
-                    self.runtime.store.put("activities", row["id"], row)
-                    result["updated"].append(row["id"])
+                self.runtime.store.apply_batch(
+                    archives + [("activities", row["id"], row) for row in prepared]
+                )
+                result["updated"].extend(row["id"] for row in prepared)
             return result
 
-    def _cancel_children(self, parent_id, now):
-        for child in self.list_activities():
-            if child.get("parent_id") == parent_id and child.get("status") == "planned":
-                self._finish(child, "skipped", "parent_plan_changed", now)
-
-    async def detail(self, activity_id: str) -> dict:
-        if self.regenerating:
-            raise ValueError("正在重新生成日程，暂时不能细化活动")
-        return await self._detail(activity_id, self._now())
-
-    async def _detail(self, activity_id, now):
-        async with self._detail_lock:
-            activity = self.runtime.store.get("activities", activity_id)
-            if activity is None:
-                raise KeyError(activity_id)
+    def detail_request(self, activity, instruction="", now=None):
+        """Build the same read-only, scope-filtered material for production and dry runs."""
+        now, scope = self._now(now), activity["scope"]
+        day = date.fromisoformat(activity["date"])
+        end = self._parse_time(activity["end"], day)
+        names = {"news": "新闻", "search": "搜索", "social": "主动聊天（轮）"}
+        dates = sorted({day, end.date()})
+        quota = []
+        for budget_day in dates:
+            for kind, values in self.budget(budget_day, exclude_activity=activity["id"]).items():
+                quota.append(
+                    f"{budget_day} {names[kind]}：上限 {values['limit']}，已使用 {values['used']}，"
+                    f"已预留 {values['reserved']}，还能安排 {values['available']}。"
+                )
+        schedule = [
+            activity_text(self._view(row, scope))
+            for row in self.list_activities()
+            if row["id"] != activity["id"]
+            and row.get("date") == str(day)
+            and row.get("scope") in {"global", scope}
+        ]
+        memories = [str(row.get("text", "")) for row in self._memories(scope)]
+        events = [
+            str(row.get("text", ""))
+            for row in self.runtime.store.list("events")
+            if row.get("scope", "global") in {"global", scope}
+            and row.get("source") in {"news", "search", "action"}
+        ][:12]
+        outcome_names = {"news": "新闻", "search": "搜索", "social": "主动聊天"}
+        for result in self.runtime.store.list("actions"):
             if (
-                not self.runtime.enabled("life")
-                or activity.get("detailed")
-                or activity.get("status") != "planned"
-                or not await scope_allowed(self.runtime, activity["scope"])
+                result.get("scope", "global") in {"global", scope}
+                and result.get("kind") in outcome_names
+                and result.get("status") in {"failed", "skipped", "interrupted"}
             ):
-                return activity
-            context = {
-                "activity": self._view(activity, activity["scope"]),
-                "memories": self._memories(activity["scope"]),
-            }
-            if self.runtime.enabled("state"):
-                context["state"] = self.state()
-            data = parse_json(
-                await self._complete("life.detail", DETAIL_TEMPLATE, context, activity["scope"])
+                label = "失败" if result["status"] == "failed" else "跳过或中断，未确认成功"
+                events.append(f"近期{outcome_names[result['kind']]}行动：{label}。")
+                if len(events) >= 16:
+                    break
+        social = self.runtime.settings.get("social", {})
+        context = {
+            "当前时间": now.isoformat(),
+            "待细化活动": activity_text(self._view(activity, scope)),
+            "活动时间范围": f"{activity['start']} 至 {activity['end']}，结束时间不包含在执行范围内。",
+            "当天其他安排": "\n".join(schedule) or "没有其他安排。",
+            "相关记忆": "\n".join(memories) or "没有相关记忆。",
+            "近期实际行动": "\n".join(events) or "没有可见的实际行动结果，不代表已执行计划。",
+            "行动额度": "\n".join(quota),
+            "能力与限制": "；".join(
+                f"{names[k]}{'已启用' if self.runtime.enabled('proactive' if k == 'social' else k) else '已关闭，不得安排'}"
+                for k in ACTION_ORDER
             )
-            if not self.runtime.enabled("life") or not await scope_allowed(
-                self.runtime, activity["scope"]
-            ):
-                return activity
-            latest = self.runtime.store.get("activities", activity_id)
-            if latest != activity:
-                return latest or activity
-            if not isinstance(data, dict):
-                raise TypeError("Activity detail must be an object.")
-            activity["description"] = str(data.get("description", ""))
-            activity["incident"] = (
-                str(data.get("incident", "")) if activity["kind"] == "fiction" else ""
+            + f"。聊天免打扰 {social.get('quiet_start', '23:00')}—{social.get('quiet_end', '08:00')}；"
+            "对象在实际执行时由白名单抽取，并再次检查冷却及发送限制。",
+        }
+        if self.runtime.enabled("state"):
+            state = self.state()
+            context["角色状态与作息"] = (
+                f"心情：{state['mood']}；精力：{state['energy']}；作息：{state['routine']}"
             )
-            delta = data.get("energy_delta", 0)
-            activity["energy_delta"] = (
-                max(-10.0, min(10.0, float(delta)))
-                if isinstance(delta, (int, float)) and math.isfinite(delta)
-                else 0
-            )
-            activity.update(mood=str(data.get("mood", "")), detailed=True)
-            self.runtime.store.put("activities", activity_id, activity)
-            return activity
+        if instruction:
+            context["管理员本次要求"] = instruction
+        return {"template": DETAIL_TEMPLATE, "context": context, "scope": scope}
+
+    async def detail(self, activity_id: str, instruction="", regenerate=False) -> dict:
+        if not isinstance(instruction, str) or len(instruction) > 4000:
+            raise ValueError("本次要求须为不超过 4000 字的文本")
+        if type(regenerate) is not bool:
+            raise ValueError("重新细化开关必须为布尔值")
+        if self.regenerating or activity_id in self._detailing:
+            raise ValueError("正在生成或细化日程，请等待本次完成")
+        activity = self.runtime.store.get("activities", activity_id)
+        if not activity or not self._editable(activity, self._now()):
+            raise ValueError("只能细化尚未开始的活动")
+        return await self._detail(
+            activity_id, self._now(), instruction=instruction, regenerate=regenerate
+        )
+
+    async def _detail(self, activity_id, now, *, instruction="", regenerate=False):
+        if activity_id in self._detailing:
+            raise ValueError("该活动正在细化，请等待本次完成")
+        self._detailing.add(activity_id)
+        current_time = elapsed_clock(now)
+        try:
+            async with self._detail_lock:
+                activity = self.runtime.store.get("activities", activity_id)
+                if not activity:
+                    raise KeyError(activity_id)
+                if (
+                    self.regenerating
+                    or not self.runtime.enabled("life")
+                    or activity.get("schema_version") != 3
+                    or (activity.get("detailed") and not regenerate)
+                    or activity.get("status") != "planned"
+                    or not await scope_allowed(self.runtime, activity["scope"])
+                ):
+                    return activity
+                start = self._parse_time(activity["start"], date.fromisoformat(activity["date"]))
+                if current_time() >= start:
+                    raise ValueError("活动已经开始，不能采用新的细化结果")
+                request = self.detail_request(activity, instruction, current_time())
+                template = request["template"]
+                if getattr(self.runtime, "debug", None):
+                    template = self.runtime.debug.template("life.detail", template)
+                request["template"] = template
+                raw = await self._complete(
+                    "life.detail",
+                    template,
+                    request["context"],
+                    activity["scope"],
+                    frozen_template=True,
+                )
+                data = parse_json(raw)
+                if not isinstance(data, dict) or set(data) - {
+                    "description",
+                    "incident",
+                    "energy_delta",
+                    "mood",
+                    "actions",
+                }:
+                    raise ValueError("细化只能返回活动细节、状态变化和三类行动决定")
+                row = copy.deepcopy(activity)
+                for field in ("description", "incident", "mood"):
+                    if not isinstance(data.get(field, ""), str):
+                        raise ValueError("活动细节必须为文本")
+                    row[field] = data.get(field, "")
+                delta = data.get("energy_delta", 0)
+                if (
+                    isinstance(delta, bool)
+                    or not isinstance(delta, (int, float))
+                    or not math.isfinite(delta)
+                    or not -10 <= delta <= 10
+                ):
+                    raise ValueError("精力变化必须在 -10 到 10 之间")
+                row["energy_delta"] = delta
+                row["actions"] = self._parse_actions(data.get("actions"), row)
+                if not self.runtime.enabled("life") or not await scope_allowed(
+                    self.runtime, activity["scope"]
+                ):
+                    raise ValueError("生活模块或接入场合已变化，保留原细化")
+                adopted = max(current_time(), self._now())
+                if adopted >= start:
+                    raise ValueError("活动已经开始，保留原细化结果")
+                store = self.runtime.store
+                with store.transaction():
+                    if self.regenerating or store.get("activities", activity_id) != activity:
+                        raise ValueError("活动已变化，未采用过期细化结果")
+                    for kind, action in row["actions"].items():
+                        if action["enabled"] and not self.runtime.enabled(
+                            "proactive" if kind == "social" else kind
+                        ):
+                            raise ValueError("行动模块已关闭，未采用细化结果")
+                    self._validate_reservations({activity_id: row})
+                    row.update(
+                        detailed=True,
+                        detail_version=uuid.uuid4().hex,
+                        detailed_at=adopted.isoformat(),
+                        detail_request=request,
+                        detail_raw=raw,
+                    )
+                    for field in ("detail_error", "detail_retry_after"):
+                        row.pop(field, None)
+                    writes = [("activities", activity_id, row)]
+                    if activity.get("detailed"):
+                        writes.append(self._detail_archive(activity, "regenerated"))
+                    store.apply_batch(writes)
+                return row
+        finally:
+            self._detailing.discard(activity_id)
 
     def _finish(self, activity, status, reason="", now=None):
+        latest = self.runtime.store.get("activities", activity["id"])
+        if latest is None:
+            return
+        activity.update(latest)
         activity.update(status=status, finished_at=self._now(now).isoformat())
         if reason:
             activity["reason"] = reason
         self.runtime.store.put("activities", activity["id"], activity)
 
     def _action_finish(self, activity, kind, status, reason, now, result=None):
+        latest = self.runtime.store.get("activities", activity["id"])
+        if latest is None:
+            return
+        activity.update(latest)
         execution = {"status": status, "reason": reason, "finished_at": now.isoformat()}
+        if activity["actions"][kind].get("execution", {}).get("started_at"):
+            execution["started_at"] = activity["actions"][kind]["execution"]["started_at"]
         if result is not None:
             execution["result"] = result
         activity["actions"][kind]["execution"] = execution
@@ -821,13 +922,16 @@ class LifeService:
 
     async def _run_flag(self, activity, kind, now):
         current_time = elapsed_clock(now)
-        action, key = activity["actions"][kind], f"{activity['id']}:{kind}"
+        activity = self.runtime.store.get("activities", activity["id"]) or activity
+        action, key = activity["actions"][kind], self._action_key(activity, kind)
+        if action.get("execution", {}).get("status") != "pending":
+            return
         if not self.runtime.enabled("proactive" if kind == "social" else kind):
             self._action_finish(activity, kind, "skipped", "module_disabled", now)
             return
         deadline = min(
-            self._parse_time(activity["end"], now.date()),
-            self._parse_time(action["at"], now.date())
+            self._parse_time(activity["end"], date.fromisoformat(activity["date"])),
+            self._parse_time(action["at"], date.fromisoformat(activity["date"]))
             + timedelta(minutes=max(0, self._setting("stale_action_minutes", 10))),
         )
         remaining = (deadline - current_time()).total_seconds()
@@ -836,7 +940,9 @@ class LifeService:
                 activity, kind, "skipped", "execution_deadline_exceeded", current_time()
             )
             return
-        if not self.runtime.store.claim("life_action_claims", key, {"started_at": now.isoformat()}):
+        if not self.runtime.store.claim(
+            "life_action_claims", key, {"started_at": now.isoformat(), "schema_version": 3}
+        ):
             self._action_finish(
                 activity, kind, "skipped", "previous_execution_may_have_started", now
             )
@@ -882,122 +988,107 @@ class LifeService:
         except Exception as exc:  # noqa: BLE001 - Subsequent action types remain independent.
             self._action_finish(activity, kind, "failed", str(exc), current_time())
 
-    async def _run_action(self, activity, now):
-        """Retain existing version-one actions without creating new legacy plans."""
-        if not self.runtime.store.claim(
-            "life_action_claims", activity["id"], {"started_at": now.isoformat()}
-        ):
-            self._finish(activity, "skipped", "previous_execution_may_have_started", now)
-            return
-        activity["status"] = "running"
-        self.runtime.store.put("activities", activity["id"], activity)
-        try:
-            result = await self.runtime.execute_action(
-                activity["kind"],
-                copy.deepcopy(activity.get("payload", {})),
-                activity["scope"],
-                activity["id"],
-            )
-            if not isinstance(result, dict):
-                raise TypeError("Action result must be an object.")
-            activity["result"] = result
-            self._finish(
-                activity,
-                {"success": "completed", "failed": "failed", "skipped": "skipped"}.get(
-                    result.get("status"), "failed"
-                ),
-                str(result.get("reason", "")),
-                now,
-            )
-        except asyncio.CancelledError:
-            self._finish(activity, "skipped", "execution_interrupted_outcome_unknown", now)
-            raise
-        except Exception as exc:  # noqa: BLE001 - Legacy source failures remain isolated.
-            self._finish(activity, "failed", str(exc), now)
-
     async def _advance(self, activity, now, *, restart=False, restart_at=None):
         current_time = elapsed_clock(now)
-        restart_at = restart_at or now
+        activity = self.runtime.store.get("activities", activity["id"]) or activity
         if (
-            activity.get("needs_review")
+            activity.get("schema_version") != 3
+            or activity.get("needs_review")
             or activity.get("status") in FINAL_STATUSES
+            or self.runtime.store.get("life_retired_activities", activity["id"])
             or not await scope_allowed(self.runtime, activity["scope"])
         ):
             return
-        now = current_time()
-        start, end = (
-            self._parse_time(activity["start"], now.date()),
-            self._parse_time(activity["end"], now.date()),
-        )
-        modern = activity.get("schema_version") == 2
-        if modern:
-            for kind in ACTION_ORDER:
-                action = activity["actions"][kind]
-                status = action.get("execution", {}).get("status", "pending")
-                if not action["enabled"] or status not in {"pending", "running"}:
-                    continue
-                at, reason = self._parse_time(action["at"], now.date()), ""
-                if status == "running":
-                    reason = "execution_interrupted_outcome_unknown"
-                elif (
-                    (restart and at < restart_at)
-                    or now >= end
-                    or now - at
-                    > timedelta(minutes=max(0, self._setting("stale_action_minutes", 10)))
-                ):
-                    reason = "overdue_after_restart" if restart else "expired_action_window"
-                if reason:
-                    self._action_finish(activity, kind, "skipped", reason, now)
-        elif activity["kind"] in ACTION_KINDS and activity.get("status") == "running":
-            self._finish(activity, "skipped", "execution_interrupted_outcome_unknown", now)
+        activity = self.runtime.store.get("activities", activity["id"])
+        if not activity or activity.get("status") in FINAL_STATUSES or activity.get("needs_review"):
             return
-        if now >= end:
-            completed = activity.get("status") == "running" and activity["kind"] == "fiction"
+        day = date.fromisoformat(activity["date"])
+        start, end = (
+            self._parse_time(activity["start"], day),
+            self._parse_time(activity["end"], day),
+        )
+        restart_at = restart_at or now
+        for kind in ACTION_ORDER:
+            action = activity["actions"][kind]
+            status = action.get("execution", {}).get("status")
+            if not action["enabled"] or status not in {"pending", "running"}:
+                continue
+            at = self._parse_time(action["at"], day)
+            if status == "running":
+                self._action_finish(
+                    activity,
+                    kind,
+                    "skipped",
+                    "execution_interrupted_outcome_unknown",
+                    current_time(),
+                )
+            elif (
+                (restart and at < restart_at)
+                or current_time() >= end
+                or current_time() - at
+                > timedelta(minutes=max(0, self._setting("stale_action_minutes", 10)))
+            ):
+                self._action_finish(
+                    activity,
+                    kind,
+                    "skipped",
+                    "overdue_after_restart" if restart else "expired_action_window",
+                    current_time(),
+                )
+        if current_time() >= end:
             self._finish(
                 activity,
-                "completed" if completed else "skipped",
-                "" if completed else "expired",
-                now,
+                "completed" if activity.get("status") == "running" else "skipped",
+                "expired",
+                current_time(),
             )
             return
+        if current_time() < start - timedelta(
+            seconds=max(self._setting("detail_minutes", 10) * 60, self._setting("tick_seconds", 60))
+        ):
+            return
+        if activity["id"] in self._detailing:
+            return
         if (
-            not modern
-            and activity["kind"] in ACTION_KINDS
-            and now - start > timedelta(minutes=max(0, self._setting("stale_action_minutes", 10)))
+            not activity.get("detailed")
+            and activity.get("status") == "planned"
+            and current_time() < start
+            and activity.get("detail_attempts", 0) < 2
+            and current_time().timestamp() >= activity.get("detail_retry_after", 0)
         ):
-            self._finish(activity, "skipped", "expired_action_window", now)
-            return
-        if now < start - timedelta(minutes=max(0, self._setting("detail_minutes", 10))):
-            return
-        if not activity.get("detailed") and activity.get("status") == "planned":
+            activity["detail_attempts"] = activity.get("detail_attempts", 0) + 1
+            self.runtime.store.put("activities", activity["id"], activity)
             try:
-                activity = await self._detail(activity["id"], now)
-            except Exception as exc:  # noqa: BLE001 - Detail failures cannot block a validated plan.
-                activity.update(detail_error=str(exc), detailed=True)
-                self.runtime.store.put("activities", activity["id"], activity)
-        if not self.runtime.enabled("life") or not await scope_allowed(
-            self.runtime, activity["scope"]
+                activity = await self._detail(activity["id"], current_time())
+            except Exception as exc:  # noqa: BLE001 - A failed detail does not cancel the outline.
+                latest = self.runtime.store.get("activities", activity["id"])
+                if latest == activity:
+                    activity["detail_error"] = str(exc)
+                    activity["detail_retry_after"] = current_time().timestamp() + 60
+                    self.runtime.store.put("activities", activity["id"], activity)
+        activity = self.runtime.store.get("activities", activity["id"]) or activity
+        if (
+            not self.runtime.enabled("life")
+            or self.regenerating
+            or not await scope_allowed(self.runtime, activity["scope"])
         ):
             return
-        now = current_time()
-        if now < start:
+        activity = self.runtime.store.get("activities", activity["id"])
+        if not activity or activity.get("status") in FINAL_STATUSES or activity.get("needs_review"):
             return
+        day = date.fromisoformat(activity["date"])
+        start, end = (
+            self._parse_time(activity["start"], day),
+            self._parse_time(activity["end"], day),
+        )
+        now = current_time()
         if now >= end:
-            if modern:
-                for kind in ACTION_ORDER:
-                    action = activity["actions"][kind]
-                    if (
-                        action["enabled"]
-                        and action.get("execution", {}).get("status", "pending") == "pending"
-                    ):
-                        self._action_finish(activity, kind, "skipped", "expired_after_detail", now)
+            for kind, action in activity["actions"].items():
+                if action["enabled"] and action.get("execution", {}).get("status") == "pending":
+                    self._action_finish(activity, kind, "skipped", "expired_after_detail", now)
             self._finish(activity, "skipped", "expired_after_detail", now)
             return
-        if not modern and activity["kind"] in ACTION_KINDS:
-            if now - start > timedelta(minutes=max(0, self._setting("stale_action_minutes", 10))):
-                self._finish(activity, "skipped", "expired_after_detail", now)
-                return
-            await self._run_action(activity, now)
+        if now < start:
             return
         if activity.get("status") == "planned":
             activity["status"] = "running"
@@ -1019,40 +1110,26 @@ class LifeService:
                     if activity.get("mood"):
                         changes["mood"] = activity["mood"]
                     self.update_state(changes)
-        if modern:
-            previous_action = False
-            for kind in ACTION_ORDER:
-                if not self.runtime.enabled("life") or not await scope_allowed(
-                    self.runtime, activity["scope"]
+        for kind in ACTION_ORDER:
+            activity = self.runtime.store.get("activities", activity["id"]) or activity
+            if not self.runtime.enabled("life") or not await scope_allowed(
+                self.runtime, activity["scope"]
+            ):
+                return
+            activity = self.runtime.store.get("activities", activity["id"]) or activity
+            now, action = current_time(), activity["actions"][kind]
+            if action["enabled"] and action.get("execution", {}).get("status") == "pending":
+                at = self._parse_time(action["at"], day)
+                if now >= end or now - at > timedelta(
+                    minutes=max(0, self._setting("stale_action_minutes", 10))
                 ):
-                    return
-                now = current_time()
-                action = activity["actions"][kind]
-                if (
-                    action["enabled"]
-                    and action.get("execution", {}).get("status", "pending") == "pending"
-                ):
-                    at = self._parse_time(action["at"], now.date())
-                    if now >= end or now - at > timedelta(
-                        minutes=max(0, self._setting("stale_action_minutes", 10))
-                    ):
-                        self._action_finish(
-                            activity,
-                            kind,
-                            "skipped",
-                            "expired_after_previous_action"
-                            if previous_action
-                            else "expired_before_action",
-                            now,
-                        )
-                        continue
-                    if at > now:
-                        break
-                    await self._run_flag(activity, kind, now)
-                    previous_action = True
-            now = current_time()
-            if now >= end and activity.get("status") == "running":
-                self._finish(activity, "completed", now=now)
+                    self._action_finish(activity, kind, "skipped", "expired_before_action", now)
+                    continue
+                if at > now:
+                    break
+                await self._run_flag(activity, kind, now)
+        if current_time() >= end:
+            self._finish(activity, "completed", now=current_time())
 
     def day_summary(self, day: date | str | None = None) -> dict:
         day = date.fromisoformat(day) if isinstance(day, str) else day or self._now().date()
@@ -1089,6 +1166,10 @@ class LifeService:
                 }
                 if next_social is None or candidate["at"] < next_social["at"]:
                     next_social = candidate
+        for kind, values in self.day_results(day).items():
+            counts[kind].update(values)
+        for kind, values in self.budget(day).items():
+            counts[kind].update(values)
         return {
             "date": str(day),
             "activity_count": len(rows),
@@ -1104,7 +1185,7 @@ class LifeService:
         marker = self.runtime.store.get("life_days", f"{now.date()}:global", {}) or {}
         if (
             self.regenerating
-            or marker.get("schema_version") != 2
+            or marker.get("schema_version") != 3
             or marker.get("status") != "completed"
             or not self.runtime.enabled("memory")
         ):

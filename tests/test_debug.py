@@ -126,12 +126,14 @@ async def test_current_plan_preview_is_read_only_and_uses_new_config(runtime):
     before = runtime.store.export()
     result = await runtime.action({"action": "debug_build", "task": "life.plan"})
     request = result["request"]
-    assert request["dynamic_context"]["parameters"]["news_count"] == 1
+    assert request["dynamic_context"]["parameters"] == runtime.life.parameters()
+    assert "news_count" not in request["dynamic_context"]["parameters"]
     assert request["prompt_mode"] == "structured"
     assert before == runtime.store.export()
 
 
 async def test_structured_trial_compiles_edited_template_and_context(runtime):
+    templates = runtime.store.list("prompt_templates")
     request = await runtime.build_test_request("life.plan")
     request.update(
         template="Local test instruction",
@@ -144,11 +146,26 @@ async def test_structured_trial_compiles_edited_template_and_context(runtime):
         "Local test instruction"
     )
     assert sent["model"] == "edited-model"
-    assert not runtime.store.list("prompt_templates")
+    assert runtime.store.list("prompt_templates") == templates
     assert not runtime.store.list("life_days")
     request.update(prompt_mode="raw", prompt="Raw edited prompt")
     await runtime.test_request(request)
     assert runtime.host.requests[-1]["prompt"] == "Raw edited prompt"
+
+
+async def test_detail_trial_uses_current_budget_without_reserving_or_widening_scope(runtime):
+    await runtime.update_settings({"life": {"search_count": 7}})
+    runtime.memory.remember("A private commitment must stay private.", scope="qq:FriendMessage:42")
+    before = runtime.store.export()
+    request = await runtime.build_test_request("life.detail")
+    assert "上限 7" in request["dynamic_context"]["行动额度"]
+    assert "A private commitment" not in request["prompt"]
+    assert "scope_overrides" not in request["prompt"]
+    assert runtime.store.export() == before
+    await runtime.test_request(request)
+    after = [row for row in runtime.store.export() if row["namespace"] != "debug_records"]
+    assert after == [row for row in before if row["namespace"] != "debug_records"]
+    assert not runtime.host.tools and not runtime.host.sent
 
 
 async def test_trial_media_is_preserved_and_unsupported_fields_fail_explicitly(runtime):
@@ -295,7 +312,7 @@ def test_new_defaults_and_legacy_configuration_migration():
     form["daily_digest"]["sources"][0]["keywords"] = ["早报", "日报"]
     assert settings_from(form)["daily_digest"]["sources"][0]["keywords"] == "早报 日报"
     for patch in (
-        {"life": {"news_count": 11}},
+        {"life": {"news_count": 49}},
         {"life": {"social_count": 1.5}},
         {"debug": {"retain_per_category": 0}},
     ):

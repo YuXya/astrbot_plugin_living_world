@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -19,6 +20,23 @@ class Store:
         )
         self.db.commit()
 
+    @contextmanager
+    def transaction(self):
+        """Serialize read-check-write operations, including across SQLite connections."""
+        with self.lock:
+            outer = not self.db.in_transaction
+            if outer:
+                self.db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                if outer:
+                    self.db.rollback()
+                raise
+            else:
+                if outer:
+                    self.db.commit()
+
     def get(self, namespace, key, default=None):
         with self.lock:
             row = self.db.execute(
@@ -28,7 +46,7 @@ class Store:
 
     def put(self, namespace, key, value):
         data = json.dumps(value, ensure_ascii=False, allow_nan=False)
-        with self.lock, self.db:
+        with self.transaction():
             self.db.execute(
                 "INSERT INTO objects VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value,updated=excluded.updated",
                 (namespace, key, data, time.time()),
@@ -36,7 +54,7 @@ class Store:
 
     def claim(self, namespace, key, value):
         data = json.dumps(value, ensure_ascii=False, allow_nan=False)
-        with self.lock, self.db:
+        with self.transaction():
             cursor = self.db.execute(
                 "INSERT OR IGNORE INTO objects VALUES (?,?,?,?)",
                 (namespace, key, data, time.time()),
@@ -48,7 +66,7 @@ class Store:
             (namespace, key, json.dumps(value, ensure_ascii=False, allow_nan=False), time.time())
             for key, value in records
         ]
-        with self.lock, self.db:
+        with self.transaction():
             self.db.executemany(
                 "INSERT INTO objects VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value,updated=excluded.updated",
                 rows,
@@ -68,7 +86,7 @@ class Store:
             (namespace, key, json.dumps(value, ensure_ascii=False, allow_nan=False), time.time())
             for namespace, key, value in writes
         ]
-        with self.lock, self.db:
+        with self.transaction():
             self.db.executemany("DELETE FROM objects WHERE namespace=? AND key=?", deletes)
             self.db.executemany(
                 "INSERT INTO objects VALUES (?,?,?,?) ON CONFLICT(namespace,key) "
@@ -77,7 +95,7 @@ class Store:
             )
 
     def delete(self, namespace, key):
-        with self.lock, self.db:
+        with self.transaction():
             self.db.execute("DELETE FROM objects WHERE namespace=? AND key=?", (namespace, key))
 
     def export(self):
@@ -107,7 +125,7 @@ class Store:
     def restore(self, records):
         rows = self.validate_records(records)
         # Merge backups without forgetting newer execution claims or deliveries.
-        with self.lock, self.db:
+        with self.transaction():
             self.db.executemany("INSERT OR IGNORE INTO objects VALUES (?,?,?,?)", rows)
 
     def close(self):
