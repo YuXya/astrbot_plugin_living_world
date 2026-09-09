@@ -1,4 +1,4 @@
-"""Daily outlines, activity details, durable action budgets and scoped refinements."""
+"""Daily outlines, activity details, durable action starts and scoped refinements."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .prompts import PROMPTS
-from .life_budget import ActionBudget
+from .life_actions import ActionLedger
 from .context import activity_text
 
 ACTION_ORDER = ("news", "search", "social")
@@ -59,7 +59,7 @@ def elapsed_clock(now):
     return lambda: now + timedelta(seconds=max(0, monotonic() - started))
 
 
-class LifeService(ActionBudget):
+class LifeService(ActionLedger):
     def __init__(self, runtime):
         self.runtime = runtime
         self._tick_lock = asyncio.Lock()
@@ -109,26 +109,21 @@ class LifeService(ActionBudget):
     def state(self) -> dict:
         character = self.runtime.settings.get("character", {})
         state = {
-            "energy": character.get("energy", 80),
             "mood": character.get("mood", "平静"),
             "routine": character.get("routine", ""),
             "updated_at": None,
         }
         state.update(self.runtime.store.get("life_state", "current", {}) or {})
+        state.pop("energy", None)
         current = self.current()
         for field in ("location", "sleep_state"):
             state[field] = (current or {}).get(field) or character.get(field) or "未知"
         return copy.deepcopy(state)
 
     def update_state(self, changes: dict) -> dict:
-        if not isinstance(changes, dict) or set(changes) - {"energy", "mood", "routine"}:
-            raise ValueError("Only energy, mood and routine can be adjusted.")
+        if not isinstance(changes, dict) or set(changes) - {"mood", "routine"}:
+            raise ValueError("Only mood and routine can be adjusted here.")
         state = self.state()
-        if "energy" in changes:
-            energy = float(changes["energy"])
-            if not math.isfinite(energy):
-                raise ValueError("Energy must be finite.")
-            state["energy"] = max(0.0, min(100.0, energy))
         for field in ("mood", "routine"):
             if field in changes:
                 if not isinstance(changes[field], str):
@@ -227,6 +222,7 @@ class LifeService(ActionBudget):
             "status": "planned",
             "detailed": False,
             "schema_version": 3,
+            "drive_schema_version": 1,
             "created_at": self._now().isoformat(),
             "actions": self._empty_actions(),
         }
@@ -314,6 +310,7 @@ class LifeService(ActionBudget):
                 "date": str(now.date()),
                 "scope": "global",
                 "schema_version": 3,
+                "drive_schema_version": 1,
                 "status": "waiting",
                 "parameters": self.parameters(),
             }
@@ -366,6 +363,7 @@ class LifeService(ActionBudget):
                             "scope": scope,
                             "status": "completed",
                             "schema_version": 3,
+                            "drive_schema_version": 1,
                             "parameters": self.parameters(),
                         },
                     )
@@ -382,6 +380,7 @@ class LifeService(ActionBudget):
                 "date": str(day),
                 "scope": scope,
                 "schema_version": 3,
+                "drive_schema_version": 1,
                 "status": "generating",
                 "parameters": parameters,
                 "request": copy.deepcopy(request),
@@ -487,6 +486,7 @@ class LifeService(ActionBudget):
                     "date": str(now.date()),
                     "scope": "global",
                     "schema_version": 3,
+                    "drive_schema_version": 1,
                     "status": "completed",
                     "version_id": version,
                     "origin": "manual_regeneration",
@@ -636,7 +636,6 @@ class LifeService(ActionBudget):
                 ]
                 marker = store.get("life_days", f"{day}:global", {}) or {}
                 self._validate_day(rows, marker.get("parameters") or {"activity_count": len(rows)})
-            self._validate_reservations(proposed)
             writes.extend(("activities", key, row) for key, row in proposed.items())
             store.apply_batch(writes)
         return list(proposed.values())
@@ -731,16 +730,7 @@ class LifeService(ActionBudget):
         """Build the same read-only, scope-filtered material for production and dry runs."""
         now, scope = self._now(now), activity["scope"]
         day = date.fromisoformat(activity["date"])
-        end = self._parse_time(activity["end"], day)
         names = {"news": "新闻", "search": "搜索", "social": "主动聊天（轮）"}
-        dates = sorted({day, end.date()})
-        quota = []
-        for budget_day in dates:
-            for kind, values in self.budget(budget_day, exclude_activity=activity["id"]).items():
-                quota.append(
-                    f"{budget_day} {names[kind]}：上限 {values['limit']}，已使用 {values['used']}，"
-                    f"已预留 {values['reserved']}，还能安排 {values['available']}。"
-                )
         schedule = [
             activity_text(self._view(row, scope))
             for row in self.list_activities()
@@ -774,7 +764,6 @@ class LifeService(ActionBudget):
             "当天其他安排": "\n".join(schedule) or "没有其他安排。",
             "相关记忆": "\n".join(memories) or "没有相关记忆。",
             "近期实际行动": "\n".join(events) or "没有可见的实际行动结果，不代表已执行计划。",
-            "行动额度": "\n".join(quota),
             "能力与限制": "；".join(
                 f"{names[k]}{'已启用' if self.runtime.enabled('proactive' if k == 'social' else k) else '已关闭，不得安排'}"
                 for k in ACTION_ORDER
@@ -785,8 +774,11 @@ class LifeService(ActionBudget):
         if self.runtime.enabled("state"):
             state = self.state()
             context["角色状态与作息"] = (
-                f"心情：{state['mood']}；精力：{state['energy']}；作息：{state['routine']}"
+                f"心情：{state['mood']}；作息：{state['routine']}"
             )
+        thoughts = self.runtime.drives.thoughts()
+        if thoughts:
+            context["当前想法"] = thoughts
         if instruction:
             context["管理员本次要求"] = instruction
         return {"template": DETAIL_TEMPLATE, "context": context, "scope": scope}
@@ -843,7 +835,6 @@ class LifeService(ActionBudget):
                 if not isinstance(data, dict) or set(data) - {
                     "description",
                     "incident",
-                    "energy_delta",
                     "mood",
                     "actions",
                 }:
@@ -853,15 +844,6 @@ class LifeService(ActionBudget):
                     if not isinstance(data.get(field, ""), str):
                         raise ValueError("活动细节必须为文本")
                     row[field] = data.get(field, "")
-                delta = data.get("energy_delta", 0)
-                if (
-                    isinstance(delta, bool)
-                    or not isinstance(delta, (int, float))
-                    or not math.isfinite(delta)
-                    or not -10 <= delta <= 10
-                ):
-                    raise ValueError("精力变化必须在 -10 到 10 之间")
-                row["energy_delta"] = delta
                 row["actions"] = self._parse_actions(data.get("actions"), row)
                 if not self.runtime.enabled("life") or not await scope_allowed(
                     self.runtime, activity["scope"]
@@ -879,7 +861,6 @@ class LifeService(ActionBudget):
                             "proactive" if kind == "social" else kind
                         ):
                             raise ValueError("行动模块已关闭，未采用细化结果")
-                    self._validate_reservations({activity_id: row})
                     row.update(
                         detailed=True,
                         detail_version=uuid.uuid4().hex,
@@ -1104,9 +1085,7 @@ class LifeService(ActionBudget):
                     key=f"life:{activity['id']}",
                 )
                 if activity["scope"] == "global" and self.runtime.enabled("state"):
-                    changes = {
-                        "energy": float(self.state()["energy"]) + activity.get("energy_delta", 0)
-                    }
+                    changes = {}
                     if activity.get("mood"):
                         changes["mood"] = activity["mood"]
                     self.update_state(changes)
@@ -1134,14 +1113,22 @@ class LifeService(ActionBudget):
     def day_summary(self, day: date | str | None = None) -> dict:
         day = date.fromisoformat(day) if isinstance(day, str) else day or self._now().date()
         rows, counts, next_social, now = self._day_activities(day), {}, None, self._now()
+        current_activities = self.list_activities()
+        starts = self.runtime.store.list("life_action_usage")
         for kind in ACTION_ORDER:
             enabled = [
                 a["actions"][kind]
-                for a in rows
+                for a in current_activities
                 if a.get("actions", {}).get(kind, {}).get("enabled")
+                and a["actions"][kind].get("at")
+                and self._parse_time(a["actions"][kind]["at"], day).date() == day
             ]
             counts[kind] = {
-                "planned": len(enabled),
+                "arranged": len(enabled),
+                "started": sum(
+                    item.get("kind") == kind and item.get("date") == str(day)
+                    for item in starts
+                ),
                 "success": sum(a.get("execution", {}).get("status") == "success" for a in enabled),
                 "skipped": sum(a.get("execution", {}).get("status") == "skipped" for a in enabled),
                 "failed": sum(a.get("execution", {}).get("status") == "failed" for a in enabled),
@@ -1167,8 +1154,6 @@ class LifeService(ActionBudget):
                 if next_social is None or candidate["at"] < next_social["at"]:
                     next_social = candidate
         for kind, values in self.day_results(day).items():
-            counts[kind].update(values)
-        for kind, values in self.budget(day).items():
             counts[kind].update(values)
         return {
             "date": str(day),

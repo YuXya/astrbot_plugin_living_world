@@ -104,7 +104,6 @@ def context_from_data(data):
     if state is not None:
         fields = (
             ("mood", "心情"),
-            ("energy", "精力"),
             ("location", "地点"),
             ("sleep_state", "睡眠"),
             ("routine", "作息"),

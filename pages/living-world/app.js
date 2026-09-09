@@ -1,8 +1,8 @@
 const bridge = window.AstrBotPluginPage;
 const $ = (selector) => document.querySelector(selector);
 const content = $("#content");
-const titles = { whitelist: "聊天对象与白名单", sources: "内容来源", debug: "调试与调用记录", overview: "今日生活", settings: "角色、模型与模块", schedule: "日程与行动", memory: "记忆与人物", journal: "见闻与日记", social: "社交与调用", data: "数据管理" };
-const moduleNames = { daily_digest: "AI 日报", debug: "调试记录", life: "日程生活", state: "角色状态", memory: "长期记忆", reply: "被动回复", interjection: "群聊插话", proactive: "主动社交", news: "新闻阅读", search: "主动搜索", weather: "天气", bilibili: "B 站见闻", journal: "生活日记", notes: "见闻笔记" };
+const titles = { whitelist: "聊天对象与白名单", sources: "内容来源", debug: "调试与调用记录", overview: "今日生活", settings: "角色、模型与模块", drives: "内在状态", schedule: "日程与行动", memory: "记忆与人物", journal: "见闻与日记", social: "社交与调用", data: "数据管理" };
+const moduleNames = { daily_digest: "AI 日报", debug: "调试记录", life: "日程生活", state: "角色状态", drives: "内在状态", memory: "长期记忆", reply: "被动回复", interjection: "群聊插话", proactive: "主动社交", news: "新闻阅读", search: "主动搜索", weather: "天气", bilibili: "B 站见闻", journal: "生活日记", notes: "见闻笔记" };
 const kindNames = { knowledge: "知识", event: "事件", skill: "技能", emotional: "情感与体会", profile: "人物画像", journal: "日记", note: "笔记", notes: "笔记", news: "新闻", search: "搜索", weather: "天气", bilibili: "B 站搜索", bilibili_watch: "观看 B 站视频", bilibili_recent: "读取 B 站历史见闻", fiction: "角色日常", life: "生活", social: "社交", read: "已读取", searched: "已搜索", watched: "已观看" };
 const statusNames = { enabled: "已开启", disabled: "已关闭", ready: "就绪", running: "运行中", paused: "已暂停", unavailable: "不可用", error: "异常", failed: "失败", planned: "已计划", pending: "待执行", reserved: "已预留", detailed: "已细化", completed: "已完成", done: "已完成", sent: "已发送", skipped: "已跳过", cancelled: "已取消", expired: "已过期", success: "成功", succeeded: "成功", ok: "正常" };
 let snapshot = null;
@@ -21,6 +21,9 @@ let testRequest = "";
 let debugTask = "life.plan";
 const debugSelections = new Map();
 let debugBodySequence = 0;
+let selectedDrive = "loneliness";
+const driveDrafts = new Map();
+const driveNames = { loneliness: "寂寞值", energy: "精力" };
 const debugTaskNames = { "chat.turn": "聊天回复", "reply.model": "聊天回复", "reply.request": "聊天回复", "reply.tool": "聊天工具", "life.plan": "生成日程", "life.plan_day": "生成今日日程", "life.detail": "细化活动", "life.adjust": "调整日程", "news.select": "挑选新闻", "news.read": "阅读新闻", "search.topic": "选择搜索主题", "search.note": "搜索见闻笔记", "journal.write": "生成日记", "debug.test": "模型试跑", "test": "模型试跑" };
 
 function el(tag, className, text) {
@@ -129,7 +132,7 @@ async function readState() {
   $("#updated").textContent = `${new Date().toLocaleTimeString("zh-CN", { hour12: false })} 更新`;
 }
 async function refresh() {
-  return request(async () => { await readState(); dirty = false; render(); }, "数据已刷新");
+  return request(async () => { await readState(); dirty = false; render(); }, location.hash === "#drives" ? "数值已刷新，未保存的修改继续保留" : "数据已刷新");
 }
 async function action(name, payload = {}) {
   return request(async () => {
@@ -365,9 +368,9 @@ function renderOverview() {
   const stateGrid = el("div", "state-grid");
   const sleep = current?.sleep_state || state.sleep_state || "未知";
   const sleepLabels = { awake: "清醒", asleep: "睡眠中", sleeping: "睡眠中", unknown: "未知" };
-  for (const [label, value] of [["心情", state.mood || "未知"], ["精力", state.energy === undefined ? "未知" : `${state.energy} / 100`], ["地点", current?.location || state.location || "未知"], ["睡眠", sleepLabels[sleep] || sleep], ["天气", weather?.factual_summary || weather?.text || "尚未取得天气"], ["今日活动", `${today.length} 个活动`]]) stateGrid.append(append(el("div", "state-tile"), el("span", "", label), el("strong", "", value)));
+  for (const [label, value] of [["心情", state.mood || "未知"], ["精力", snapshot.drives?.meters?.energy?.display_value === undefined ? "未知" : `${snapshot.drives.meters.energy.display_value} / 100`], ["地点", current?.location || state.location || "未知"], ["睡眠", sleepLabels[sleep] || sleep], ["天气", weather?.factual_summary || weather?.text || "尚未取得天气"], ["今日活动", `${today.length} 个活动`]]) stateGrid.append(append(el("div", "state-tile"), el("span", "", label), el("strong", "", value)));
   const currentBody = append(el("div", "current-activity"), el("p", "eyebrow", current ? `${clockTime(current.start)} — ${clockTime(current.end)} · 当前活动` : "当前没有进行中的活动"), el("h2", "", current?.title || "等待下一段生活"), el("p", "", current?.description || current?.content || "当天日程生成后，活动将在自己的时间开始。"), current ? actionBadges(current) : null);
-  const nextBody = append(el("div", "stack"), el("div", "next-social-time", next ? clockTime(next.action.at || next.activity.start) : "暂无待执行联系"), el("p", "record-body", next ? next.action.intent || next.activity.title : "临近活动细化时，再决定是否主动聊天。"), el("p", "hint", "每日聊天轮次允许少做；对象按白名单权重抽选，并检查冷却、免打扰与发送上限。"), linkButton("查看聊天对象与白名单", "whitelist"));
+  const nextBody = append(el("div", "stack"), el("div", "next-social-time", next ? clockTime(next.action.at || next.activity.start) : "暂无待执行联系"), el("p", "record-body", next ? next.action.intent || next.activity.title : "临近活动细化时，再决定是否主动聊天。"), el("p", "hint", "活动细化决定是否主动聊天；对象按白名单权重抽选，并检查冷却、免打扰与发送上限。"), linkButton("查看聊天对象与白名单", "whitelist"));
   const timeline = recordList(today, { timeline: true, currentId: current?.id, emptyTitle: "今天还没有正式日程" });
   timeline.classList.add("home-timeline");
   append(root, append(el("div", "overview-grid"), append(el("div", "stack"), card("此刻的角色", "状态来自设定与日程，没有依据时显示未知。", stateGrid), card("现在在做什么", "角色日常与真实行动分别记录。", currentBody)), card("今日时间线", "新闻 → 搜索 → 聊天；同一活动可以安排多种行动。", timeline, linkButton("完整日程", "schedule")), card("下一次主动联系", "内容到执行时结合聊天场合生成。", nextBody)));
@@ -382,7 +385,7 @@ function renderSettings() {
   const f = (label, path, options = {}, fallback = "") => field(label, path, valueAt(settings, path, fallback), options);
   const personas = [{ value: "", label: "请选择绑定人格" }, ...rows("personas").map((row) => ({ value: row.id, label: row.name || row.id }))];
   const providers = [{ value: "", label: "沿用默认模型" }, ...rows("providers").map((row) => ({ value: row.id, label: row.name || row.id }))];
-  form.append(card("角色与世界", "使用指定 AstrBot 人格，补充角色资料与生活背景。", append(el("div", "form-grid"), f("绑定人格", "persona_id", { options: personas, required: true }), f("时区", "character.timezone", {}, "Asia/Shanghai"), f("角色补充资料", "character.profile", { type: "textarea" }), f("世界设定", "character.world", { type: "textarea" }), f("初始精力", "character.energy", { type: "number", min: 0, max: 100 }, 70), f("初始情绪", "character.mood", {}, "平静"), f("初始地点", "character.location", { hint: "没有当前日程地点时采用此设置，留空显示未知。" }), f("初始睡眠状态", "character.sleep_state", { options: ["未知", "清醒", "睡眠"] }, "未知"))));
+  form.append(card("角色与世界", "使用指定 AstrBot 人格，补充角色资料与生活背景。精力与寂寞值在「内在状态」管理。", append(el("div", "form-grid"), f("绑定人格", "persona_id", { options: personas, required: true }), f("时区", "character.timezone", {}, "Asia/Shanghai"), f("角色补充资料", "character.profile", { type: "textarea" }), f("世界设定", "character.world", { type: "textarea" }), f("初始情绪", "character.mood", {}, "平静"), f("初始地点", "character.location", { hint: "没有当前日程地点时采用此设置，留空显示未知。" }), f("初始睡眠状态", "character.sleep_state", { options: ["未知", "清醒", "睡眠"] }, "未知"))));
   form.append(card("业务能力", "关闭停止该项行为并保留已有数据；开启后按日程和模块规则运行。", modulePanel(true)));
   const models = el("div", "form-grid");
   [["默认模型", "default"], ["生活与日程", "life"], ["记忆提炼", "memory"], ["主动社交", "social"], ["外部见闻", "exploration"], ["日记与笔记", "journal"]].forEach(([label, key]) => models.append(f(label, `models.${key}`, { options: providers })));
@@ -472,7 +475,7 @@ function renderWhitelist() {
 
 function editActivity(record) {
   openEditor("编辑未开始的日程活动", [
-    el("p", "hint", "只调整未开始活动的大纲。修改时间、内容或地点等信息后，旧细化归档并作废，行动预留释放，之后自动或手动重新细化。保存不调用模型、不发送消息。"),
+    el("p", "hint", "只调整未开始活动的大纲。修改时间、内容或地点等信息后，旧细化归档并作废，取消尚未执行的行动决定，之后自动或手动重新细化。保存不调用模型、不发送消息。"),
     field("标题", "title", record.title || "", { required: true }),
     field("开始时间", "start", record.start || "", { required: true, hint: "填写 ISO 时间，保留时区。" }),
     field("结束时间", "end", record.end || "", { required: true }),
@@ -485,10 +488,10 @@ function detailActivity(record) {
   if (dirty) { notice("请先保存日程设置，再细化活动。", true); return; }
   const regenerate = Boolean(record.detailed);
   openEditor(regenerate ? "重新细化活动" : "细化活动", [
-    el("p", "hint", "将真实调用模型，结合活动、相关记忆、今日安排、剩余额度和当前限制，决定细节与是否安排新闻、搜索、主动聊天。可以全部不安排。本次调用不执行来源或发送消息；采用的未来行动将照常执行。"),
+    el("p", "hint", "将真实调用模型，结合活动、相关记忆、今日安排、当前想法和发送限制，决定细节与是否安排新闻、搜索、主动聊天。可以全部不安排。本次调用不执行来源或发送消息；采用的未来行动将照常执行。"),
     el("p", "record-body", `${record.title} · ${clockTime(record.start)} — ${clockTime(record.end)}`),
-    regenerate ? el("p", "muted", "合格后替换旧细化及预留；失败或活动已经开始时保留旧结果。当天已使用次数不重置。") : null,
-    field("本次要求（可选）", "instruction", "", { type: "textarea", rows: 4, placeholder: "例如：这次专心散步，不安排主动聊天。", hint: "只用于这次细化，不保存成公共模板，也不能突破每日上限或发送限制。" }),
+    regenerate ? el("p", "muted", "合格后替换旧细化与尚未执行的行动决定；失败或活动已经开始时保留旧结果。内在状态和真实执行记录保留。") : null,
+    field("本次要求（可选）", "instruction", "", { type: "textarea", rows: 4, placeholder: "例如：这次专心散步，不安排主动聊天。", hint: "只用于这次细化，不保存成公共模板，既有发送限制仍然生效。" }),
   ].filter(Boolean), (values) => action("detail_activity", { id: record.id, instruction: values.instruction.trim(), regenerate }), regenerate ? "调用模型并重新细化" : "调用模型并细化");
 }
 function activityDetail(record) {
@@ -534,31 +537,28 @@ function scheduleSummary(date) {
     const identity = (item) => item.actions?.[key]?.id || `${item.id}:${key}`;
     const resultStatus = (item) => (usageDates.has(identity(item)) && actual.get(identity(item))?.status) || item.actions[key].execution?.status;
     const marked = recorded.filter((item) => item.actions?.[key] && (usageDates.get(identity(item)) || actionDate(item.actions[key].execution?.finished_at || item.actions[key].at || item.start)) === date);
-    const pending = rows("activities").filter((item) => item.actions?.[key]?.enabled && !usageDates.has(identity(item)) && [undefined, "pending", "reserved", "running"].includes(item.actions[key].execution?.status) && actionDate(item.actions[key].at || item.start) === date);
+    const scheduled = rows("activities").filter((item) => item.actions?.[key]?.enabled && actionDate(item.actions[key].at || item.start) === date);
     const success = marked.filter((item) => ["success", "succeeded", "sent", "completed", "done"].includes(resultStatus(item)));
     const failed = marked.filter((item) => ["failed", "interrupted", "unknown"].includes(resultStatus(item)));
     const skipped = marked.filter((item) => ["skipped", "expired", "cancelled"].includes(resultStatus(item)));
     const stored = date === dayNow() ? snapshot.day_summary?.counts?.[key] : null;
-    const limit = stored?.limit ?? settingsActionLimit(key);
-    const used = stored?.used ?? new Set(usage.filter((item) => item.kind === key).map((item) => item.id)).size;
-    const reserved = stored?.reserved ?? pending.length;
+    const started = stored?.started ?? new Set(usage.filter((item) => item.kind === key).map((item) => item.id)).size;
+    const arranged = stored?.arranged ?? scheduled.length;
     const unit = key === "social" ? "轮" : "次";
-    const body = append(el("div", "metric"), el("div", "metric-label", `${name} · 每日上限 ${limit} ${unit}`), el("div", "metric-value", `${used} ${unit}`), el("div", "metric-foot", `已使用 · 已预留 ${reserved} · 可安排 ${stored?.available ?? Math.max(0, limit - used - reserved)}`), el("div", "metric-foot", `成功 ${stored?.success ?? success.length} · 失败 ${stored?.failed ?? failed.length} · 跳过 ${stored?.skipped ?? skipped.length}`));
+    const body = append(el("div", "metric"), el("div", "metric-label", `${name} · ${unit}`), el("div", "metric-value", `已开始 ${started} ${unit}`), el("div", "metric-foot", `已安排 ${arranged} ${unit}`), el("div", "metric-foot", `成功 ${stored?.success ?? success.length} · 失败 ${stored?.failed ?? failed.length} · 跳过 ${stored?.skipped ?? skipped.length}`));
     if (failed.length || skipped.length) body.append(details([...failed, ...skipped].map((item) => ({ activity: item.title, ...item.actions[key].execution })), "查看跳过与失败原因"));
-    if (date !== dayNow()) body.append(el("div", "metric-foot", "上限按当前设置显示；用量按实际执行日期统计"));
+    if (date !== dayNow()) body.append(el("div", "metric-foot", "已开始及结果按实际执行日期统计"));
     box.append(body);
   }
   return box;
 }
-function settingsActionLimit(key) { return valueAt(snapshot.settings, `life.${key}_count`, key === "social" ? 3 : 2); }
 function renderSchedule() {
   const root = el("div", "stack"); const settings = snapshot.settings || {};
   const form = settingsForm("保存日程设置", "每天自动生成活动大纲，临近活动时再细化并决定行动。保存设置不会调用模型。");
   const f = (label, key, options, fallback) => field(label, `life.${key}`, valueAt(settings, `life.${key}`, fallback), options);
   const numberOptions = { type: "number", min: 0, max: 48, step: 1 };
   form.append(card("大纲生成参数", "生成时间和活动数修改默认次日生效；保存后可用「重新生成日程」立即用于今天。大纲只安排活动，不分配行动数量。", append(el("div", "form-grid"), f("每日生成时间", "daily_plan_time", { type: "time", required: true }, "06:00"), f("每天活动数", "activity_count", { ...numberOptions, min: 1 }, 10), f("提前细化活动（分钟）", "detail_minutes", { type: "number", min: 0, max: 120 }, 10))));
-  form.append(card("行动每日上限", "允许少做，不凑数。保存后立即约束尚未执行的行动；降低上限会按时间先后保留可容纳的预留，提高上限供后续细化使用。已使用次数不重置。", append(el("div", "form-grid"), f("新闻上限（次 / 天）", "news_count", numberOptions, 2), f("搜索上限（次 / 天）", "search_count", numberOptions, 2), f("主动聊天上限（轮 / 天）", "social_count", numberOptions, 3)), linkButton("聊天对象与白名单", "whitelist")));
-  form.append(el("p", "hint", "每个活动每类最多一次，可以多类同时存在。行动开始后即计入当天用量，失败不退还；开始前跳过会释放预留。一次主动聊天可抽选多个不同对象，各对象仍受白名单、冷却、免打扰和发送上限约束。"));
+  form.append(append(el("div", "actions"), linkButton("内在状态", "drives"), linkButton("聊天对象与白名单", "whitelist")), el("p", "hint", "每个活动每类最多一次，可以多类同时存在或全部不安排。细化只收到内在状态对应的当前想法；日程行动实际开始后扣值，失败不退还。一轮主动聊天可抽选多个不同对象，各对象仍受白名单、冷却、免打扰和发送上限约束。"));
   form.addEventListener("submit", (event) => {
     event.preventDefault(); const next = applyFields(clone(settings), form);
     saveSettings(next);
@@ -568,17 +568,17 @@ function renderSchedule() {
   date.addEventListener("change", () => { scheduleDate = date.value; render(); });
   const activities = orderedActivities(date.value);
   const editable = snapshot.day_regenerating ? [] : activities.filter((item) => item.status === "planned" && new Date(item.start).getTime() > Date.now());
-  const batch = () => openEditor("批量调整未来活动", [el("p", "hint", "仅修改列出的未开始活动大纲，活动总数保持。大纲改变后，旧细化归档并作废，释放行动预留。保存不调用模型、不发送消息。"), field("活动调整 JSON", "json", stringify({ updates: editable.map((item) => ({ id: item.id, changes: { title: item.title, start: item.start, end: item.end, content: item.content || item.description || "", location: item.location || "", sleep_state: item.sleep_state || "unknown" } })) }), { type: "textarea", rows: 18 })], (values) => { try { return action("update_activities", JSON.parse(values.json)); } catch (error) { notice(`JSON 格式错误：${error.message}`, true); return false; } }, "保存未来活动调整");
+  const batch = () => openEditor("批量调整未来活动", [el("p", "hint", "仅修改列出的未开始活动大纲，活动总数保持。大纲改变后，旧细化归档并作废，取消尚未执行的行动决定。保存不调用模型、不发送消息。"), field("活动调整 JSON", "json", stringify({ updates: editable.map((item) => ({ id: item.id, changes: { title: item.title, start: item.start, end: item.end, content: item.content || item.description || "", location: item.location || "", sleep_state: item.sleep_state || "unknown" } })) }), { type: "textarea", rows: 18 })], (values) => { try { return action("update_activities", JSON.parse(values.json)); } catch (error) { notice(`JSON 格式错误：${error.message}`, true); return false; } }, "保存未来活动调整");
   const regenerate = button("重新生成日程", () => {
     if (dirty) { notice("请先保存日程设置，再重新生成日程。", true); return; }
-    confirmAction("重新生成今天的日程", "将真实调用模型，使用最新已保存参数和当前模板替换今天整份活动大纲。旧日程、细化和执行记录归档保留，失败时保留原日程。新活动在细化后决定未来行动；当天行动已用次数、白名单、发送次数和冷却限制不重置，过期行动不补做。", () => action("regenerate_day", { date: date.value }), false, "调用模型并重新生成");
+    confirmAction("重新生成今天的日程", "将真实调用模型，使用最新已保存参数和当前模板替换今天整份活动大纲。旧日程、细化和执行记录归档保留，失败时保留原日程。新活动在细化后决定未来行动；内在状态、白名单、发送次数和冷却限制不重置，过期行动不补做。", () => action("regenerate_day", { date: date.value }), false, "调用模型并重新生成");
   }, "primary");
   regenerate.dataset.disabled = String(date.value !== dayNow() || Boolean(snapshot.day_regenerating));
   const batchButton = button("批量调整未来活动", batch, "secondary");
   batchButton.dataset.disabled = String(Boolean(snapshot.day_regenerating) || !editable.length);
   const toolbar = append(el("div", "section-toolbar"), date, append(el("div", "actions"), regenerate, batchButton));
   const list = recordList(activities, { timeline: true, emptyTitle: "这一天还没有安排", emptyDescription: "到生成时间自动生成；也可手动重新生成今天的日程。", body: activityDetail, actions: (record) => editable.includes(record) ? append(el("div", "actions"), button("编辑", () => editActivity(record), "secondary", true), button(record.detailed ? "重新细化" : "细化活动", () => detailActivity(record), "secondary", true)) : null });
-  root.append(card("日程与实际行动", "先生成大纲，再细化活动；细化决定是否安排新闻、搜索、主动聊天。按新闻 → 搜索 → 聊天执行，每项行动只执行一次。", append(el("div", "stack"), toolbar, snapshot.day_regenerating ? el("p", "hint", "正在重新生成日程：等待已有执行结束并生成新计划，期间暂停日程推进和活动编辑。完成后刷新查看结果。") : el("p", "muted", "重新生成今天的日程不清零行动用量。统计包含所选日期内被替换的旧版本实际行动；实际发送继续遵守白名单与发送限制。"), scheduleSummary(date.value), list)));
+  root.append(card("日程与实际行动", "先生成大纲，再细化活动；细化决定是否安排新闻、搜索、主动聊天。按新闻 → 搜索 → 聊天执行，每项行动只执行一次。", append(el("div", "stack"), toolbar, snapshot.day_regenerating ? el("p", "hint", "正在重新生成日程：等待已有执行结束并生成新计划，期间暂停日程推进和活动编辑。完成后刷新查看结果。") : el("p", "muted", "重新生成日程保留内在状态。统计包含所选日期内被替换的旧版本实际行动；实际发送继续遵守白名单与发送限制。"), scheduleSummary(date.value), list)));
   const day = rows("life_days").find((item) => (item.date || item.day || item.id?.slice(0, 10)) === date.value && (!item.scope || item.scope === "global"));
   const original = day ? append(el("div", "stack"), details(day.parameters || day.params || {}, "当日采用的生成参数"), details(day.full_request || day.request || {}, "生成输入快照（非 API 原文）"), details(day.raw_json ?? day.raw_response ?? "升级前日程未记录模型生成文本", "模型生成的日程文本"), details(day.adopted_activities || day.adopted || activities, "校验后采用的日程"), jsonButtons(day, `living-world-schedule-${date.value}.json`)) : empty("尚无正式生成记录", "生成参数、输入快照和模型生成文本会随正式日程长期保存，不受调试保留次数限制。");
   const debugId = day?.full_request?._debug_record_id;
@@ -598,7 +598,127 @@ function renderSchedule() {
     archives.append(entry);
   }
   root.append(card("正式日程生成档案", "保存当前日程和已归档历史版本。实际 API 请求与返回请到调试记录查看；调试记录过期后原文可能已清理。", append(el("div", "stack"), original, archives), archiveLink));
-  root.append(card("当前生活状态", "调整状态只保存生活数据，不触发模型调用或真实消息。", details(snapshot.state || {}, "查看状态数据"), button("调整当前状态", () => openEditor("调整当前状态", [field("精力", "energy", snapshot.state?.energy ?? 70, { type: "number", min: 0, max: 100 }), field("心情", "mood", snapshot.state?.mood || "平静"), field("当前作息", "routine", snapshot.state?.routine || "", { type: "textarea" })], (patch) => action("update_state", { patch })), "secondary", true)));
+  root.append(card("当前生活状态", "调整状态只保存生活数据，不触发模型调用或真实消息。精力与寂寞值请到「内在状态」调整。", details(snapshot.state || {}, "查看状态数据"), button("调整当前状态", () => openEditor("调整当前状态", [field("心情", "mood", snapshot.state?.mood || "平静"), field("当前作息", "routine", snapshot.state?.routine || "", { type: "textarea" })], (patch) => action("update_state", { patch })), "secondary", true)));
+  return root;
+}
+
+function driveDraft(id) {
+  const meter = snapshot.drives.meters[id];
+  if (!driveDrafts.has(id)) driveDrafts.set(id, { configDirty: false, valueDirty: false });
+  const draft = driveDrafts.get(id);
+  if (!draft.configDirty) draft.config = clone(meter.config);
+  if (!draft.valueDirty) draft.value = String(meter.value);
+  return draft;
+}
+function hasDriveDrafts() {
+  return [...driveDrafts.values()].some((draft) => draft.configDirty || draft.valueDirty);
+}
+function driveStatusCards() {
+  const box = el("div", "drive-status-cards"); box.id = "drive-status-cards";
+  const active = Boolean(snapshot.drives?.enabled);
+  for (const [id, name] of Object.entries(driveNames)) {
+    const meter = snapshot.drives?.meters?.[id]; if (!meter) continue;
+    const body = append(el("div", "drive-summary"), el("div", "drive-value", `${meter.display_value} / 100`), el("p", "muted", `当前阶段 ${meter.stage.min}—${meter.stage.max}`));
+    const progress = el("progress"); progress.max = 100; progress.value = meter.display_value; progress.setAttribute("aria-label", `${name}当前值`); body.append(progress);
+    append(body, el("p", "field-label", active ? "下次细化会收到的文案" : "当前阶段文案（暂停注入）"), el("p", "drive-thought", active ? meter.thought : meter.stage.text));
+    if (!active) body.append(el("p", "muted", "模块已暂停，下次细化不注入这项想法。"));
+    const item = card(name, "", body, badge(active ? "enabled" : "paused")); item.dataset.drive = id; box.append(item);
+  }
+  return box;
+}
+function updateDriveStatusCards() {
+  $("#drive-status-cards")?.replaceWith(driveStatusCards());
+}
+async function saveDrive(id, name, payload, committed) {
+  return request(async () => {
+    const result = await bridge.apiPost("action", { action: name, id, ...payload });
+    snapshot.drives = result;
+    snapshot.settings.drives = Object.fromEntries(Object.entries(result.meters).map(([key, meter]) => [key, clone(meter.config)]));
+    snapshot.settings.modules.drives = result.enabled;
+    committed(); render();
+    return result;
+  }, name === "set_drive_value" ? "当前值已应用，参数与阶段草稿继续保留" : "参数与阶段已保存，当前值继续按运行规则变化");
+}
+function renderDrives() {
+  const root = el("div", "stack drives-page");
+  if (!snapshot.drives?.meters) return append(root, empty("内在状态暂不可用", "请确认插件已更新并刷新页面。"));
+  root.append(driveStatusCards());
+  const toolbar = append(el("div", "section-toolbar"), el("p", "muted", "两项数值由程序管理；AI 只在细化时看到阶段文案，不会收到数值和计算规则。"), linkButton("模块启停设置", "settings"));
+  root.append(toolbar);
+  const tabs = el("div", "debug-tabs drive-tabs"); tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "内在状态设置");
+  for (const [id, name] of Object.entries(driveNames)) {
+    const tab = button(name, () => { selectedDrive = id; render(); $("#drive-tab-" + id)?.focus(); });
+    tab.id = `drive-tab-${id}`; tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(id === selectedDrive)); tab.setAttribute("aria-controls", "drive-editor"); tab.tabIndex = id === selectedDrive ? 0 : -1;
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault(); selectedDrive = event.key === "Home" ? "loneliness" : event.key === "End" ? "energy" : id === "loneliness" ? "energy" : "loneliness"; render(); $("#drive-tab-" + selectedDrive)?.focus();
+    }); tabs.append(tab);
+  }
+  root.append(tabs);
+  const id = selectedDrive; const draft = driveDraft(id);
+  const panel = el("div", "stack drive-editor"); panel.id = "drive-editor"; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", `drive-tab-${id}`);
+  const markDraft = () => { draft.configDirty = true; dirty = true; };
+  const currentForm = el("form", "drive-current-form");
+  const current = field("设置当前值", "drive.value", draft.value, { type: "number", min: 0, max: 100, step: "any", required: true, hint: "可设置小数；页面展示与阶段匹配取整数部分。只应用当前值，不保存下方参数。" });
+  const currentInput = current.querySelector("input");
+  currentInput.addEventListener("input", () => { draft.value = currentInput.value; draft.valueDirty = true; dirty = true; });
+  const apply = button("应用当前值", () => {}, "primary"); apply.type = "submit";
+  currentForm.addEventListener("submit", (event) => {
+    event.preventDefault(); const submitted = currentInput.value;
+    saveDrive(id, "set_drive_value", { value: Number(submitted) }, () => { if (draft.value === submitted) draft.valueDirty = false; });
+  });
+  append(currentForm, current, append(el("div", "actions"), apply));
+  panel.append(card(`调整${driveNames[id]}`, "操作立即生效，不调用模型；已细化活动需要手动重新细化才会获得新的想法。", currentForm));
+  const configForm = el("form", "stack drive-config-form");
+  const rate = field("每在线小时增加", "drive.growth_per_hour", draft.config.growth_per_hour, { type: "number", min: 0, step: "any", required: true, hint: "在线时间连续累计，离线和模块暂停时不增长；设为 0 可停止增长。" });
+  rate.querySelector("input").addEventListener("input", (event) => { draft.config.growth_per_hour = event.target.value; markDraft(); });
+  configForm.append(rate);
+  for (const [kind, value] of Object.entries(draft.config.costs)) {
+    const labels = { social: "每轮主动聊天减少", news: "每次新闻阅读减少", search: "每次主动搜索减少" };
+    const cost = field(labels[kind] || kind, `drive.costs.${kind}`, value, { type: "number", min: 0, step: "any", required: true });
+    cost.querySelector("input").addEventListener("input", (event) => { draft.config.costs[kind] = event.target.value; markDraft(); }); configForm.append(cost);
+  }
+  configForm.append(el("p", "hint", "仅日程行动实际开始时扣值，失败不退还；不足时仍可执行，最低归零。聊天一轮多对象只扣一次；手动来源读取、调试试跑、被动回复、群聊插话和独立 AI 日报不扣值。"));
+  const stages = el("div", "drive-stages");
+  function renderStages(focusIndex = -1) {
+    stages.replaceChildren();
+    draft.config.stages.forEach((stage, index) => {
+      const min = index ? draft.config.stages[index - 1].max + 1 : 0;
+      const stageRow = el("section", "drive-stage"); stageRow.dataset.index = String(index);
+      const split = button("＋", () => {
+        const oldMax = stage.max; stage.max = Math.floor((min + oldMax) / 2);
+        draft.config.stages.splice(index + 1, 0, { max: oldMax, text: stage.text }); markDraft(); renderStages(index + 1);
+      }, "secondary", true);
+      split.setAttribute("aria-label", `拆分第 ${index + 1} 阶段`); split.dataset.disabled = String(min === stage.max); split.disabled = min === stage.max;
+      const remove = button("删除", () => {
+        if (index) draft.config.stages[index - 1].max = stage.max;
+        draft.config.stages.splice(index, 1); markDraft(); renderStages(Math.max(0, index - 1));
+      }, "secondary", true);
+      remove.setAttribute("aria-label", `删除第 ${index + 1} 阶段`); remove.dataset.disabled = String(draft.config.stages.length === 1); remove.disabled = draft.config.stages.length === 1;
+      append(stageRow, append(el("div", "section-toolbar"), el("h3", "", `阶段 ${index + 1} · ${min}—${stage.max}`), append(el("div", "actions"), split, remove)));
+      const boundary = field("阶段结束值", `drive.stage.${index}.max`, stage.max, { type: "number", min, max: index === draft.config.stages.length - 1 ? 100 : draft.config.stages[index + 1].max - 1, step: 1, required: true, readOnly: index === draft.config.stages.length - 1, hint: index === draft.config.stages.length - 1 ? "最后一个阶段始终覆盖到 100。" : `起始值为 ${min}；修改结束值会同步调整下一阶段的起始值。` });
+      boundary.querySelector("input").addEventListener("change", (event) => {
+        const value = Number(event.target.value);
+        if (!event.target.reportValidity() || !Number.isInteger(value)) { event.target.value = stage.max; return; }
+        stage.max = value; markDraft(); renderStages(index);
+      });
+      const meaning = field("注入的想法", `drive.stage.${index}.text`, stage.text, { type: "textarea", rows: 3, required: true });
+      meaning.querySelector("textarea").addEventListener("input", (event) => { stage.text = event.target.value; markDraft(); });
+      append(stageRow, boundary, meaning); stages.append(stageRow);
+    });
+    if (focusIndex >= 0) stages.querySelector(`[data-index="${focusIndex}"] textarea`)?.focus();
+  }
+  renderStages();
+  configForm.append(heading("阶段与想法", "数值完整覆盖 0—100。删除阶段并入低一档；最低档删除后并入下一档。“必须聊天”仅表达强烈倾向，AI 仍自行决定是否安排行动。"), stages);
+  const save = button("保存设置", () => {}, "primary"); save.type = "submit";
+  configForm.append(append(el("div", "form-actions"), save));
+  configForm.addEventListener("submit", (event) => {
+    event.preventDefault(); const before = stringify(draft.config); const config = clone(draft.config);
+    config.growth_per_hour = Number(config.growth_per_hour); for (const key of Object.keys(config.costs)) config.costs[key] = Number(config.costs[key]);
+    saveDrive(id, "save_drive_settings", { config }, () => { if (stringify(draft.config) === before) draft.configDirty = false; });
+  });
+  panel.append(card("增长、消耗与阶段", "保存只更新本项参数与阶段，不覆盖当前值。顶部卡片展示已保存设置；未保存修改会在切换或刷新时保留。", configForm));
+  root.append(panel); dirty = hasDriveDrafts();
   return root;
 }
 
@@ -1199,28 +1319,33 @@ function render() {
   document.title = `${titles[view]} · Living World`;
   document.querySelectorAll("#navigation a").forEach((link) => { if (link.dataset.view === view) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current"); });
   if (!snapshot) return;
-  const renderers = { whitelist: renderWhitelist, sources: renderSources, debug: renderDebug, overview: renderOverview, settings: renderSettings, schedule: renderSchedule, memory: renderMemory, journal: renderJournal, social: renderSocial, data: renderData };
+  const renderers = { whitelist: renderWhitelist, sources: renderSources, debug: renderDebug, overview: renderOverview, settings: renderSettings, drives: renderDrives, schedule: renderSchedule, memory: renderMemory, journal: renderJournal, social: renderSocial, data: renderData };
   content.replaceChildren(renderers[view]());
   if (view === "overview") { const timeline = content.querySelector(".home-timeline"); const current = timeline?.querySelector(".is-current"); if (current) timeline.scrollTop = Math.max(0, current.offsetTop - timeline.offsetTop - 60); }
   if (lastResult && view !== "settings") content.firstChild.append(card("最近一次操作结果", `${lastResult.time} · ${lastResult.action}`, details(lastResult.result, "查看后端执行结果")));
   setBusy(busy);
 }
 window.addEventListener("hashchange", () => { dirty = false; render(); });
-window.addEventListener("beforeunload", (event) => { if (dirty) { event.preventDefault(); event.returnValue = ""; } });
+window.addEventListener("beforeunload", (event) => { if (dirty || hasDriveDrafts()) { event.preventDefault(); event.returnValue = ""; } });
 $("#navigation").addEventListener("click", (event) => {
   const link = event.target.closest("a[data-view]");
-  if (!link || !dirty) return;
+  if (!link || !dirty || location.hash === "#drives") return;
   event.preventDefault();
   confirmAction("离开尚未保存的设置", "本页的修改尚未保存，离开后需要重新填写。", () => { dirty = false; location.hash = link.dataset.view; }, false, "放弃修改并离开");
 });
 $("#refresh").addEventListener("click", () => {
-  if (dirty) confirmAction("刷新并放弃未保存的修改", "刷新会重新读取后端数据，覆盖当前未保存的设置。", refresh, false, "刷新");
+  if (dirty && location.hash !== "#drives") confirmAction("刷新并放弃未保存的修改", "刷新会重新读取后端数据，覆盖当前未保存的设置。", refresh, false, "刷新");
   else refresh();
 });
 try {
   if (!bridge) throw new Error("请从 AstrBot 插件详情中的 Pages 打开此页面，以连接插件后端。");
   await bridge.ready();
   await refresh();
+  setInterval(async () => {
+    if (busy || document.hidden || location.hash !== "#drives") return;
+    setBusy(true);
+    try { await readState(); updateDriveStatusCards(); } catch (error) { notice(`数值刷新失败：${error.message}`, true); } finally { setBusy(false); }
+  }, 60000);
 } catch (error) {
   $("#connection").textContent = "连接不可用";
   content.replaceChildren(empty("暂时无法连接", error.message));

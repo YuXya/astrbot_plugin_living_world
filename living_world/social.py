@@ -250,7 +250,7 @@ class SocialService:
                 "interjection": interjection,
             }
             if before_start is not None and not before_start():
-                record["reason"] = "daily_budget_or_activity_changed"
+                record["reason"] = "activity_changed_or_already_started"
                 self.runtime.store.put("deliveries", key, record)
                 return record
             if hasattr(self.runtime, "complete"):

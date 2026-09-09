@@ -1,4 +1,4 @@
-"""Detail adoption, budget accounting and races against persistent SQLite state."""
+"""Detail adoption, action decisions and races against persistent SQLite state."""
 
 import asyncio
 import copy
@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from living_world.store import Store
+from test_life import action_counts
 from test_life import (
     KINDS,
     NOW,
@@ -51,7 +52,6 @@ async def adopt(world, row, kinds=KINDS, **kwargs):
 async def test_detail_naturally_selects_none_one_or_several_actions(world, kinds):
     runtime, life, _ = world
     rows = await outline(world)
-    before = life.budget()
     result = await adopt(
         world, rows[0], kinds, instruction="主动聊天本次不安排。" if not kinds else ""
     )
@@ -59,10 +59,9 @@ async def test_detail_naturally_selects_none_one_or_several_actions(world, kinds
     assert {kind for kind, value in result["actions"].items() if value["enabled"]} == set(kinds)
     for field in ("id", "title", "content", "location", "sleep_state", "start", "end", "scope"):
         assert result[field] == rows[0][field]
-    for kind, budget in life.budget().items():
-        assert budget["used"] == 0
-        assert budget["reserved"] == int(kind in kinds)
-        assert budget["available"] == before[kind]["available"] - int(kind in kinds)
+    for kind, budget in action_counts(life).items():
+        assert budget["started"] == 0
+        assert budget["pending"] == int(kind in kinds)
     assert not runtime.actions and not runtime.events
     assert result["detail_raw"]
     if not kinds:
@@ -90,7 +89,9 @@ def test_detail_request_is_read_only_and_filters_private_material(world):
     assert "公共兴趣是天文" in text and "公开新闻实际读过" in text
     assert "今天还要去上课" in text and "只考虑自然的行动" in text
     assert "私人礼物约定" not in text and "私聊消息正文秘密" not in text
-    assert "上限 2" in text and "已使用 0" in text and "已预留 0" in text
+    assert "当前想法" in text and "不是很想聊天" in text
+    assert "行动额度" not in text and "已预留" not in text
+    assert "energy_delta" not in text and "精力：" not in text and "寂寞值" not in text
     assert runtime.store.export() == before
     assert runtime.calls == runtime.events == runtime.actions == []
 
@@ -109,7 +110,7 @@ def test_detail_request_is_read_only_and_filters_private_material(world):
         "outline",
     ],
 )
-async def test_invalid_detail_preserves_old_detail_and_reservations(world, problem):
+async def test_invalid_detail_preserves_old_detail_and_decisions(world, problem):
     runtime, life, _ = world
     rows = await outline(world)
     old = await adopt(world, rows[0], ("search",))
@@ -133,11 +134,11 @@ async def test_invalid_detail_preserves_old_detail_and_reservations(world, probl
     elif problem == "outline":
         value["start"] = rows[1]["start"]
     runtime.responses = ["not json" if problem == "json" else json.dumps(value)]
-    budget = life.budget()
+    budget = action_counts(life)
     with pytest.raises((ValueError, TypeError)):
         await life.detail(rows[0]["id"], regenerate=True)
     assert runtime.store.get("activities", rows[0]["id"]) == old
-    assert life.budget() == budget
+    assert action_counts(life) == budget
     assert not runtime.actions and not runtime.events
 
 
@@ -149,11 +150,11 @@ async def test_model_cannot_forge_execution_records_in_a_detail(world):
     runtime.responses = [json.dumps(result)]
     adopted = await life.detail(rows[0]["id"])
     assert adopted["actions"]["search"]["execution"] == {"status": "pending"}
-    assert life.budget()["search"]["used"] == 0
+    assert action_counts(life)["search"]["started"] == 0
     assert not runtime.actions and not runtime.events
 
 
-async def test_redetail_replaces_reservation_and_archives_previous_version(world):
+async def test_redetail_replaces_decisions_and_archives_previous_version(world):
     runtime, life, _ = world
     rows = await outline(world)
     old = await adopt(world, rows[0], ("search",))
@@ -164,14 +165,14 @@ async def test_redetail_replaces_reservation_and_archives_previous_version(world
         world, rows[0], ("social",), regenerate=True, instruction="这次改成和朋友聊天"
     )
     assert new["detail_version"] != old["detail_version"]
-    assert life.budget()["search"]["reserved"] == 0
-    assert life.budget()["social"]["reserved"] == 1
+    assert action_counts(life)["search"]["pending"] == 0
+    assert action_counts(life)["social"]["pending"] == 1
     history = runtime.store.list("life_detail_history")
     assert len(history) == 1 and history[0]["activity"] == old
     assert new["detail_request"]["context"]["管理员本次要求"] == "这次改成和朋友聊天"
 
 
-async def test_detail_replacement_sqlite_failure_rolls_back_history_and_reservations(world):
+async def test_detail_replacement_sqlite_failure_rolls_back_history_and_decisions(world):
     runtime, life, _ = world
     rows = await outline(world)
     old = await adopt(world, rows[0], ("search",))
@@ -185,21 +186,18 @@ async def test_detail_replacement_sqlite_failure_rolls_back_history_and_reservat
         await adopt(world, rows[0], ("social",), regenerate=True)
     assert runtime.store.export() == before
     assert runtime.store.get("activities", rows[0]["id"]) == old
-    assert life.budget()["search"]["reserved"] == 1
-    assert life.budget()["social"]["reserved"] == 0
+    assert action_counts(life)["search"]["pending"] == 1
+    assert action_counts(life)["social"]["pending"] == 0
 
 
-async def test_parallel_details_cannot_reserve_the_last_slot_twice(world):
+async def test_parallel_details_are_not_limited_by_former_daily_counts(world):
     runtime, life, _ = world
     rows = await outline(world)
-    runtime.settings["life"]["search_count"] = 1
-    runtime.responses = [json.dumps(detail_result(row, ("search",))) for row in rows[:2]]
-    results = await asyncio.gather(
-        *(life.detail(row["id"]) for row in rows[:2]), return_exceptions=True
-    )
-    assert sum(isinstance(result, dict) for result in results) == 1
-    assert sum(isinstance(result, ValueError) for result in results) == 1
-    assert life.budget()["search"] == {"limit": 1, "used": 0, "reserved": 1, "available": 0}
+    runtime.settings["life"]["search_count"] = 0
+    runtime.responses = [json.dumps(detail_result(row, ("search",))) for row in rows[:3]]
+    results = await asyncio.gather(*(life.detail(row["id"]) for row in rows[:3]))
+    assert len(results) == 3 and all(row["detailed"] for row in results)
+    assert action_counts(life)["search"] == {"started": 0, "pending": 3}
     assert not runtime.actions
 
 
@@ -233,7 +231,7 @@ async def test_inflight_detail_cannot_publish_after_environment_changes(world, c
         await life.detail(row["id"])
     stored = runtime.store.get("activities", row["id"])
     assert not stored["detailed"] and all(not a["enabled"] for a in stored["actions"].values())
-    assert all(b["reserved"] == 0 for b in life.budget().values())
+    assert all(b["pending"] == 0 for b in action_counts(life).values())
 
 
 async def test_duplicate_detail_and_edit_rejected_during_model_call(world):
@@ -258,7 +256,7 @@ async def test_duplicate_detail_and_edit_rejected_during_model_call(world):
         release.set()
     result = await task
     assert result["detailed"]
-    assert all(b["reserved"] == 1 for b in life.budget().values())
+    assert all(b["pending"] == 1 for b in action_counts(life).values())
 
 
 async def test_cancellation_during_redetail_preserves_old_version(world):
@@ -278,7 +276,7 @@ async def test_cancellation_during_redetail_preserves_old_version(world):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert runtime.store.get("activities", rows[0]["id"]) == old
-    assert life.budget()["search"]["reserved"] == 1
+    assert action_counts(life)["search"]["pending"] == 1
     assert not life._detail_lock.locked()
 
 
@@ -308,7 +306,7 @@ async def test_auto_detail_retries_once_after_sixty_seconds_and_persists_restart
     assert not runtime.store.get("activities", rows[0]["id"])["detailed"]
 
 
-async def test_successful_auto_retry_reserves_actions_and_manual_retry_still_available(
+async def test_successful_auto_retry_adopts_actions_and_manual_retry_still_available(
     world, monkeypatch
 ):
     runtime, life, clock = world
@@ -320,37 +318,31 @@ async def test_successful_auto_retry_reserves_actions_and_manual_retry_still_ava
     await life.tick()
     row = runtime.store.get("activities", rows[0]["id"])
     assert row["detailed"] and not row.get("detail_error")
-    assert life.budget()["search"]["reserved"] == 1
+    assert action_counts(life)["search"]["pending"] == 1
     await adopt(world, rows[0], (), regenerate=True)
-    assert life.budget()["search"]["reserved"] == 0
+    assert action_counts(life)["search"]["pending"] == 0
 
 
-async def test_lower_limit_keeps_earliest_reservations_and_raising_does_not_restore(world):
+async def test_old_limit_fields_no_longer_cancel_pending_actions(world):
     runtime, life, _ = world
     rows = await outline(world)
-    runtime.settings["life"]["search_count"] = 3
     for row in reversed(rows[:3]):
         await adopt(world, row, ("search",))
-    runtime.settings["life"]["search_count"] = 1
-    life.reconcile_reservations()
-    assert (
-        runtime.store.get("activities", rows[0]["id"])["actions"]["search"]["execution"]["status"]
+    runtime.settings["life"]["search_count"] = 0
+    life.reconcile_actions()
+    assert action_counts(life)["search"] == {"started": 0, "pending": 3}
+    assert all(
+        runtime.store.get("activities", row["id"])["actions"]["search"]["execution"]["status"]
         == "pending"
+        for row in rows[:3]
     )
-    for row in rows[1:3]:
-        execution = runtime.store.get("activities", row["id"])["actions"]["search"]["execution"]
-        assert execution["status"] == "skipped" and execution["reason"] == "daily_limit_reduced"
-    runtime.settings["life"]["search_count"] = 3
-    life.reconcile_reservations()
-    assert life.budget()["search"]["reserved"] == 1
-    await adopt(world, rows[1], ("search",), regenerate=True)
-    assert life.budget()["search"]["reserved"] == 2
 
 
-async def test_used_counts_survive_day_regeneration_and_sqlite_reopen(world):
+async def test_started_records_survive_regeneration_and_sqlite_reopen_without_capping_new_actions(
+    world,
+):
     runtime, life, clock = world
     rows = await outline(world)
-    runtime.settings["life"]["search_count"] = 1
     first = await adopt(world, rows[0], ("search",))
     clock[0] = datetime.fromisoformat(first["start"])
     assert life.consume_action(first["id"], "search")
@@ -358,30 +350,30 @@ async def test_used_counts_survive_day_regeneration_and_sqlite_reopen(world):
     for _ in range(2):
         runtime.responses = [json.dumps({"activities": plan_rows(start=clock[0])})]
         current = await life.regenerate_day()
-        assert life.budget()["search"]["used"] == 1
-        with pytest.raises(ValueError):
-            await adopt(world, current[1], ("search",))
+        assert action_counts(life)["search"]["started"] == 1
+        assert (await adopt(world, current[1], ("search",)))["detailed"]
     path = runtime.store.db.execute("PRAGMA database_list").fetchone()[2]
     runtime.store.close()
     runtime.store = Store(path)
     restarted = fixed_service(runtime, clock[0])
-    assert restarted.budget()["search"] == {"limit": 1, "used": 1, "reserved": 0, "available": 0}
+    assert action_counts(restarted)["search"]["started"] == 1
     assert len(runtime.store.list("life_action_usage")) == 1
+    assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 60
 
 
-async def test_concurrent_execution_cannot_consume_one_remaining_slot_twice(world):
+async def test_concurrent_execution_starts_each_distinct_action_once_without_daily_cap(world):
     runtime, life, clock = world
-    runtime.settings["life"]["search_count"] = 1
-    first = activity(runtime, "first", kind="search")
-    second = activity(runtime, "second", kind="search")
+    rows = [activity(runtime, key, kind="search") for key in ("first", "second")]
     results = await asyncio.gather(
         *[
             asyncio.to_thread(life.consume_action, row["id"], "search", clock[0])
-            for row in (first, second)
+            for row in rows
+            for _ in range(2)
         ]
     )
-    assert sum(results) == 1 and life.budget()["search"]["used"] == 1
-    assert len(runtime.store.list("life_action_usage")) == 1
+    assert sum(results) == 2 and action_counts(life)["search"]["started"] == 2
+    assert len(runtime.store.list("life_action_usage")) == 2
+    assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 50
 
 
 def test_cross_midnight_execution_uses_actual_date_and_expired_actions_do_not_consume(world):
@@ -394,12 +386,12 @@ def test_cross_midnight_execution_uses_actual_date_and_expired_actions_do_not_co
     at = start.replace(minute=59, second=58)
     row["actions"]["search"]["at"] = at.isoformat()
     runtime.store.put("activities", row["id"], row)
-    assert life.budget(start.date())["search"]["reserved"] == 1
+    assert action_counts(life, start.date())["search"]["pending"] == 1
     assert not life.consume_action(row["id"], "search", now=at - timedelta(seconds=1))
     clock[0] = at + timedelta(seconds=3)
     assert life.consume_action(row["id"], "search")
-    assert life.budget(start.date())["search"]["used"] == 0
-    assert life.budget(clock[0].date())["search"]["used"] == 1
+    assert action_counts(life, start.date())["search"]["started"] == 0
+    assert action_counts(life, clock[0].date())["search"]["started"] == 1
     other = activity(
         runtime,
         "expired",
@@ -411,41 +403,40 @@ def test_cross_midnight_execution_uses_actual_date_and_expired_actions_do_not_co
     assert len(runtime.store.list("life_action_usage")) == 1
 
 
-async def test_lower_limit_during_running_attempt_does_not_reset_or_cancel_usage(world):
+async def test_manual_meter_change_does_not_cancel_started_or_future_decisions(world):
     runtime, life, clock = world
-    runtime.settings["life"]["search_count"] = 2
     running = activity(runtime, "running", kind="search")
     future = activity(
         runtime, "future", kind="search", start=(NOW + timedelta(hours=1)).isoformat()
     )
     assert life.consume_action(running["id"], "search", now=clock[0])
-    runtime.settings["life"]["search_count"] = 0
-    life.reconcile_reservations()
-    assert life.budget()["search"] == {"limit": 0, "used": 1, "reserved": 0, "available": 0}
+    runtime.drives.set_value("energy", 0)
+    life.reconcile_actions()
+    assert action_counts(life)["search"]["started"] == 1
     assert (
-        runtime.store.get("activities", running["id"])["actions"]["search"]["execution"]["status"]
+        runtime.store.get("activities", future["id"])["actions"]["search"]["execution"]["status"]
         == "pending"
     )
-    assert (
-        runtime.store.get("activities", future["id"])["actions"]["search"]["execution"]["reason"]
-        == "daily_limit_reduced"
-    )
+    assert not life.consume_action(running["id"], "search", now=clock[0])
 
 
-async def test_lower_limit_during_detail_call_is_checked_again_before_adoption(world):
+async def test_meter_change_during_detail_keeps_original_thought_snapshot_and_adopts(world):
     runtime, life, _ = world
     rows = await outline(world)
+    runtime.drives.set_value("loneliness", 90)
+    calls = []
 
     async def generate(*args, **kwargs):
-        runtime.settings["life"]["search_count"] = 0
-        life.reconcile_reservations()
-        return json.dumps(detail_result(rows[0], ("search",)))
+        calls.append(args)
+        runtime.drives.set_value("loneliness", 0)
+        return json.dumps(detail_result(rows[0], ("social",)))
 
     runtime.generate = generate
-    with pytest.raises(ValueError):
-        await life.detail(rows[0]["id"])
-    assert not runtime.store.get("activities", rows[0]["id"])["detailed"]
-    assert life.budget()["search"]["reserved"] == 0
+    adopted = await life.detail(rows[0]["id"])
+    assert adopted["detailed"]
+    assert "必须聊天" in adopted["detail_request"]["context"]["当前想法"]
+    assert runtime.drives.snapshot()["meters"]["loneliness"]["value"] == 0
+    assert len(calls) == 1 and not runtime.actions
 
 
 async def test_slow_auto_detail_cannot_create_fiction_after_activity_has_expired(
@@ -466,7 +457,7 @@ async def test_slow_auto_detail_cannot_create_fiction_after_activity_has_expired
     stored = runtime.store.get("activities", rows[0]["id"])
     assert not stored["detailed"] and stored["status"] == "skipped"
     assert runtime.events == runtime.actions == []
-    assert all(value["reserved"] == 0 for value in life.budget().values())
+    assert all(value["pending"] == 0 for value in action_counts(life).values())
 
 
 async def test_action_completion_does_not_restore_another_action_cancelled_during_await(world):
@@ -479,18 +470,18 @@ async def test_action_completion_does_not_restore_another_action_cancelled_durin
         assert runtime.consume(kind, payload)
         runtime.actions.append((kind, payload, scope, action_id))
         if kind == "news":
-            runtime.settings["life"]["search_count"] = 0
-            life.reconcile_reservations()
-            runtime.settings["life"]["search_count"] = 2
-            life.reconcile_reservations()
+            runtime.disabled.add("search")
+            life.reconcile_actions()
+            runtime.disabled.discard("search")
+            life.reconcile_actions()
         return {"status": "success"}
 
     runtime.execute_action = execute
     await life.tick()
     stored = runtime.store.get("activities", row["id"])
     assert [call[0] for call in runtime.actions] == ["news"]
-    assert stored["actions"]["search"]["execution"]["reason"] == "daily_limit_reduced"
-    assert life.budget()["search"]["used"] == 0
+    assert stored["actions"]["search"]["execution"]["reason"] == "module_disabled"
+    assert action_counts(life)["search"]["started"] == 0
 
 
 @pytest.mark.parametrize("tick_seconds", [60, 120])
@@ -511,12 +502,12 @@ async def test_zero_detail_lead_uses_last_scheduling_tick_before_start(
     clock[0] = start - timedelta(seconds=tick_seconds)
     await life.tick()
     assert runtime.store.get("activities", rows[0]["id"])["detailed"]
-    assert life.budget()["search"]["reserved"] == 1
+    assert action_counts(life)["search"]["pending"] == 1
     assert len(runtime.calls) == 2 and not runtime.actions
     clock[0] = start
     await life.tick()
     assert [call[0] for call in runtime.actions] == ["search"]
-    assert len(runtime.calls) == 2 and life.budget()["search"]["used"] == 1
+    assert len(runtime.calls) == 2 and action_counts(life)["search"]["started"] == 1
 
 
 @pytest.mark.parametrize("start_after_midnight", [False, True])
@@ -553,4 +544,45 @@ async def test_result_statistics_use_actual_start_date_even_when_action_crosses_
     ).date() == start.date() + timedelta(days=1)
     for day in (start.date(), start.date() + timedelta(days=1)):
         values = life.day_summary(day)["counts"]["search"]
-        assert values["used"] == values["success"] == int(day == actual.date())
+        assert values["started"] == values["success"] == int(day == actual.date())
+        assert values["arranged"] == int(day == at.date())
+
+
+def test_started_receipt_missing_but_drive_debit_present_cannot_replay(world):
+    runtime, life, clock = world
+    row = activity(runtime, kind="search")
+    action_id = life._action_key(row, "search")
+    runtime.drives.debit(action_id, "search")
+    assert runtime.store.get("life_action_usage", action_id) is None
+    before = runtime.drives.snapshot()
+    assert not life.consume_action(row["id"], "search", now=clock[0])
+    assert runtime.drives.snapshot() == before
+    assert runtime.store.get("life_action_usage", action_id) is None
+    assert not runtime.actions
+
+
+async def test_admin_action_statistics_include_private_activity_and_finished_decision(world):
+    runtime, life, clock = world
+    row = activity(runtime, "private-activity", scope="private-a", kind="search")
+    await life._advance(row, clock[0])
+    counts = life.day_summary()["counts"]["search"]
+    assert counts["arranged"] == counts["started"] == counts["success"] == 1
+    assert counts["failed"] == counts["skipped"] == 0
+    assert (
+        runtime.store.get("activities", row["id"])["actions"]["search"]["execution"]["status"]
+        == "success"
+    )
+
+
+def test_cross_midnight_arrangement_uses_action_time_not_parent_activity_date(world):
+    runtime, life, _ = world
+    start = NOW.replace(hour=23, minute=50)
+    next_day = start + timedelta(minutes=20)
+    row = activity(
+        runtime, start=start.isoformat(), end=(next_day + timedelta(minutes=20)).isoformat()
+    )
+    row = prepared_activity(runtime, row, ("search",))
+    row["actions"]["search"]["at"] = next_day.isoformat()
+    runtime.store.put("activities", row["id"], row)
+    assert life.day_summary(start.date())["counts"]["search"]["arranged"] == 0
+    assert life.day_summary(next_day.date())["counts"]["search"]["arranged"] == 1

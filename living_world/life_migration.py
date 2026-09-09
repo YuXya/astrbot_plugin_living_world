@@ -74,6 +74,22 @@ def _version(row):
     return value if isinstance(value, int) else 0
 
 
+def _superseded(row, marker):
+    """Compare known plan versions, falling back to the adopted identity set."""
+    current = marker.get("version_id")
+    if not current:
+        return False
+    version = row.get("plan_version") or row.get("version_id")
+    if version:
+        return version != current
+    adopted = {
+        activity.get("id")
+        for activity in marker.get("adopted_activities", [])
+        if isinstance(activity, dict) and activity.get("id")
+    }
+    return bool(adopted and row.get("id") not in adopted)
+
+
 def _execution_started(row):
     """A terminal skip alone cannot prove a model or source was called."""
     status = row.get("status", "")
@@ -316,11 +332,7 @@ def migrate_life(service):
             archived.setdefault(marker_key, []).append(copy.deepcopy(row))
             changed_days.add(marker_key)
             # An orphan from a superseded backup cannot join an already adopted new version.
-            superseded = (
-                _version(marker) >= 3
-                and marker.get("version_id")
-                and row.get("version_id") != marker.get("version_id")
-            )
+            superseded = _version(marker) >= 3 and _superseded(row, marker)
             if row.get("parent_id") or row.get("kind", "fiction") != "fiction" or superseded:
                 writes.append(
                     (
@@ -433,7 +445,7 @@ def migrate_life(service):
                             {
                                 "id": task,
                                 "template": PROMPTS[task],
-                                "schema_version": 3,
+                                "schema_version": 4,
                             },
                         )
                     )
@@ -445,7 +457,7 @@ def migrate_life(service):
                         {
                             "id": task,
                             "template": PROMPTS[task],
-                            "schema_version": 3,
+                            "schema_version": 4,
                         },
                     )
                 )
@@ -458,7 +470,7 @@ def migrate_life(service):
                         {
                             "id": task,
                             "template": PROMPTS[task],
-                            "schema_version": 3,
+                            "schema_version": 4,
                         },
                     )
                 )

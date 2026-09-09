@@ -1,4 +1,4 @@
-"""Persistent daily attempt limits and reservations belonging to activity details."""
+"""Persistent action starts, deadline checks and historical outcome accounting."""
 
 from __future__ import annotations
 
@@ -10,13 +10,7 @@ from datetime import date, timedelta
 KINDS = ("news", "search", "social")
 
 
-class ActionBudget:
-    def limits(self):
-        return {
-            kind: int(self._setting(f"{kind}_count", default))
-            for kind, default in zip(KINDS, (2, 2, 3), strict=True)
-        }
-
+class ActionLedger:
     @staticmethod
     def _empty_actions():
         return {
@@ -33,14 +27,12 @@ class ActionBudget:
     def _action_key(self, activity, kind):
         return activity.get("actions", {}).get(kind, {}).get("id") or f"{activity['id']}:{kind}"
 
-    def _reservations(self, *, exclude_activity=None, replacements=None):
-        replacements = replacements or {}
+    def _pending_actions(self):
         rows = {row["id"]: row for row in self.list_activities()}
-        rows.update(replacements)
         result = []
         used = {row["id"] for row in self.runtime.store.list("life_action_usage")}
         for row in rows.values():
-            if row["id"] == exclude_activity or row.get("status") not in {"planned", "running"}:
+            if row.get("status") not in {"planned", "running"}:
                 continue
             for kind in KINDS:
                 action = row.get("actions", {}).get(kind, {})
@@ -54,51 +46,13 @@ class ActionBudget:
                     result.append((at, row, kind))
         return sorted(result, key=lambda item: (item[0], item[1]["id"], item[2]))
 
-    def budget(self, day=None, exclude_activity=None):
-        day = str(day or self._now().date())
-        limits = self.limits()
-        usage = self.runtime.store.list("life_action_usage")
-        reserved = self._reservations(exclude_activity=exclude_activity)
-        return {
-            kind: {
-                "limit": limits[kind],
-                "used": sum(r.get("date") == day and r.get("kind") == kind for r in usage),
-                "reserved": sum(str(at.date()) == day and k == kind for at, _, k in reserved),
-                "available": max(
-                    0,
-                    limits[kind]
-                    - sum(r.get("date") == day and r.get("kind") == kind for r in usage)
-                    - sum(str(at.date()) == day and k == kind for at, _, k in reserved),
-                ),
-            }
-            for kind in KINDS
-        }
-
-    def _validate_reservations(self, replacements):
-        usage = self.runtime.store.list("life_action_usage")
-        counts = {}
-        for at, _, kind in self._reservations(replacements=replacements):
-            key = (str(at.date()), kind)
-            counts[key] = counts.get(key, 0) + 1
-        for (day, kind), reserved in counts.items():
-            used = sum(r.get("date") == day and r.get("kind") == kind for r in usage)
-            if used + reserved > self.limits()[kind]:
-                name = {"news": "新闻", "search": "搜索", "social": "主动聊天"}[kind]
-                raise ValueError(
-                    f"{name}额度不足：上限 {self.limits()[kind]}，已使用 {used}，拟预留 {reserved}"
-                )
-
-    def reconcile_reservations(self):
-        """Keep the earliest valid reservations; raising a limit never revives cancelled work."""
+    def reconcile_actions(self):
+        """Expire pending actions and stop disabled capabilities without replaying them."""
         store, now = self.runtime.store, self._now()
         with store.transaction():
-            counts, changed = {}, {}
-            for usage in store.list("life_action_usage"):
-                key = (usage.get("date"), usage.get("kind"))
-                counts[key] = counts.get(key, 0) + 1
-            for at, original, kind in self._reservations():
+            changed = {}
+            for at, original, kind in self._pending_actions():
                 row = changed.get(original["id"], original)
-                key = (str(at.date()), kind)
                 end = self._parse_time(row["end"], date.fromisoformat(row["date"]))
                 expired = now >= end or now > at + timedelta(
                     minutes=max(0, self._setting("stale_action_minutes", 10))
@@ -109,8 +63,6 @@ class ActionBudget:
                     if expired
                     else "module_disabled"
                     if not self.runtime.enabled(module)
-                    else "daily_limit_reduced"
-                    if counts.get(key, 0) >= self.limits()[kind]
                     else ""
                 )
                 if reason:
@@ -121,8 +73,6 @@ class ActionBudget:
                         "finished_at": now.isoformat(),
                     }
                     changed[row["id"]] = row
-                else:
-                    counts[key] = counts.get(key, 0) + 1
             if changed:
                 store.apply_batch([("activities", key, row) for key, row in changed.items()])
         return list(changed.values())
@@ -155,13 +105,7 @@ class ActionBudget:
             ):
                 return False
             key = self._action_key(row, kind)
-            if store.get("life_action_usage", key):
-                return False
-            used = sum(
-                r.get("date") == str(now.date()) and r.get("kind") == kind
-                for r in store.list("life_action_usage")
-            )
-            if used >= self.limits()[kind]:
+            if store.get("life_action_usage", key) or store.get("drive_debits", key):
                 return False
             store.put(
                 "life_action_usage",
@@ -175,6 +119,7 @@ class ActionBudget:
                     "started_at": now.isoformat(),
                 },
             )
+            self.runtime.drives.debit(key, kind)
             return True
 
     def _detail_archive(self, activity, reason):

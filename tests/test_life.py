@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from living_world.drives import DRIVE_DEFAULTS, DriveService
 from living_world.life import LifeService
 from living_world.store import Store
 
@@ -31,6 +32,7 @@ class Runtime:
             "character": {"timezone": "Asia/Shanghai"},
             "life": {"spontaneous_minutes": 0},
             "sessions": [],
+            "drives": copy.deepcopy(DRIVE_DEFAULTS),
         }
         self.disabled = set()
         self.responses = []
@@ -54,7 +56,7 @@ class Runtime:
 
     async def execute_action(self, kind, payload, scope, action_id):
         if not self.consume(kind, payload):
-            return {"status": "skipped", "reason": "daily_limit"}
+            return {"status": "skipped", "reason": "start_rejected"}
         self.actions.append((kind, payload, scope, action_id))
         return self.action_result
 
@@ -67,7 +69,26 @@ def fixed_service(runtime, now=NOW):
     convert = service._now
     service._now = lambda value=None: convert(value or now)
     runtime.life = service
+    runtime.drives = DriveService(runtime, clock=lambda: 0.0)
     return service
+
+
+def action_counts(service, day=None):
+    """Read public started statistics and independently inspect pending stored decisions."""
+    current_day = str(day or service._now().date())
+    counts = service.day_summary(day)["counts"]
+    result = {kind: {"started": counts[kind]["started"], "pending": 0} for kind in KINDS}
+    for row in service.runtime.store.list("activities"):
+        for kind in KINDS:
+            action = row.get("actions", {}).get(kind, {})
+            at = str(action.get("at", ""))[:10]
+            if (
+                action.get("enabled")
+                and at == current_day
+                and action.get("execution", {}).get("status") == "pending"
+            ):
+                result[kind]["pending"] += 1
+    return result
 
 
 def plan_rows(count=10, start=NOW):
@@ -88,7 +109,6 @@ def detail_result(row, kinds=KINDS, **changes):
     result = {
         "description": "数学课间看看窗外，继续当天生活。",
         "incident": "忘带笔，向同桌借了一支。",
-        "energy_delta": -1,
         "mood": "好奇",
         "actions": {
             kind: {
@@ -167,7 +187,6 @@ async def test_default_plan_is_outline_only_and_original_json_survives():
     assert all(row["schema_version"] == 3 and not row["detailed"] for row in rows)
     assert all(not action["enabled"] for row in rows for action in row["actions"].values())
     assert service.parameters() == {"daily_plan_time": "06:00", "activity_count": 10}
-    assert service.limits() == {"news": 2, "search": 2, "social": 3}
     assert "昨天公开约好复习" in runtime.calls[0][1] and "私聊的秘密" not in runtime.calls[0][1]
     assert runtime.events == runtime.actions == []
     assert await service.plan_day(NOW) == rows
@@ -187,7 +206,7 @@ async def test_outline_ignores_model_action_fields_instead_of_enforcing_old_quot
     rows[0]["actions"] = {"search": {"enabled": "true", "at": "23:59"}}
     service, adopted = await publish(runtime, rows=rows)
     assert all(not action["enabled"] for row in adopted for action in row["actions"].values())
-    assert service.budget()["search"]["reserved"] == 0
+    assert action_counts(service)["search"]["pending"] == 0
 
 
 @pytest.mark.asyncio
@@ -250,7 +269,9 @@ async def test_actions_execute_news_search_social_once_across_restart():
     await service.tick(NOW + timedelta(minutes=1))
     await fixed_service(runtime).tick(NOW + timedelta(minutes=2))
     assert len(runtime.actions) == 3
-    assert all(value["used"] == 1 and value["reserved"] == 0 for value in service.budget().values())
+    assert all(
+        value["started"] == 1 and value["pending"] == 0 for value in action_counts(service).values()
+    )
     assert "忘带笔" in runtime.events[0]["text"]
     assert len(runtime.store.list("activities")) == 10
 
@@ -264,7 +285,8 @@ async def test_fiction_records_incident_at_start_then_finishes():
     assert runtime.events[0]["source"] == "fiction"
     assert "忘带笔" in runtime.events[0]["text"]
     assert runtime.store.get("activities", row["id"])["status"] == "running"
-    assert service.state()["energy"] == 75
+    assert "energy" not in service.state()
+    assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 70
     await service.tick(NOW + timedelta(hours=1))
     assert runtime.store.get("activities", row["id"])["status"] == "completed"
     assert len(runtime.events) == 1 and not runtime.actions
@@ -276,7 +298,8 @@ async def test_private_fiction_does_not_change_public_life_state():
     activity(runtime, scope="private-a", mood="私人聊天让我想哭", energy_delta=-5)
     service = fixed_service(runtime)
     await service.tick(NOW)
-    assert service.state()["mood"] == "平静" and service.state()["energy"] == 80
+    assert service.state()["mood"] == "平静" and "energy" not in service.state()
+    assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 70
     assert runtime.events[0]["scope"] == "private-a"
 
 
@@ -325,12 +348,12 @@ async def test_disabled_and_failed_actions_release_only_unstarted_reservations()
     assert states["news"]["execution"]["reason"] == "module_disabled"
     assert states["search"]["execution"]["status"] == "failed"
     assert states["social"]["execution"]["reason"] == "quiet_hours"
-    assert {k: v["used"] for k, v in service.budget().items()} == {
+    assert {k: v["started"] for k, v in action_counts(service).items()} == {
         "news": 0,
         "search": 1,
         "social": 0,
     }
-    assert all(value["reserved"] == 0 for value in service.budget().values())
+    assert all(value["pending"] == 0 for value in action_counts(service).values())
     runtime.disabled.clear()
     await service.tick(NOW + timedelta(minutes=1))
     assert [call[0] for call in runtime.actions] == ["search", "social"]
@@ -376,7 +399,7 @@ async def test_cancellation_after_start_keeps_usage_and_execution_claim():
     execution = runtime.store.get("activities", rows[0]["id"])["actions"]["news"]["execution"]
     assert execution["reason"] == "execution_interrupted_outcome_unknown"
     assert runtime.store.get("life_action_claims", f"{rows[0]['id']}:news")
-    assert service.budget()["news"]["used"] == 1
+    assert action_counts(service)["news"]["started"] == 1
     await fixed_service(runtime).tick(NOW + timedelta(minutes=1))
     assert len(runtime.store.list("life_action_usage")) == 1
 
@@ -401,13 +424,13 @@ async def test_outline_edit_invalidates_detail_and_releases_reservation():
     runtime = Runtime()
     service, rows = await publish(runtime)
     row = prepared_activity(runtime, rows[1])
-    assert service.budget()["search"]["reserved"] == 1
+    assert action_counts(service)["search"]["pending"] == 1
     service.update_activity(row["id"], {"title": "改为认真上课"})
     changed = runtime.store.get("activities", row["id"])
     assert not changed["detailed"]
     assert not changed.get("incident")
     assert all(not action["enabled"] for action in changed["actions"].values())
-    assert all(value["reserved"] == 0 for value in service.budget().values())
+    assert all(value["pending"] == 0 for value in action_counts(service).values())
     marker = runtime.store.get("life_days", f"{NOW.date()}:global")
     assert marker["adopted_activities"][1]["title"] == rows[1]["title"]
 
@@ -531,17 +554,14 @@ async def test_life_switch_off_stops_generation_and_actions_without_deleting_dat
 
 
 @pytest.mark.asyncio
-async def test_outline_parameters_freeze_but_action_limits_are_current():
+async def test_outline_parameters_freeze_without_former_action_limits():
     runtime = Runtime()
     before = NOW.replace(hour=5, minute=59)
     service = fixed_service(runtime, before)
     await service.tick(before)
-    runtime.settings["life"].update(
-        daily_plan_time="23:00", activity_count=5, news_count=0, search_count=48, social_count=1
-    )
+    runtime.settings["life"].update(daily_plan_time="23:00", activity_count=5)
     assert service.plan_request()["context"]["parameters"]["activity_count"] == 5
     assert service.plan_request(formal=True)["context"]["parameters"]["activity_count"] == 10
-    assert service.limits() == {"news": 0, "search": 48, "social": 1}
     runtime.responses = [json.dumps({"activities": plan_rows()})]
     assert len(await service.plan_day(before.replace(hour=6, minute=0))) == 10
     marker = runtime.store.get("life_days", f"{before.date()}:global")
@@ -598,10 +618,12 @@ def test_plan_preview_does_not_reinforce_memories_or_write_data():
         return []
 
     runtime.memory.recall = recall
-    request = fixed_service(runtime).plan_request()
+    service = fixed_service(runtime)
+    before = runtime.store.export()
+    request = service.plan_request()
     assert request["context"]["parameters"]["activity_count"] == 10
     assert memory_calls[0]["reinforce"] is False
-    assert runtime.store.export() == []
+    assert runtime.store.export() == before
     assert runtime.calls == runtime.events == runtime.actions == []
 
 
@@ -637,8 +659,8 @@ async def test_slow_news_skips_later_actions_after_window(monkeypatch, expired_b
     for kind in ("search", "social"):
         assert actions[kind]["execution"]["status"] == "skipped"
         assert actions[kind]["execution"]["reason"] == "expired_before_action"
-    assert service.budget()["news"]["used"] == 1
-    assert service.budget()["social"]["used"] == 0
+    assert action_counts(service)["news"]["started"] == 1
+    assert action_counts(service)["social"]["started"] == 0
 
 
 @pytest.mark.asyncio

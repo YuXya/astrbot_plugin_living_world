@@ -3,8 +3,8 @@ display_name: 我也在这个世界生活 / Living World
 short_desc: 日程、记忆、见闻与主动交流，可独立启停的角色生活插件。
 desc: >-
   绑定 AstrBot 人格与指定 QQ 会话，提供连续日程、场合隔离记忆、外部见闻、主动交流和 Plugin Pages 管理。
-  0.2.4 先生成活动大纲，临近细化再决定新闻、搜索和主动聊天，每日上限即时生效；保留四项 API 调试，B 站能力依赖 Bilibili AI Bot。
-version: 0.2.4
+  0.2.5 新增程序管理的寂寞值与精力，仅向活动细化提供当前想法；保留四项 API 调试，B 站能力依赖 Bilibili AI Bot。
+version: 0.2.5
 author: YuXya
 repo: https://github.com/YuXya/astrbot_plugin_living_world
 astrbot_version: ">=4.27.5,<5"

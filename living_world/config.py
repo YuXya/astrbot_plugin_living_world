@@ -5,8 +5,11 @@ import math
 import re
 from zoneinfo import ZoneInfo
 
+from .drives import DRIVE_DEFAULTS, validate_drive
+
 MODULES = (
     "state",
+    "drives",
     "life",
     "memory",
     "reply",
@@ -54,7 +57,7 @@ DEFAULTS = {
     "persona_id": "",
     "sessions": [],
     "modules": {
-        name: name in {"state", "life", "memory", "reply", "journal", "notes", "debug"}
+        name: name in {"state", "drives", "life", "memory", "reply", "journal", "notes", "debug"}
         for name in MODULES
     },
     "models": {
@@ -64,7 +67,6 @@ DEFAULTS = {
         "profile": "",
         "world": "",
         "timezone": "Asia/Shanghai",
-        "energy": 70,
         "mood": "平静",
         "location": "",
         "sleep_state": "未知",
@@ -74,9 +76,6 @@ DEFAULTS = {
         "detail_minutes": 10,
         "daily_plan_time": "06:00",
         "activity_count": 10,
-        "news_count": 2,
-        "search_count": 2,
-        "social_count": 3,
         "stale_action_minutes": 10,
     },
     "social": {
@@ -87,6 +86,7 @@ DEFAULTS = {
         "quiet_end": "08:00",
         "interjection_interval_minutes": 30,
     },
+    "drives": copy.deepcopy(DRIVE_DEFAULTS),
     "news": {"sources": NEWS_SOURCES, "limit": 5},
     "search": {},
     "weather": {"location": "", "api_host": "", "auth_mode": "api_key", "credential": ""},
@@ -122,6 +122,7 @@ def settings_from(patch=None):
     result = merge(DEFAULTS, patch or {})
     for section in (
         "modules",
+        "drives",
         "models",
         "character",
         "life",
@@ -137,6 +138,16 @@ def settings_from(patch=None):
     ):
         if not isinstance(result[section], dict):
             raise TypeError(f"{section} 必须是对象")
+    # Old backup keys remain readable for migration, but never become live controls.
+    result["character"].pop("energy", None)
+    for key in ("news_count", "search_count", "social_count"):
+        result["life"].pop(key, None)
+    if set(result["drives"]) != set(DRIVE_DEFAULTS):
+        raise ValueError("内在状态配置包含未知项目")
+    result["drives"] = {
+        identifier: validate_drive(identifier, config)
+        for identifier, config in result["drives"].items()
+    }
     ZoneInfo(str(result["character"]["timezone"]))
     if not isinstance(result["persona_id"], str):
         raise TypeError("人格 ID 必须是字符串")
@@ -188,13 +199,9 @@ def settings_from(patch=None):
         ("life", "tick_seconds"): (10, 3600),
         ("life", "detail_minutes"): (0, 120),
         ("life", "activity_count"): (1, 48),
-        ("life", "news_count"): (0, 48),
-        ("life", "search_count"): (0, 48),
-        ("life", "social_count"): (0, 48),
         ("life", "stale_action_minutes"): (1, 60),
         ("news", "limit"): (1, 30),
         ("journal", "hour"): (0, 23),
-        ("character", "energy"): (0, 100),
         ("debug", "retain_per_category"): (1, 1000),
         ("bilibili", "recent_limit"): (1, 50),
     }

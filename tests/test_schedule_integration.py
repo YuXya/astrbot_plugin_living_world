@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from living_world.runtime import Runtime
+from test_life import action_counts
 
 GROUP = "qq:GroupMessage:100"
 ACTUAL_GROUP = "qq:GroupMessage:42_100"
@@ -71,7 +72,6 @@ class ExternalHost:
             response = {
                 "description": "数学课间看了看窗外。",
                 "incident": "忘带笔，先借一支。",
-                "energy_delta": -1,
                 "mood": "好奇",
                 "actions": {
                     kind: {
@@ -188,6 +188,12 @@ async def configured_runtime(path, host, clock):
             },
         }
     )
+    for identifier in ("loneliness", "energy"):
+        config = copy.deepcopy(runtime.drives.snapshot()["meters"][identifier]["config"])
+        config["growth_per_hour"] = 0
+        runtime.drives.save_settings(identifier, config)
+    runtime.drives.set_value("loneliness", 50)
+    runtime.drives.set_value("energy", 70)
     runtime.note_scope(ACTUAL_GROUP)
     runtime.memory.remember(PRIVATE_FACT, scope=PRIVATE)
     return runtime
@@ -215,8 +221,8 @@ async def test_real_pipeline_orders_overlapping_actions_and_does_not_replay(tmp_
         await drain(runtime)
         assert len([request for request in host.requests if request["task"] == "life.detail"]) == 1
         assert all(
-            value["reserved"] == 1 and value["used"] == 0
-            for value in runtime.life.budget().values()
+            value["pending"] == 1 and value["started"] == 0
+            for value in action_counts(runtime.life).values()
         )
         assert not host.sent and not host.http_urls
         clock[0] = DAY.replace(hour=9, minute=2)
@@ -249,9 +255,11 @@ async def test_real_pipeline_orders_overlapping_actions_and_does_not_replay(tmp_
             for item in observations
         )
         assert len(runtime.store.list("actions")) == 3
+        assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 50
+        assert runtime.drives.snapshot()["meters"]["loneliness"]["value"] == 40
         assert all(
-            value["used"] == 1 and value["reserved"] == 0
-            for value in runtime.life.budget().values()
+            value["started"] == 1 and value["pending"] == 0
+            for value in action_counts(runtime.life).values()
         )
         archive = runtime.store.get("life_days", f"{DAY.date()}:global")
         assert archive["raw_json"] and archive["full_request"]["task"] == "life.plan"
@@ -276,6 +284,8 @@ async def test_real_pipeline_orders_overlapping_actions_and_does_not_replay(tmp_
         await drain(runtime)
         assert len(host.sent) == 1 and len(host.http_urls) == 2 and len(host.searches) == 1
         assert len(runtime.store.list("actions")) == 3
+        assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 50
+        assert runtime.drives.snapshot()["meters"]["loneliness"]["value"] == 40
         assert len([request for request in host.requests if request["task"] == "life.plan"]) == 1
         for index, kind in ((4, "news"), (5, "search"), (6, "social")):
             item = sorted(runtime.life.list_activities(), key=lambda row: row["start"])[index]
@@ -283,8 +293,8 @@ async def test_real_pipeline_orders_overlapping_actions_and_does_not_replay(tmp_
             assert item["actions"][kind]["execution"]["reason"] == "overdue_after_restart"
         assert len(runtime.store.list("observations")) == 2
         assert all(
-            value["used"] == 1 and value["reserved"] == 0
-            for value in runtime.life.budget().values()
+            value["started"] == 1 and value["pending"] == 0
+            for value in action_counts(runtime.life).values()
         )
     finally:
         await runtime.stop()
@@ -320,8 +330,8 @@ async def test_disabled_action_modules_skip_flags_without_external_io_or_later_r
         assert not host.sent and not host.http_urls and not host.searches
         assert not runtime.store.list("observations") and not runtime.store.list("actions")
         assert all(
-            value["used"] == 0 and value["reserved"] == 0
-            for value in runtime.life.budget().values()
+            value["started"] == 0 and value["pending"] == 0
+            for value in action_counts(runtime.life).values()
         )
         assert runtime.store.list("memories"), "Disabling behavior must retain business data"
 
@@ -337,8 +347,8 @@ async def test_disabled_action_modules_skip_flags_without_external_io_or_later_r
         await runtime.stop()
 
 
-class BudgetHost(ExternalHost):
-    """Keep generated messages independent of source successes for budget boundary tests."""
+class ActionHost(ExternalHost):
+    """Keep generated messages independent of source successes for action boundary tests."""
 
     def __init__(self):
         super().__init__()
@@ -369,7 +379,7 @@ async def prepare_first_detail(runtime, host, clock, kinds):
     clock[0] = DAY.replace(hour=8, minute=50)
     await runtime.life.tick()
     await drain(runtime)
-    assert all(value["used"] == 0 for value in runtime.life.budget().values())
+    assert all(value["started"] == 0 for value in action_counts(runtime.life).values())
     clock[0] = DAY.replace(hour=9, minute=2)
 
 
@@ -377,7 +387,7 @@ async def prepare_first_detail(runtime, host, clock, kinds):
 async def test_one_chat_round_with_two_targets_consumes_one_attempt_even_on_failure(
     tmp_path, fail_social
 ):
-    host, clock = BudgetHost(), [DAY.replace(hour=6)]
+    host, clock = ActionHost(), [DAY.replace(hour=6)]
     host.fail_social = fail_social
     runtime = await configured_runtime(tmp_path / "world.sqlite", host, clock)
     try:
@@ -395,9 +405,11 @@ async def test_one_chat_round_with_two_targets_consumes_one_attempt_even_on_fail
         await drain(runtime)
         assert len([r for r in host.requests if r["task"] == "social.message"]) == 2
         assert len(host.sent) == (0 if fail_social else 2)
-        assert runtime.life.budget()["social"]["used"] == 1
-        assert runtime.life.budget()["social"]["reserved"] == 0
+        assert action_counts(runtime.life)["social"]["started"] == 1
+        assert action_counts(runtime.life)["social"]["pending"] == 0
         assert len(runtime.store.list("life_action_usage")) == 1
+        assert runtime.drives.snapshot()["meters"]["loneliness"]["value"] == 40
+        assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 70
         await runtime.life.tick()
         assert len([r for r in host.requests if r["task"] == "social.message"]) == 2
     finally:
@@ -405,8 +417,8 @@ async def test_one_chat_round_with_two_targets_consumes_one_attempt_even_on_fail
 
 
 @pytest.mark.parametrize("blocking", ["quiet_hours", "no_targets", "changed_before_generation"])
-async def test_chat_skipped_before_message_generation_releases_its_reservation(tmp_path, blocking):
-    host, clock = BudgetHost(), [DAY.replace(hour=6)]
+async def test_chat_skipped_before_message_generation_does_not_debit_loneliness(tmp_path, blocking):
+    host, clock = ActionHost(), [DAY.replace(hour=6)]
     runtime = await configured_runtime(tmp_path / "world.sqlite", host, clock)
     try:
         await prepare_first_detail(runtime, host, clock, ("social",))
@@ -429,16 +441,17 @@ async def test_chat_skipped_before_message_generation_releases_its_reservation(t
         await drain(runtime)
         assert not any(r["task"] == "social.message" for r in host.requests)
         assert not host.sent
-        assert runtime.life.budget()["social"]["used"] == 0
-        assert runtime.life.budget()["social"]["reserved"] == 0
+        assert action_counts(runtime.life)["social"]["started"] == 0
+        assert action_counts(runtime.life)["social"]["pending"] == 0
         assert not runtime.store.list("life_action_usage")
+        assert runtime.drives.snapshot()["meters"]["loneliness"]["value"] == 50
     finally:
         await runtime.stop()
 
 
 @pytest.mark.parametrize("capability", ["news", "search", "search_unconfigured"])
 async def test_missing_source_capability_does_not_start_or_charge_an_action(tmp_path, capability):
-    host, clock = BudgetHost(), [DAY.replace(hour=6)]
+    host, clock = ActionHost(), [DAY.replace(hour=6)]
     runtime = await configured_runtime(tmp_path / "world.sqlite", host, clock)
     kind = "news" if capability == "news" else "search"
     try:
@@ -453,7 +466,70 @@ async def test_missing_source_capability_does_not_start_or_charge_an_action(tmp_
         await drain(runtime)
         assert not host.sent and not host.searches and not host.http_urls
         assert not any(r["task"] in {"news.select", "search.topic"} for r in host.requests)
-        assert runtime.life.budget()[kind]["used"] == 0
-        assert runtime.life.budget()[kind]["reserved"] == 0
+        assert action_counts(runtime.life)[kind]["started"] == 0
+        assert action_counts(runtime.life)[kind]["pending"] == 0
+        assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 70
+    finally:
+        await runtime.stop()
+
+
+async def test_manual_source_read_never_debits_drives_or_starts_schedule_actions(tmp_path):
+    host, clock = ActionHost(), [DAY.replace(hour=6)]
+    runtime = await configured_runtime(tmp_path / "manual.sqlite", host, clock)
+    try:
+        before = runtime.drives.snapshot()
+        result = await runtime.action({"action": "explore", "source": "news", "query": "科学新闻"})
+        assert result["status"] == "success" and host.http_urls
+        assert runtime.drives.snapshot() == before
+        assert not runtime.store.list("drive_debits")
+        assert not runtime.store.list("life_action_usage")
+        assert not host.sent
+    finally:
+        await runtime.stop()
+
+
+async def test_source_failure_after_start_keeps_energy_debit_and_never_retries(tmp_path):
+    host, clock = ActionHost(), [DAY.replace(hour=6)]
+    runtime = await configured_runtime(tmp_path / "failure.sqlite", host, clock)
+    calls = []
+    try:
+        await prepare_first_detail(runtime, host, clock, ("news",))
+
+        async def failed_source(*args, **kwargs):
+            calls.append(args)
+            raise OSError("Source unavailable after the attempt started")
+
+        runtime.sources._request = failed_source
+        await runtime.life.tick()
+        assert calls
+        assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 60
+        assert runtime.drives.snapshot()["meters"]["loneliness"]["value"] == 50
+        assert action_counts(runtime.life)["news"]["started"] == 1
+        assert runtime.life.day_summary()["counts"]["news"]["failed"] == 1
+        count = len(calls)
+        await runtime.life.tick()
+        assert len(calls) == count
+        assert len(runtime.store.list("drive_debits")) == 1
+    finally:
+        await runtime.stop()
+
+
+async def test_zero_energy_and_loneliness_do_not_block_scheduled_actions(tmp_path):
+    host, clock = ExternalHost(), [DAY.replace(hour=6)]
+    runtime = await configured_runtime(tmp_path / "zero.sqlite", host, clock)
+    try:
+        runtime.drives.set_value("loneliness", 0)
+        runtime.drives.set_value("energy", 0)
+        await prepare_first_detail(runtime, host, clock, ("news", "search", "social"))
+        await runtime.life.tick()
+        await drain(runtime)
+        assert len(host.sent) == 1 and len(host.searches) == 1 and len(host.http_urls) == 2
+        assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 0
+        assert runtime.drives.snapshot()["meters"]["loneliness"]["value"] == 0
+        assert len(runtime.store.list("drive_debits")) == 3
+        assert all(
+            c["started"] == 1 and c["success"] == 1
+            for c in runtime.life.day_summary()["counts"].values()
+        )
     finally:
         await runtime.stop()

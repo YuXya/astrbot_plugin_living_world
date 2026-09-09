@@ -13,6 +13,8 @@ from . import __version__
 from .config import DIGEST_SOURCES, MODULES, NEWS_SOURCES, merge, settings_from
 from .context import normalize_context, source_item
 from .debug import DebugService, json_value
+from .drives import DriveService
+from .drives_migration import migrate_drives
 from .journal import JournalService
 from .life import LifeService
 from .life_migration import migrate_life
@@ -41,6 +43,7 @@ class Runtime:
         self.background = set()
         self.errors = {}
         self.scheduler = None
+        self.drive_scheduler = None
         self.action_lock = asyncio.Lock()
         self.model_semaphore = asyncio.Semaphore(2)
         self.config_version = 0
@@ -51,7 +54,11 @@ class Runtime:
         self.chat = ChatService(self)
         self.memory = MemoryService(self)
         self.life = LifeService(self)
-        migrate_life(self.life)
+        with self.store.transaction():
+            migrate_life(self.life)
+            migrate_drives(self)
+            self.drives = DriveService(self)
+            self.store.put("settings", "current", self.settings)
         self.journal = JournalService(self)
         from .social import SocialService
         from .sources import SourceService
@@ -202,7 +209,7 @@ class Runtime:
         dynamic_text = self.format_task_context(context)
         if self.enabled("state") and not any(s["title"] == "生活状态" for s in selected_sources):
             state = self.life.state()
-            text = f"心情：{state.get('mood', '未知')}；精力：{state.get('energy', '未知')}"
+            text = f"心情：{state.get('mood', '未知')}"
             sources.append(source_item("生活状态", "角色状态设置", text, "本轮 user 消息"))
             dynamic_text = "【生活状态】\n" + text + ("\n\n" + dynamic_text if dynamic_text else "")
         if context is not None:
@@ -839,19 +846,11 @@ class Runtime:
         )
         if any(old["life"][key] != proposed["life"][key] for key in plan_keys):
             self.life.freeze_parameters()
-        limit_keys = {"news_count", "search_count", "social_count"}
-        operational_old = {k: v for k, v in old["life"].items() if k not in limit_keys}
-        operational_new = {k: v for k, v in proposed["life"].items() if k not in limit_keys}
         changed = {
             m
             for m in MODULES
             if old["modules"][m] != proposed["modules"][m] or old.get(m) != proposed.get(m)
         }
-        if (
-            operational_old == operational_new
-            and old["modules"]["life"] == proposed["modules"]["life"]
-        ):
-            changed.discard("life")
         if (
             old["persona_id"] != proposed["persona_id"]
             or old["sessions"] != proposed["sessions"]
@@ -865,19 +864,23 @@ class Runtime:
         if old["modules"]["debug"] and not proposed["modules"]["debug"]:
             # Finalize partial evidence while diagnostic writes are still enabled.
             self.chat.audit.close()
-        only_limits = {
+        # Pure motivation changes affect the next detail request, not work in flight.
+        only_drives = {
             **old,
-            "life": proposed["life"],
-        } == proposed and operational_old == operational_new
+            "drives": proposed["drives"],
+            "modules": {**old["modules"], "drives": proposed["modules"]["drives"]},
+        } == proposed
         try:
             with self.store.transaction():
+                self.drives.settle()
                 self.settings = proposed
                 self.store.put("settings", "current", proposed)
-                self.life.reconcile_reservations()
+                self.drives.rebase()
+                self.life.reconcile_actions()
         except BaseException:
             self.settings = old
             raise
-        if not only_limits:
+        if not only_drives:
             self.config_version += 1
         if not old["modules"]["debug"] and proposed["modules"]["debug"]:
             self.chat.install()
@@ -896,6 +899,18 @@ class Runtime:
     async def start(self):
         if self.scheduler is None:
             self.scheduler = asyncio.create_task(self._loop())
+        if self.drive_scheduler is None:
+            self.drive_scheduler = asyncio.create_task(self._drive_loop())
+
+    async def _drive_loop(self):
+        while not self.stopped:
+            await asyncio.sleep(60)
+            try:
+                self.drives.settle()
+                self.errors.pop("drives", None)
+            except Exception as exc:  # noqa: BLE001 - Keep retries independent of model calls.
+                self.errors["drives"] = type(exc).__name__ + ": " + str(exc)[:300]
+                logger.warning("Living World drive checkpoint failed: %s", type(exc).__name__)
 
     async def _cycle_job(self, module, coroutine):
         try:
@@ -992,6 +1007,7 @@ class Runtime:
                 for m in MODULES
             ],
             "state": self.life.state(),
+            "drives": self.drives.snapshot(),
             "activities": self.life.list_activities(),
             "life_days": self.store.list("life_days"),
             "life_day_history": self.store.list("life_day_history"),
@@ -1019,6 +1035,7 @@ class Runtime:
         }
 
     def export(self):
+        self.drives.settle()
         return {
             "format": "living-world",
             "version": 1,
@@ -1041,6 +1058,8 @@ class Runtime:
                 self.store.restore(backup["records"])
                 self.settings = restored
                 migrate_life(self.life)
+                migrate_drives(self, legacy_settings=backup.get("settings", {}))
+                self.drives.rebase()
         finally:
             self.settings = before
         await self.update_settings(restored)
@@ -1055,6 +1074,10 @@ class Runtime:
     async def _action(self, data):
         action = data.get("action")
         scope = str(data.get("scope", "global"))
+        if action == "set_drive_value":
+            return self.drives.set_value(data.get("id"), data.get("value"))
+        if action == "save_drive_settings":
+            return self.drives.save_settings(data.get("id"), data.get("config"))
         if action == "inspect_session":
             return await self.chat.inspect(scope)
         if action == "debug_build":
@@ -1148,11 +1171,17 @@ class Runtime:
     async def stop(self):
         if self.stopped:
             return
+        try:
+            self.drives.settle()
+        except Exception as exc:  # noqa: BLE001 - Closing transports must survive storage failure.
+            logger.warning("Living World final drive checkpoint failed: %s", type(exc).__name__)
         self.chat.close()
         self.stopped = True
         tasks = set(self.tasks) | self.background
         if self.scheduler:
             tasks.add(self.scheduler)
+        if self.drive_scheduler:
+            tasks.add(self.drive_scheduler)
         for task in tasks:
             task.cancel()
         if tasks:

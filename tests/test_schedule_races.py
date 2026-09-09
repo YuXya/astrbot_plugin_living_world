@@ -106,7 +106,7 @@ async def test_scope_check_cannot_overwrite_a_future_outline_edit(world, monkeyp
         await asyncio.gather(progressing, return_exceptions=True)
 
 
-async def test_limit_update_and_reservation_cancellation_roll_back_together(world):
+async def test_module_update_and_pending_action_cancellation_roll_back_together(world):
     runtime, _ = world
     row = outline(runtime)
     row["actions"]["news"] = {
@@ -121,30 +121,30 @@ async def test_limit_update_and_reservation_cancellation_roll_back_together(worl
     before_version = runtime.config_version
     before_records = runtime.store.export()
     runtime.store.db.execute(
-        "CREATE TRIGGER reject_reservation_cancel BEFORE UPDATE ON objects "
+        "CREATE TRIGGER reject_pending_action_cancel BEFORE UPDATE ON objects "
         "WHEN NEW.namespace = 'activities' BEGIN "
-        "SELECT RAISE(ABORT, 'reservation write failed'); END"
+        "SELECT RAISE(ABORT, 'pending_action write failed'); END"
     )
     runtime.store.db.commit()
     try:
-        with pytest.raises(sqlite3.IntegrityError, match="reservation write failed"):
-            await runtime.update_settings({"life": {"news_count": 0}})
+        with pytest.raises(sqlite3.IntegrityError, match="pending_action write failed"):
+            await runtime.update_settings({"modules": {"news": False}})
         assert runtime.settings == before_settings
         assert runtime.config_version == before_version
         assert runtime.store.get("settings", "current") == before_settings
         assert runtime.store.export() == before_records
-        assert runtime.life.budget()["news"]["reserved"] == 1
+        assert runtime.life.day_summary()["counts"]["news"]["arranged"] == 1
     finally:
-        runtime.store.db.execute("DROP TRIGGER reject_reservation_cancel")
+        runtime.store.db.execute("DROP TRIGGER reject_pending_action_cancel")
         runtime.store.db.commit()
-    await runtime.update_settings({"life": {"news_count": 0}})
+    await runtime.update_settings({"modules": {"news": False}})
     saved = runtime.store.get("activities", row["id"])
-    assert runtime.settings["life"]["news_count"] == 0
-    assert saved["actions"]["news"]["execution"]["reason"] == "daily_limit_reduced"
-    assert runtime.life.budget()["news"]["reserved"] == 0
+    assert not runtime.enabled("news")
+    assert saved["actions"]["news"]["execution"]["reason"] == "module_disabled"
+    assert runtime.life.day_summary()["counts"]["news"]["skipped"] == 1
 
 
-async def test_restore_archives_original_running_evidence_before_disabling_reservations(world):
+async def test_restore_archives_original_running_evidence_before_disabling_pending_actions(world):
     runtime, _ = world
     started_at = (NOW - timedelta(minutes=5)).isoformat()
     legacy = {

@@ -301,7 +301,7 @@ def test_repeated_upgrade_preserves_new_detail_templates_and_existing_usage(worl
     assert first["template_backups"] == 6
     for task in ("life.plan", "life.detail", "life.revise"):
         assert store.get("prompt_templates", task)["template"] == PROMPTS[task]
-    custom = {"id": "life.detail", "template": "新流程的用户修改", "schema_version": 3}
+    custom = {"id": "life.detail", "template": "新流程的用户修改", "schema_version": 4}
     store.put("prompt_templates", "life.detail", custom)
     row = store.get("activities", "future")
     row.update(detailed=True, description="新细节")

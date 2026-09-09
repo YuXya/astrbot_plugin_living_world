@@ -87,7 +87,16 @@ def test_readable_projection_keeps_evidence_and_excludes_storage_fields():
         "想试试证明",
     ):
         assert expected in text
-    for unwanted in ("internal-", "access_count", "scope_overrides", PRIVATE, "未选用", "不应泄露"):
+    for unwanted in (
+        "internal-",
+        "access_count",
+        "scope_overrides",
+        PRIVATE,
+        "未选用",
+        "不应泄露",
+        "精力",
+        "75",
+    ):
         assert unwanted not in text
     assert all(row["content"] in text for row in bundle["sources"])
 

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from living_world.store import Store
+from test_life import action_counts
 from test_life import NOW, Runtime, fixed_service, plan_rows, prepared_activity
 
 
@@ -59,7 +60,7 @@ async def test_repeated_regeneration_archives_execution_and_uses_latest_paramete
     for namespace in protected:
         runtime.store.put(namespace, "keep", {"id": "keep", "status": "success", "count": 4})
     previous_marker = runtime.store.get("life_days", f"{NOW.date()}:global")
-    runtime.settings["life"].update(activity_count=5, news_count=1, search_count=2, social_count=3)
+    runtime.settings["life"].update(activity_count=5)
     proposal = plan_rows(count=5)
     proposal[0]["title"] = "新计划中的数学课"
     runtime.responses = [model_result(proposal), model_result(proposal)]
@@ -74,7 +75,6 @@ async def test_repeated_regeneration_archives_execution_and_uses_latest_paramete
         "daily_plan_time": "06:00",
         "activity_count": 5,
     }
-    assert life.limits() == {"news": 1, "search": 2, "social": 3}
     assert all(not a["enabled"] for row in second for a in row["actions"].values())
     assert marker["adopted_activities"] == second
     history = runtime.store.list("life_day_history")
@@ -89,7 +89,7 @@ async def test_repeated_regeneration_archives_execution_and_uses_latest_paramete
         row["title"] for row in second
     ]
     assert life.day_summary()["activity_count"] == 5
-    assert life.budget()["news"]["used"] == 1
+    assert action_counts(life)["news"]["started"] == 1
     assert len(runtime.store.list("life_action_usage")) == 1
     for namespace in protected:
         assert runtime.store.get(namespace, "keep")["count"] == 4
@@ -167,6 +167,7 @@ async def test_late_publication_does_not_invent_actions_for_started_activities(w
 
 async def test_regeneration_rejects_wrong_date_scope_and_unavailable_module(world):
     runtime, life, _ = world
+    before = runtime.store.export()
     for args in ({"day": "2000-01-01"}, {"scope": "private-a"}):
         with pytest.raises(ValueError):
             await life.regenerate_day(**args)
@@ -179,7 +180,7 @@ async def test_regeneration_rejects_wrong_date_scope_and_unavailable_module(worl
         await life.regenerate_day()
     assert not life.regenerating
     assert runtime.calls == []
-    assert runtime.store.export() == []
+    assert runtime.store.export() == before
 
 
 async def test_waiting_regeneration_freezes_parameters_template_and_rejects_edits(world):
@@ -307,7 +308,7 @@ async def test_running_tick_finishes_before_replacement_and_new_flags_run_once(w
     keys = [call[3] for call in runtime.actions]
     assert len(keys) == len(set(keys)) == 6
     assert [call[0] for call in runtime.actions] == ["news", "search", "social"] * 2
-    assert all(value["used"] == 2 for value in life.budget().values())
+    assert all(value["started"] == 2 for value in action_counts(life).values())
     restarted = fixed_service(runtime, clock[0])
     await restarted.tick(clock[0] + timedelta(seconds=1))
     assert len(runtime.actions) == 6
@@ -391,9 +392,9 @@ async def test_actual_result_totals_survive_regeneration_and_deduplicate_history
     runtime.execute_action = execute
     await life.tick()
     first_result = life.day_summary()["counts"]
-    assert first_result["news"]["success"] == first_result["news"]["used"] == 1
-    assert first_result["search"]["failed"] == first_result["search"]["used"] == 1
-    assert first_result["social"]["skipped"] == 1 and first_result["social"]["used"] == 0
+    assert first_result["news"]["success"] == first_result["news"]["started"] == 1
+    assert first_result["search"]["failed"] == first_result["search"]["started"] == 1
+    assert first_result["social"]["skipped"] == 1 and first_result["social"]["started"] == 0
     retired = runtime.store.get("activities", rows[0]["id"])
     for _ in range(2):
         runtime.responses = [model_result()]
@@ -413,10 +414,10 @@ async def test_actual_result_totals_survive_regeneration_and_deduplicate_history
     historical = life.day_summary()["counts"]
     for kind, outcome in (("news", "success"), ("search", "failed"), ("social", "skipped")):
         assert historical[kind][outcome] == 1
-        assert historical[kind]["used"] == int(kind != "social")
+        assert historical[kind]["started"] == int(kind != "social")
     prepared_activity(runtime, current[1], ("news",))
     clock[0] += timedelta(hours=1)
     await life.tick()
     final = life.day_summary()["counts"]
-    assert final["news"]["used"] == final["news"]["success"] == 2
+    assert final["news"]["started"] == final["news"]["success"] == 2
     assert final["search"]["failed"] == final["social"]["skipped"] == 1

@@ -122,7 +122,7 @@ async def test_trial_has_no_business_writes_and_ignores_returned_tool_calls(runt
 
 async def test_current_plan_preview_is_read_only_and_uses_new_config(runtime):
     runtime.memory.remember("Remember a quiet library.")
-    await runtime.update_settings({"life": {"news_count": 1}})
+    await runtime.update_settings({"life": {"activity_count": 7}})
     before = runtime.store.export()
     result = await runtime.action({"action": "debug_build", "task": "life.plan"})
     request = result["request"]
@@ -153,12 +153,17 @@ async def test_structured_trial_compiles_edited_template_and_context(runtime):
     assert runtime.host.requests[-1]["prompt"] == "Raw edited prompt"
 
 
-async def test_detail_trial_uses_current_budget_without_reserving_or_widening_scope(runtime):
-    await runtime.update_settings({"life": {"search_count": 7}})
+async def test_detail_trial_uses_current_thoughts_without_mutation_or_widening_scope(runtime):
+    runtime.drives.set_value("loneliness", 87)
+    runtime.drives.set_value("energy", 23)
     runtime.memory.remember("A private commitment must stay private.", scope="qq:FriendMessage:42")
     before = runtime.store.export()
     request = await runtime.build_test_request("life.detail")
-    assert "上限 7" in request["dynamic_context"]["行动额度"]
+    assert "必须聊天" in request["dynamic_context"]["当前想法"]
+    assert "暂时不太想阅读新闻或主动搜索" in request["dynamic_context"]["当前想法"]
+    assert "行动额度" not in request["dynamic_context"]
+    for hidden in ("寂寞值", "energy_delta", "精力：", "growth_per_hour", "loneliness"):
+        assert hidden not in request["prompt"]
     assert "A private commitment" not in request["prompt"]
     assert "scope_overrides" not in request["prompt"]
     assert runtime.store.export() == before
@@ -166,6 +171,111 @@ async def test_detail_trial_uses_current_budget_without_reserving_or_widening_sc
     after = [row for row in runtime.store.export() if row["namespace"] != "debug_records"]
     assert after == [row for row in before if row["namespace"] != "debug_records"]
     assert not runtime.host.tools and not runtime.host.sent
+
+
+async def test_drive_module_switch_freezes_growth_debits_and_injection_but_allows_admin_edits(
+    runtime,
+):
+    import copy
+
+    clock = [0.0]
+    runtime.drives.clock = lambda: clock[0]
+    runtime.drives.rebase()
+    await runtime.action({"action": "set_drive_value", "id": "loneliness", "value": 20})
+    runtime.drives.set_value("energy", 30)
+    version = runtime.config_version
+    clock[0] = 1800
+    await runtime.update_settings({"modules": {"drives": False}})
+    assert runtime.config_version == version
+    disabled = runtime.drives.snapshot()
+    assert not disabled["enabled"]
+    assert disabled["meters"]["loneliness"]["value"] == 25
+    assert disabled["meters"]["energy"]["value"] == 35
+    clock[0] += 7200
+    runtime.drives.debit("disabled-round", "social")
+    runtime.drives.debit("disabled-news", "news")
+    assert runtime.drives.snapshot() == disabled
+    preview = await runtime.build_test_request("life.detail")
+    assert "当前想法" not in preview["dynamic_context"]
+    assert not runtime.drives.thoughts()
+    await runtime.action({"action": "set_drive_value", "id": "loneliness", "value": 50})
+    config = copy.deepcopy(disabled["meters"]["loneliness"]["config"])
+    config["growth_per_hour"] = 20
+    await runtime.action({"action": "save_drive_settings", "id": "loneliness", "config": config})
+    clock[0] += 3600
+    assert runtime.drives.snapshot()["meters"]["loneliness"]["value"] == 50
+    await runtime.update_settings({"modules": {"drives": True}})
+    clock[0] += 1800
+    assert runtime.drives.snapshot()["meters"]["loneliness"]["value"] == 60
+    assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 40
+    assert not runtime.host.requests and not runtime.host.sent
+
+
+async def test_legacy_energy_state_edit_is_rejected_and_cannot_change_drive(runtime):
+    before = runtime.drives.snapshot()["meters"]["energy"]["display_value"]
+    with pytest.raises(ValueError):
+        await runtime.action({"action": "update_state", "patch": {"energy": 5}})
+    assert runtime.drives.snapshot()["meters"]["energy"]["display_value"] == before
+    assert "energy" not in runtime.life.state()
+
+
+async def test_drive_checkpoint_runs_while_life_scheduler_is_waiting(runtime, monkeypatch):
+    clock = [0.0]
+    runtime.drives.clock = lambda: clock[0]
+    runtime.drives.rebase()
+    runtime.drives.set_value("loneliness", 0)
+    runtime.drives.set_value("energy", 70)
+    life_waiting, checkpoint_done = asyncio.Event(), asyncio.Event()
+    original_sleep = asyncio.sleep
+    waits = 0
+
+    async def waiting_schedule():
+        life_waiting.set()
+        await asyncio.Event().wait()
+
+    async def checkpoint_sleep(seconds):
+        nonlocal waits
+        if seconds != 60:
+            return await original_sleep(seconds)
+        waits += 1
+        if waits == 1:
+            clock[0] = 60
+            return await original_sleep(0)
+        checkpoint_done.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runtime, "_loop", waiting_schedule)
+    monkeypatch.setattr("living_world.runtime.asyncio.sleep", checkpoint_sleep)
+    await runtime.start()
+    await asyncio.wait_for(life_waiting.wait(), 2)
+    await asyncio.wait_for(checkpoint_done.wait(), 2)
+    stored = runtime.store.get("drive_state", "current")["values"]
+    assert stored["loneliness"] == pytest.approx(1 / 6)
+    assert stored["energy"] == pytest.approx(70 + 1 / 6)
+    assert not runtime.scheduler.done()
+    assert not runtime.host.requests
+
+
+async def test_restore_keeps_newer_drive_values_and_debit_receipts_with_all_modules_off(runtime):
+    import copy
+
+    clock = [0.0]
+    runtime.drives.clock = lambda: clock[0]
+    runtime.drives.rebase()
+    runtime.drives.set_value("energy", 80)
+    old_settings, old_records = copy.deepcopy(runtime.settings), runtime.store.export()
+    runtime.drives.set_value("energy", 40)
+    runtime.drives.debit("already-started", "search")
+    receipt = runtime.store.get("drive_debits", "already-started")
+    await runtime.restore(
+        {"format": "living-world", "version": 1, "settings": old_settings, "records": old_records}
+    )
+    assert not any(runtime.settings["modules"].values())
+    assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 30
+    assert runtime.store.get("drive_debits", "already-started") == receipt
+    await runtime.update_settings({"modules": {"drives": True}})
+    runtime.drives.debit("already-started", "search")
+    assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 30
 
 
 async def test_trial_media_is_preserved_and_unsupported_fields_fail_explicitly(runtime):
@@ -189,6 +299,11 @@ async def test_preview_all_available_tasks_never_updates_business_data(runtime):
         request = await runtime.build_test_request(template["task"])
         assert request["template"] == template["default_template"]
         assert request["dynamic_context"] is not None
+        for hidden in ("energy_delta", "精力：", "寂寞值", "growth_per_hour", "行动额度"):
+            assert hidden not in request["prompt"]
+        if template["task"] != "life.detail":
+            assert "不是很想聊天。" not in request["prompt"]
+            assert "想了解新鲜事，或查查感兴趣的问题。" not in request["prompt"]
     assert runtime.store.export() == before
 
 
@@ -301,9 +416,10 @@ def test_new_defaults_and_legacy_configuration_migration():
             "sessions": [{"platform_id": "qq", "type": "group", "number": "123", "weight": 2}],
         }
     )
-    assert [
-        config["life"][k] for k in ("activity_count", "news_count", "search_count", "social_count")
-    ] == [10, 2, 2, 3]
+    assert config["life"]["activity_count"] == 10
+    assert not {"news_count", "search_count", "social_count"} & config["life"].keys()
+    assert config["modules"]["drives"]
+    assert set(config["drives"]) == {"loneliness", "energy"}
     assert config["news"]["sources"][0]["url"] == "https://example.test/rss"
     assert config["sessions"][0]["umo"] == "qq:GroupMessage:123"
     assert len(settings_from()["news"]["sources"]) == 6
@@ -312,8 +428,8 @@ def test_new_defaults_and_legacy_configuration_migration():
     form["daily_digest"]["sources"][0]["keywords"] = ["早报", "日报"]
     assert settings_from(form)["daily_digest"]["sources"][0]["keywords"] == "早报 日报"
     for patch in (
-        {"life": {"news_count": 49}},
-        {"life": {"social_count": 1.5}},
+        {"life": {"activity_count": 0}},
+        {"life": {"activity_count": 1.5}},
         {"debug": {"retain_per_category": 0}},
     ):
         with pytest.raises(ValueError):

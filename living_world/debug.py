@@ -190,7 +190,7 @@ class DebugService:
         self.defaults[task] = default
         # Only the static instruction is kept here; never store the dynamic context.
         self.runtime.store.put(
-            "prompt_defaults", task, {"id": task, "template": default, "schema_version": 3}
+            "prompt_defaults", task, {"id": task, "template": default, "schema_version": 4}
         )
         return self.runtime.store.get("prompt_templates", task, {}).get("template", default)
 
@@ -205,7 +205,7 @@ class DebugService:
         if not isinstance(template, str) or not template.strip() or len(template) > 100000:
             raise ValueError("模板需要填写非空文本，最多 100000 字符")
         self.runtime.store.put(
-            "prompt_templates", task, {"id": task, "template": template, "schema_version": 3}
+            "prompt_templates", task, {"id": task, "template": template, "schema_version": 4}
         )
         return {
             "status": "success",
@@ -217,7 +217,7 @@ class DebugService:
         self.runtime.store.put(
             "prompt_templates",
             task,
-            {"id": task, "template": self.get_default(task), "schema_version": 3},
+            {"id": task, "template": self.get_default(task), "schema_version": 4},
         )
         return {"status": "success", "task": task, "template": self.get_default(task)}
 

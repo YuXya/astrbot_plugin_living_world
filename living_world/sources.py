@@ -266,7 +266,7 @@ class SourceService:
         if not feeds:
             return self._skip("not_configured", "尚未配置新闻 RSS/Atom 来源。")
         if before_start is not None and not before_start():
-            return self._skip("daily_budget_or_activity_changed")
+            return self._skip("activity_changed_or_already_started")
         limit = max(1, min(30, int(settings.get("limit", 5))))
         urls = list(dict.fromkeys(str(feed) for feed in feeds))[:20]
         results = await asyncio.gather(
@@ -360,7 +360,7 @@ class SourceService:
         if not await self._allowed("search", scope):
             return self._skip("module_disabled")
         if before_start is not None and not before_start():
-            return self._skip("daily_budget_or_activity_changed")
+            return self._skip("activity_changed_or_already_started")
         topic = parse_json(
             await self._complete(
                 "search.topic",

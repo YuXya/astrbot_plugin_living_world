@@ -24,6 +24,8 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       const tomorrow = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date(Date.now() + 86400000));
       const scope = "qq:FriendMessage:42";
       window.calls = []; window.testTomorrow = tomorrow;
+      const originalInterval = window.setInterval;
+      window.setInterval = (handler, duration, ...args) => { if (duration === 60000) window.driveRefreshTick = handler; return originalInterval(handler, duration, ...args); };
       const activities = Array.from({ length: 10 }, (_, i) => {
         const start = new Date(new Date(`${day}T00:00:00+08:00`).getTime() + i * 8640000);
         const end = new Date(start.getTime() + 8640000);
@@ -39,7 +41,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
         sessions: [{ umo: scope, title: "与朋友的私聊", persona_id: "student" }], state: { energy: 75, mood: "有点期待", routine: "上午上课，傍晚散步。" },
         modules: [{ id: "life", enabled: true, status: "ready" }, { id: "memory", enabled: true, status: "ready" }, { id: "bilibili", enabled: false, status: "disabled", error: "依赖插件尚未启用" }], bilibili_dependency: { available: false, text: "依赖插件尚未启用" },
         activities, action_usage: [{ id: "news-used", kind: "news", date: day }, { id: "social-used", kind: "social", date: day }, { id: "future-used", kind: "search", date: tomorrow }], detail_history: [],
-        day_summary: { date: day, counts: { news: { limit: 2, used: 1, reserved: 1, available: 0, success: 0, failed: 1, skipped: 2 }, search: { limit: 2, used: 0, reserved: 2, available: 0, success: 0, failed: 0, skipped: 0 }, social: { limit: 3, used: 1, reserved: 0, available: 2, success: 1, failed: 0, skipped: 1 } } },
+        day_summary: { date: day, counts: { news: { started: 1, arranged: 1, success: 0, failed: 1, skipped: 2 }, search: { started: 0, arranged: 2, success: 0, failed: 0, skipped: 0 }, social: { started: 1, arranged: 0, success: 1, failed: 0, skipped: 1 } } },
         prompt_template_history: [{ id: "life.detail", task: "life.detail", template: "旧版指令：不能新增行动。", archived_at: new Date().toISOString() }],
         life_days: [{ date: day, scope: "global", parameters: { activity_count: 10, news_count: 2, search_count: 2, social_count: 3 }, full_request: { prompt: "daily plan complete request" }, raw_json: JSON.stringify({ activities: activities.slice(0, 10) }), adopted_activities: activities.slice(0, 10) }],
         memories: [{ id: "m1", text: "约好了明天一起聊流星雨", kind: "event", scope, person_id: "42", important: true }, { id: "m2", text: "朋友最近喜欢看天文纪录片", kind: "knowledge", scope, person_id: "42" }, { id: "m3", text: "<img src=x onerror=window.xss=true>", kind: "event", scope: "global" }],
@@ -49,6 +51,24 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
         debug_records: [{ id: "debug-1", kind: "model", category: "life.plan_day", task: "life.plan_day", module: "life", scope: "global", status: "success", boundary: "本插件提交给 AstrBot 的请求", request: { module: "life", task: "life.plan_day", scope: "global", provider_id: "chat-model", system_prompt: "Full persona system", prompt_mode: "structured", prompt: "Private test context kept outside templates", contexts: [{ role: "user", content: "完整历史" }], parameters: { temperature: 0.6 }, template, dynamic_context: { memories: ["测试记忆"] } }, response: { completion_text: "{\"activities\":[]}" } }],
       };
       window.fixture.version = "0.2.3-test";
+      delete window.fixture.settings.character.energy; delete window.fixture.state.energy;
+      for (const kind of ["news", "search", "social"]) delete window.fixture.settings.life[`${kind}_count`];
+      window.fixture.settings.modules.drives = true;
+      window.fixture.drives = { enabled: true, meters: {
+        loneliness: { value: 0, config: { growth_per_hour: 10, costs: { social: 10 }, stages: [{ max: 40, text: "不是很想聊天。" }, { max: 80, text: "想偷偷看一眼 QQ 聊天。" }, { max: 100, text: "必须聊天。" }] } },
+        energy: { value: 75.25, config: { growth_per_hour: 10, costs: { news: 10, search: 10 }, stages: [{ max: 40, text: "暂时不太想阅读新闻或主动搜索。" }, { max: 80, text: "想了解新鲜事，或查查感兴趣的问题。" }, { max: 100, text: "很想阅读新闻或主动搜索，了解些新东西。" }] } },
+      } };
+      window.fixture.settings.drives = Object.fromEntries(Object.entries(window.fixture.drives.meters).map(([key, meter]) => [key, structuredClone(meter.config)]));
+      window.refreshDriveFixture = () => {
+        window.fixture.drives.enabled = window.fixture.settings.modules.drives;
+        for (const meter of Object.values(window.fixture.drives.meters)) {
+          meter.display_value = Math.floor(meter.value);
+          const index = meter.config.stages.findIndex((stage) => stage.max >= meter.display_value);
+          meter.stage = { min: index ? meter.config.stages[index - 1].max + 1 : 0, ...meter.config.stages[index] };
+          meter.thought = window.fixture.drives.enabled ? meter.stage.text : "";
+        }
+      };
+      window.refreshDriveFixture();
       window.fixture.provider_capture_available = true;
       window.fixture.session_status = [
         { umo: scope, actual_scope: scope, platform_id: "qq", persona_id: "student", persona_match: true, allowed: true, history_status: "found", history_count: 2, history_source: "AstrBot 当前对话", conversation_id: "current-private", reason: "可接入；已找到历史", checked_at: Date.now() / 1000 },
@@ -88,9 +108,15 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
           if (window.failNext) { window.failNext = false; throw new Error("测试来源暂时不可用"); }
           if (endpoint === "settings") {
             window.fixture.settings = structuredClone(body);
-            for (const key of ["news", "search", "social"]) {
-              const count = window.fixture.day_summary.counts[key]; count.limit = body.life[`${key}_count`]; count.available = Math.max(0, count.limit - count.used - count.reserved);
-            }
+            for (const [id, config] of Object.entries(body.drives)) window.fixture.drives.meters[id].config = structuredClone(config);
+            window.refreshDriveFixture();
+          }
+          if (["save_drive_settings", "set_drive_value"].includes(body.action)) {
+            const meter = window.fixture.drives.meters[body.id];
+            if (body.action === "set_drive_value") meter.value = body.value;
+            else { meter.config = structuredClone(body.config); window.fixture.settings.drives[body.id] = structuredClone(body.config); }
+            window.refreshDriveFixture();
+            return structuredClone(window.fixture.drives);
           }
           if (body.action === "inspect_session") return window.inspectError
             ? { umo: body.scope, actual_scope: body.scope, history_status: "error", reason: "测试历史服务不可用", allowed: false }
@@ -239,22 +265,116 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.equal(settings.character.profile, "新的角色资料"); assert.equal(settings.modules.news, true);
     assert.equal(settings.character.location, "海边小城"); assert.equal(settings.character.sleep_state, "清醒");
     assert.equal(settings.retained_unknown.keep, true); assert.equal(settings.life.retained_nested, true);
+    assert.equal(await page.locator('[name="character.energy"]').count(), 0, "Energy is configured only in the new module");
+    await page.locator('a[data-view="drives"]').click();
+    await page.getByRole("tab", { name: "寂寞值", exact: true }).waitFor();
+    assert.equal(await page.locator(".drive-status-cards > .card").count(), 2);
+    assert.equal(await page.getByRole("tab", { selected: true }).count(), 1);
+    assert.equal(await page.locator(".drive-tabs").evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").length), 2, "Two tabs span the full editor width");
+    assert.equal(await page.locator(".drive-stage").count(), 3);
+    assert.equal(await page.locator('.drive-status-cards [data-drive="energy"] .drive-value').innerText(), "75 / 100");
+    assert.equal(await page.locator('[name="drive.value"]').inputValue(), "0");
+    await page.locator('[name="drive.growth_per_hour"]').fill("12.5");
+    await page.locator('[name="drive.costs.social"]').fill("0");
+    await page.locator('[name="drive.value"]').fill("81.75");
+    await page.getByRole("tab", { name: "精力", exact: true }).click();
+    assert.equal(await page.locator('[name="drive.costs.news"]').inputValue(), "10");
+    assert.equal(await page.locator('[name="drive.costs.search"]').inputValue(), "10");
+    await page.getByRole("tab", { name: "精力", exact: true }).press("ArrowLeft");
+    assert.equal(await page.getByRole("tab", { name: "寂寞值", exact: true }).getAttribute("aria-selected"), "true");
+    assert.equal(await page.locator('[name="drive.growth_per_hour"]').inputValue(), "12.5", "Switching tabs retains drafts");
+    await page.getByRole("button", { name: "应用当前值", exact: true }).click();
+    await page.getByText("当前值已应用，参数与阶段草稿继续保留", { exact: true }).waitFor();
+    assert.equal(await page.locator('.drive-status-cards [data-drive="loneliness"] .drive-thought').innerText(), "必须聊天。");
+    assert.deepEqual(await page.evaluate(() => window.calls.findLast((call) => call.body?.action === "set_drive_value").body), { action: "set_drive_value", id: "loneliness", value: 81.75 });
+    assert.equal(await page.evaluate(() => window.fixture.drives.meters.loneliness.config.growth_per_hour), 10, "Applying a value must not save rate drafts");
+    await page.evaluate(() => { window.fixture.drives.meters.loneliness.value = 83.8; window.refreshDriveFixture(); });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    await page.getByText("数值已刷新，未保存的修改继续保留", { exact: true }).waitFor();
+    assert.equal(await page.locator("#editor").isVisible(), false);
+    assert.equal(await page.locator('[name="drive.growth_per_hour"]').inputValue(), "12.5");
+    assert.equal(await page.locator('.drive-status-cards [data-drive="loneliness"] .drive-value').innerText(), "83 / 100");
+    await page.locator('[name="drive.value"]').fill("12");
+    await page.locator('[name="drive.growth_per_hour"]').focus();
+    await page.evaluate(async () => { window.fixture.drives.meters.loneliness.value = 84.9; window.refreshDriveFixture(); await window.driveRefreshTick(); });
+    assert.equal(await page.locator('[name="drive.value"]').inputValue(), "12", "Automatic refresh must preserve a manual-value draft");
+    assert.equal(await page.locator('[name="drive.growth_per_hour"]').evaluate((node) => node === document.activeElement), true, "Status-only refresh preserves editor focus");
+    assert.equal(await page.locator('.drive-status-cards [data-drive="loneliness"] .drive-value').innerText(), "84 / 100");
+    await page.getByRole("button", { name: "拆分第 1 阶段", exact: true }).click();
+    assert.equal(await page.locator(".drive-stage").count(), 4);
+    assert.equal(await page.locator('[name="drive.stage.0.max"]').inputValue(), "20");
+    await page.locator('[name="drive.stage.0.max"]').fill("15"); await page.locator('[name="drive.stage.0.max"]').press("Tab");
+    assert.match(await page.locator(".drive-stage").nth(1).innerText(), /阶段 2 · 16—40/);
+    await page.getByRole("button", { name: "删除第 1 阶段", exact: true }).click();
+    assert.match(await page.locator(".drive-stage").first().innerText(), /阶段 1 · 0—40/);
+    await page.getByRole("button", { name: "删除第 2 阶段", exact: true }).click();
+    assert.match(await page.locator(".drive-stage").first().innerText(), /阶段 1 · 0—80/);
+    await page.getByRole("button", { name: "拆分第 1 阶段", exact: true }).click();
+    await page.locator('[name="drive.stage.0.max"]').fill("0"); await page.locator('[name="drive.stage.0.max"]').press("Tab");
+    assert.equal(await page.getByRole("button", { name: "拆分第 1 阶段", exact: true }).isDisabled(), true, "A one-value stage cannot split");
+    await page.locator('[name="drive.stage.0.max"]').fill("40"); await page.locator('[name="drive.stage.0.max"]').press("Tab");
+    await page.locator('[name="drive.stage.0.max"]').fill("81"); await page.locator('[name="drive.stage.0.max"]').dispatchEvent("change");
+    assert.equal(await page.locator('[name="drive.stage.0.max"]').inputValue(), "40", "Overlapping stage boundaries are rejected");
+    await page.getByRole("button", { name: "删除第 1 阶段", exact: true }).click();
+    await page.getByRole("button", { name: "删除第 1 阶段", exact: true }).click();
+    assert.equal(await page.getByRole("button", { name: "删除第 1 阶段", exact: true }).isDisabled(), true);
+    assert.equal(await page.locator('[name="drive.stage.0.max"]').getAttribute("readonly"), "");
+    await page.getByRole("button", { name: "拆分第 1 阶段", exact: true }).click();
+    await page.getByRole("button", { name: "拆分第 1 阶段", exact: true }).click();
+    await page.locator('[name="drive.stage.0.max"]').fill("40"); await page.locator('[name="drive.stage.0.max"]').press("Tab");
+    await page.locator('[name="drive.stage.1.max"]').fill("80"); await page.locator('[name="drive.stage.1.max"]').press("Tab");
+    for (const [index, text] of ["不是很想聊天。", "想偷偷看一眼 QQ 聊天。", "必须聊天。<img src=x onerror=window.driveXss=true>"].entries()) await page.locator(`[name="drive.stage.${index}.text"]`).fill(text);
+    await page.evaluate(() => { window.failNext = true; });
+    await page.getByRole("button", { name: "保存设置", exact: true }).click();
+    await page.getByText("测试来源暂时不可用", { exact: true }).waitFor();
+    assert.equal(await page.locator('[name="drive.growth_per_hour"]').inputValue(), "12.5", "Failed save retains the configuration draft");
+    await page.getByRole("button", { name: "保存设置", exact: true }).click();
+    await page.getByText("参数与阶段已保存，当前值继续按运行规则变化", { exact: true }).waitFor();
+    const driveSaved = await page.evaluate(() => window.calls.findLast((call) => call.body?.action === "save_drive_settings").body);
+    assert.equal(Object.hasOwn(driveSaved, "value"), false); assert.equal(driveSaved.config.growth_per_hour, 12.5); assert.equal(driveSaved.config.costs.social, 0);
+    assert.deepEqual(driveSaved.config.stages.map((stage) => stage.max), [40, 80, 100]);
+    assert.equal(await page.evaluate(() => window.fixture.drives.meters.loneliness.value), 84.9, "Saving configuration does not apply the manual-value draft");
+    assert.equal(await page.locator('[name="drive.value"]').inputValue(), "12");
+    assert.equal(await page.locator(".drive-thought img").count(), 0); assert.equal(await page.evaluate(() => window.driveXss), undefined);
+    await page.locator('[name="drive.stage.2.text"]').fill("必须聊天。");
+    await page.getByRole("button", { name: "保存设置", exact: true }).click();
+    await page.getByRole("button", { name: "应用当前值", exact: true }).click();
+    await page.getByRole("tab", { name: "精力", exact: true }).click();
+    await page.locator('[name="drive.costs.news"]').fill("7.5"); await page.locator('[name="drive.costs.search"]').fill("15");
+    await page.getByRole("button", { name: "保存设置", exact: true }).click();
+    assert.deepEqual(await page.evaluate(() => window.fixture.drives.meters.energy.config.costs), { news: 7.5, search: 15 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, "No desktop meter overflow");
+    if (process.env.LIVING_WORLD_DRIVES_SCREENSHOT) await page.locator("#content").screenshot({ path: process.env.LIVING_WORLD_DRIVES_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("tab", { name: "寂寞值", exact: true }).click();
+    await page.getByRole("button", { name: "拆分第 1 阶段", exact: true }).click();
+    await page.getByRole("button", { name: "删除第 2 阶段", exact: true }).click();
+    await page.getByRole("button", { name: "保存设置", exact: true }).click();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, "No mobile meter overflow");
+    if (process.env.LIVING_WORLD_DRIVES_MOBILE_SCREENSHOT) await page.locator("#content").screenshot({ path: process.env.LIVING_WORLD_DRIVES_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+    await page.setViewportSize({ width: 1600, height: 1050 });
+    await page.evaluate(() => { window.fixture.settings.modules.drives = false; window.refreshDriveFixture(); });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    assert.equal(await page.locator(".drive-status-cards").getByText("已暂停", { exact: true }).count(), 2);
+    assert.equal(await page.locator(".drive-status-cards").getByText("模块已暂停，下次细化不注入这项想法。", { exact: true }).count(), 2);
+    await page.locator('[name="drive.value"]').fill("40.99"); await page.getByRole("button", { name: "应用当前值", exact: true }).click();
+    assert.match(await page.locator('.drive-status-cards [data-drive="loneliness"]').innerText(), /当前阶段 0—40/);
+    await page.evaluate(() => { window.fixture.settings.modules.drives = true; window.refreshDriveFixture(); });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
     await page.locator('a[data-view="schedule"]').click();
     await page.getByText("生成输入快照（非 API 原文）", { exact: true }).waitFor();
     await page.getByText("模型生成的日程文本", { exact: true }).waitFor();
     assert.equal(await page.getByText("完整生成请求", { exact: true }).count(), 0);
-    for (const [name, value] of [["daily_plan_time", "06:00"], ["activity_count", "10"], ["news_count", "2"], ["search_count", "2"], ["social_count", "3"]]) assert.equal(await page.locator(`[name="life.${name}"]`).inputValue(), value);
+    for (const [name, value] of [["daily_plan_time", "06:00"], ["activity_count", "10"]]) assert.equal(await page.locator(`[name="life.${name}"]`).inputValue(), value);
+    for (const kind of ["news", "search", "social"]) assert.equal(await page.locator(`[name="life.${kind}_count"]`).count(), 0);
     assert.equal(await page.locator('[name="life.activity_count"]').getAttribute("max"), "48");
     assert.equal(await page.getByRole("heading", { name: "大纲生成参数", exact: true }).count(), 1);
-    assert.equal(await page.getByRole("heading", { name: "行动每日上限", exact: true }).count(), 1);
-    assert.match(await page.locator(".schedule-counts").innerText(), /新闻 · 每日上限 2 次[\s\S]*1 次[\s\S]*已使用 · 已预留 1 · 可安排 0[\s\S]*成功 0 · 失败 1 · 跳过 2/);
-    await page.locator('[name="life.news_count"]').fill("11");
+    assert.equal(await page.getByRole("heading", { name: "行动每日上限", exact: true }).count(), 0);
+    assert.match(await page.locator(".schedule-counts").innerText(), /新闻 · 次[\s\S]*已开始 1 次[\s\S]*已安排 1 次[\s\S]*成功 0 · 失败 1 · 跳过 2/);
+    assert.doesNotMatch(await page.locator(".schedule-counts").innerText(), /预留|额度|每日上限/);
     await page.getByRole("button", { name: "保存日程设置", exact: true }).click();
     await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor();
-    assert.equal(await page.evaluate(() => window.fixture.settings.life.news_count), 11, "Action caps can exceed the activity count");
-    await page.locator('[name="life.news_count"]').fill("2");
-    await page.getByRole("button", { name: "保存日程设置", exact: true }).click();
-    await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.fixture.settings.drives.loneliness.growth_per_hour), 12.5, "Saving another page must preserve newly saved meter settings");
     assert.equal(await page.evaluate(() => window.calls.some((call) => ["plan_day", "regenerate_day"].includes(call.body?.action))), false, "Saving parameters must not regenerate");
     assert.equal(await page.getByRole("button", { name: "补生成缺失日程", exact: true }).count(), 0);
     await page.locator('[name="life.activity_count"]').fill("11");
@@ -285,7 +405,20 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await page.getByRole("button", { name: "刷新数据", exact: true }).click();
     await page.getByLabel("日程日期").fill(await page.evaluate(() => window.testTomorrow));
     assert.equal(await page.getByRole("button", { name: "重新生成日程", exact: true }).isDisabled(), true);
-    assert.match(await page.locator(".schedule-counts").innerText(), /搜索 · 每日上限 2 次[\s\S]*1 次[\s\S]*已使用 · 已预留 0 · 可安排 1/);
+    assert.match(await page.locator(".schedule-counts").innerText(), /搜索 · 次[\s\S]*已开始 1 次[\s\S]*已安排 0 次/);
+    await page.evaluate(() => {
+      const day = window.fixture.life_days[0].date;
+      const at = new Date(`${window.testTomorrow}T00:10:00+08:00`).toISOString();
+      window.fixture.activities.push({ id: "cross-day-finished", date: day, start: `${day}T23:30:00+08:00`, end: `${window.testTomorrow}T01:00:00+08:00`, scope: "qq:FriendMessage:42", title: "跨日阅读", status: "completed", actions: { news: { id: "cross-day-news", enabled: true, at, execution: { status: "success", finished_at: at } } } });
+      window.fixture.action_usage.push({ id: "cross-day-news", kind: "news", date: window.testTomorrow });
+    });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    assert.match(await page.locator(".schedule-counts").innerText(), /新闻 · 次[\s\S]*已开始 1 次[\s\S]*已安排 1 次[\s\S]*成功 1/, "Arranged includes completed adopted decisions on the action's local date, including private activities from the prior day");
+    await page.evaluate(() => {
+      window.fixture.activities = window.fixture.activities.filter((item) => item.id !== "cross-day-finished");
+      window.fixture.action_usage = window.fixture.action_usage.filter((item) => item.id !== "cross-day-news");
+    });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
     assert.match(await page.locator(".activity-detail").innerText(), /自动重试已结束/);
     await page.getByRole("button", { name: "细化活动", exact: true }).click();
     assert.equal(await page.evaluate(() => window.calls.some((call) => call.body?.action === "detail_activity")), false, "Opening the detail dialog must not call a model");
@@ -641,7 +774,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.equal(await page.getByRole("button", { name: "整理旧记忆", exact: true }).count(), 1);
     assert.equal(await page.getByRole("button", { name: "维护记忆", exact: true }).count(), 0);
     await page.setViewportSize({ width: 390, height: 844 });
-    for (const view of ["overview", "settings", "schedule", "whitelist", "sources", "debug", "memory", "journal", "data"]) {
+    for (const view of ["overview", "settings", "drives", "schedule", "whitelist", "sources", "debug", "memory", "journal", "data"]) {
       await page.evaluate((target) => { location.hash = target; }, view);
       await page.locator(`a[data-view="${view}"][aria-current="page"]`).waitFor();
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, `No mobile horizontal overflow: ${view}`);
@@ -671,6 +804,6 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; location.hash = "overview"; });
     await page.locator('a[data-view="overview"][aria-current="page"]').waitFor();
     assert.deepEqual(errors, [], "No browser runtime errors");
-    process.stdout.write("UI smoke passed: state home, outline settings and independent action caps, persistent day usage, detail/re-detail instruction and failure flow, decisions and detail history, outline-only edits, regeneration archives, old template viewer, whitelist UMO, fixed sources, independent digests, four debug views, single-column source disclosures, 14 JSON/SSE formatting cases, nested JSON folding, per-call and direction fold state, changed-body reset, keyboard/mobile controls, original-view toggle, exact JSON/SSE body downloads, paired calls, old snapshot labels, test/template separation, XSS, memory scopes, error feedback, import guard, responsive layout.\n");
+    process.stdout.write("UI smoke passed: program-owned meters, independent value/config saves, fractional values and costs, stage split/delete/boundaries and full coverage, draft-preserving refresh and tabs, pause controls, action statistics without daily caps, state home, detail/re-detail instruction and failure flow, decisions and detail history, outline-only edits, regeneration archives, old template viewer, whitelist UMO, fixed sources, independent digests, four debug views, single-column source disclosures, 14 JSON/SSE formatting cases, nested JSON folding, per-call and direction fold state, changed-body reset, keyboard/mobile controls, original-view toggle, exact JSON/SSE body downloads, paired calls, old snapshot labels, test/template separation, XSS, memory scopes, error feedback, import guard, responsive layout.\n");
   } finally { await browser.close(); }
 })().catch((error) => { process.stderr.write(`${error.stack}\n`); process.exitCode = 1; });
