@@ -655,6 +655,82 @@ function rawBodyButtons(body, filename, direction, type = "json") {
     const link = el("a"); link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
   }, "secondary", true));
 }
+function formatDebugJSON(raw) {
+  try { JSON.parse(raw); } catch { return null; }
+  // Validate without reserializing: duplicate keys and numeric spelling are evidence.
+  const tokens = raw.match(/"(?:\\[\s\S]|[^"\\])*"|[{}\[\],:]|[^\s{}\[\],:]+/g) || [];
+  const parts = [];
+  let depth = 0;
+  const newline = () => `\n${"  ".repeat(depth)}`;
+  tokens.forEach((token, index) => {
+    if (token === "{" || token === "[") {
+      parts.push(token); depth++;
+      if (tokens[index + 1] !== (token === "{" ? "}" : "]")) parts.push(newline());
+    } else if (token === "}" || token === "]") {
+      depth--;
+      if (tokens[index - 1] !== (token === "}" ? "{" : "[")) parts.push(newline());
+      parts.push(token);
+    } else if (token === ",") parts.push(token, newline());
+    else if (token === ":") parts.push(": ");
+    else if (token.startsWith('"')) {
+      // Consume complete escapes so literal backslashes (including paths) stay intact.
+      const text = token.replace(/\\(?:u[\da-fA-F]{4}|[\s\S])/g, (escape) => {
+        if (escape === "\\n" || /^\\u000a$/i.test(escape)) return "\n";
+        if (escape === "\\r" || /^\\u000d$/i.test(escape)) return "\r";
+        return escape;
+      });
+      parts.push(text.replace(/\r\n?|\n/g, newline));
+    } else parts.push(token);
+  });
+  return parts.join("");
+}
+function formatDebugBody(raw, type) {
+  if (type !== "sse") return formatDebugJSON(raw) ?? raw;
+  const output = [];
+  let event = [];
+  const formatEvent = () => {
+    const data = event.filter((line) => /^data(?::|$)/.test(line.text));
+    const formatted = data.length ? formatDebugJSON(data.map((line) => line.text.replace(/^data(?:: ?)?/, "")).join("\n")) : null;
+    if (formatted === null) return event.map((line) => line.raw).join("");
+    // Format data within one complete event, retaining metadata and event boundaries.
+    return event.map((line) => {
+      if (line === data[0]) return formatted.split("\n").map((text) => `data: ${text}${line.ending}`).join("");
+      return /^data(?::|$)/.test(line.text) ? "" : line.raw;
+    }).join("");
+  };
+  for (const line of raw.match(/[^\r\n]*(?:\r\n|\r|\n|$)/g) || []) {
+    if (!line) continue;
+    const ending = line.match(/(?:\r\n|\r|\n)$/)?.[0] || "";
+    const text = ending ? line.slice(0, -ending.length) : line;
+    if (text === "" && ending) { output.push(formatEvent(), line); event = []; }
+    else event.push({ text, ending, raw: line });
+  }
+  // An event without a terminating blank line may still be in flight.
+  output.push(...event.map((line) => line.raw));
+  return output.join("");
+}
+function debugBodyViewer(raw, type, selected, direction) {
+  const viewer = el("div", "debug-body-viewer");
+  const controls = el("div", "actions"); controls.setAttribute("role", "group");
+  controls.setAttribute("aria-label", `${direction === "request" ? "请求" : "返回"}正文显示方式`);
+  const note = el("p", "muted", "格式化仅供阅读：增加缩进并展开字符串中的换行；复制、下载始终保留原文。无法格式化的内容按原文展示。");
+  const pre = el("pre", "debug-raw");
+  selected.bodyModes ??= {};
+  let formatted;
+  const choices = [["formatted", "格式化显示"], ["raw", "原文"]].map(([mode, label]) => {
+    const choice = button(label, () => { selected.bodyModes[direction] = mode; update(); }, "secondary", true);
+    controls.append(choice); return { mode, choice };
+  });
+  const update = () => {
+    const mode = selected.bodyModes[direction] || "formatted";
+    choices.forEach(({ mode: value, choice }) => choice.setAttribute("aria-pressed", String(value === mode)));
+    if (mode === "formatted") formatted ??= formatDebugBody(raw, type);
+    pre.textContent = mode === "raw" ? raw : formatted;
+    pre.dataset.mode = mode;
+    note.hidden = mode === "raw";
+  };
+  append(viewer, controls, note, pre); update(); return viewer;
+}
 function readableValue(value, depth = 0) {
   if (value == null || value === "") return el("p", "muted", "暂无内容");
   if (typeof value !== "object") return el("div", "debug-prose", value);
@@ -735,6 +811,7 @@ function renderDebugView(view, records, initiallyOpen) {
   const related = records.filter((record) => record.turn_id === view.id || record.id === view.id);
   const calls = Array.isArray(view.calls) ? view.calls : [];
   const selected = debugSelections.get(view.id) || { call: 0, tab: 0 };
+  selected.sourceOpen ??= new Map();
   if (selected.call >= calls.length) selected.call = 0;
   debugSelections.set(view.id, selected);
   append(container, append(el("summary", "debug-round-summary"), append(el("span"), el("strong", "", view.title || debugLabel(view.task)), el("small", "muted", `${scopeLabel(view.scope)} · ${stamp(view.created_at) || "时间未记录"}${calls.length ? ` · ${calls.length} 次请求` : ""}`)), badge(view.status)));
@@ -759,12 +836,21 @@ function renderDebugView(view, records, initiallyOpen) {
   panel.id = `debug-panel-${view.id}`;
   const update = () => {
     const call = calls[selected.call];
+    panel.querySelectorAll(".debug-source").forEach((item) => selected.sourceOpen.set(item.dataset.sourceKey, item.open));
     buttons.forEach((tab, index) => { tab.setAttribute("aria-selected", String(index === selected.tab)); tab.tabIndex = index === selected.tab ? 0 : -1; });
     panel.setAttribute("aria-labelledby", buttons[selected.tab].id); panel.replaceChildren();
     if (selected.tab === 0) {
       panel.append(el("p", "muted", "这里展示组装时记录的信息来源与实际选用资料；最终发往接口的内容以②为准。"));
       const sources = el("div", "debug-sources");
-      for (const source of view.sources || []) sources.append(append(el("section", "debug-source"), el("h4", "", source.title || "上下文资料"), el("p", "debug-source-origin", `来源：${source.source || "未记录"}${source.placement ? ` · 放入：${source.placement}` : ""}`), readableValue(source.content)));
+      (view.sources || []).forEach((source, index) => {
+        const key = JSON.stringify([index, source.title, source.source, source.placement]);
+        const item = el("details", "debug-source");
+        item.dataset.sourceKey = key;
+        const summary = append(el("summary", "debug-source-summary"), el("span", "debug-source-title", source.title || "上下文资料"), el("span", "debug-source-origin", `来源：${source.source || "未记录"}${source.placement ? ` · 放入：${source.placement}` : ""}`));
+        item.open = selected.sourceOpen.get(key) ?? true;
+        item.addEventListener("toggle", () => { if (item.isConnected) selected.sourceOpen.set(key, item.open); });
+        sources.append(append(item, summary, append(el("div", "debug-source-content"), readableValue(source.content))));
+      });
       panel.append(sources.childElementCount ? sources : empty("没有可用的信息来源清单", "本次尚未组装上下文，或这条旧记录没有保存来源。"));
       const injection = append(el("section", "debug-injection"), el("h4", "", "插件实际加入的完整文本"));
       if (view.stable_injected_text) append(injection, el("p", "muted", "稳定角色资料 · system 消息"), el("div", "debug-prose", stringify(view.stable_injected_text)));
@@ -780,7 +866,7 @@ function renderDebugView(view, records, initiallyOpen) {
         const safeId = String(call.id || `${view.id}-${selected.call + 1}`).replace(/[^\w.-]/g, "_");
         panel.append(el("p", "muted", isRequest ? "实际发往模型接口的请求正文，仅隐藏认证凭据。复制和下载直接保留正文，不加包装。" : type === "sse" ? "这是接口实际返回的事件流（SSE），不是一份单独 JSON。④提供合并阅读，合并结果不是原文。" : "接口实际返回的正文，保留原有字段；下方内容没有经过回复提取。"));
         if (call.url || call.http_status) panel.append(el("p", "debug-endpoint", [call.method, call.url, call.http_status ? `HTTP ${call.http_status}` : ""].filter(Boolean).join(" · ")));
-        append(panel, rawBodyButtons(raw, `living-world-${safeId}-${isRequest ? "request" : "response"}.${type === "sse" ? "sse" : type === "json" ? "json" : "txt"}`, isRequest ? "request" : "response", type), el("pre", "debug-raw", raw));
+        append(panel, rawBodyButtons(raw, `living-world-${safeId}-${isRequest ? "request" : "response"}.${type === "sse" ? "sse" : type === "json" ? "json" : "txt"}`, isRequest ? "request" : "response", type), debugBodyViewer(raw, type, selected, isRequest ? "request" : "response"));
         if (call.error) panel.append(el("p", "danger-copy", stringify(call.error)));
       } else {
         panel.append(empty(isRequest ? "没有捕获 API 原始请求" : "没有收到可用的 API 原始返回", view.legacy ? "旧版只保存了宿主快照，不能当作 API 原文。" : call?.error || view.error || (call ? `捕获状态：${statusNames[call.capture_status] || call.capture_status || "未知"}。不使用中间参数代替原文。` : "本次没有记录到模型 HTTP 请求；请查看接入结果或捕获状态。")));

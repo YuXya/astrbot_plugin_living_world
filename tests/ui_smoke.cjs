@@ -63,7 +63,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       ];
       steps.forEach(([task, kind, request, response, status], index) => window.fixture.debug_records.push({ id: `chat-step-${index}`, turn_id: "round-1", parent_id: index ? "chat-step-0" : "", task, category: task, module: "reply", scope, kind, request, response, status, created_at: 1800000000 + index }));
       window.fixture.debug_records.find((record) => record.task === "reply.model").request.arguments.temperature = 0.7;
-      const firstRequest = JSON.stringify({ model: "deepseek-chat", messages: [{ role: "system", content: "小夏喜欢天文和散步。" }, { role: "user", content: "帮我查一下数学资料" }], tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }], temperature: 0.7 }, null, 2);
+      const firstRequest = JSON.stringify({ model: "deepseek-chat", messages: [{ role: "system", content: "小夏喜欢天文和散步。\n今天在教室复习函数。\r\n课后去公园散步。" }, { role: "user", content: "帮我查一下数学资料" }], tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }], temperature: 0.7, extension_field: { path: "C:\\notes\\new.json", literal: "\\n", long_text: "连续的长文本".repeat(120), text: "<img src=x onerror=window.debugXss=true>" } });
       const firstResponse = JSON.stringify({ id: "chatcmpl-first", choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "lookup-1", type: "function", function: { name: "lookup", arguments: '{"query":"数学资料"}' } }] } }], usage: { prompt_tokens: 120, completion_tokens: 18 }, extension_field: "不得丢弃这个未知字段" }, null, 2);
       const secondRequest = JSON.stringify({ model: "deepseek-chat", messages: [{ role: "tool", tool_call_id: "lookup-1", content: "数学资料搜索结果" }] });
       const secondResponse = JSON.stringify({ id: "chatcmpl-second", choices: [{ message: { role: "assistant", content: "找到一份数学笔记", reasoning_content: "这份笔记与本次学习活动有关。" } }], usage: { prompt_tokens: 160, completion_tokens: 22 } });
@@ -96,6 +96,38 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     });
     await page.goto("http://living-world.test/");
     await page.getByText("已连接 AstrBot", { exact: true }).waitFor();
+    const bodyCases = [
+      { raw: '{"2":2,"1":1,"same":900719925474099312345,"same":1.2300e+04,"negative":-0}', expected: '{\n  "2": 2,\n  "1": 1,\n  "same": 900719925474099312345,\n  "same": 1.2300e+04,\n  "negative": -0\n}' },
+      { raw: '[{},[],[1,2],true,null,""]', expected: '[\n  {},\n  [],\n  [\n    1,\n    2\n  ],\n  true,\n  null,\n  ""\n]' },
+      { raw: String.raw`"第一行\n第二行\r\n第三行\r第四行\u000a第五行\u000D\u000A第六行"`, expected: '"第一行\n第二行\n第三行\n第四行\n第五行\n第六行"' },
+      { raw: String.raw`"C:\\notes\\new.json"`, expected: String.raw`"C:\\notes\\new.json"` },
+      { raw: String.raw`"字面量：\\n，Unicode 字面量：\\u000a，引号：\"，制表符：\t"`, expected: String.raw`"字面量：\\n，Unicode 字面量：\\u000a，引号：\"，制表符：\t"` },
+      { raw: String.raw`"\\\n尾行"`, expected: '"\\\\\n尾行"' },
+      { raw: '{"unfinished":"line\\n', expected: '{"unfinished":"line\\n' },
+      { raw: 'HTTP 502\nUpstream unavailable <html>\\n', expected: 'HTTP 502\nUpstream unavailable <html>\\n' },
+      { raw: '', expected: '' },
+      { type: "sse", raw: ': heartbeat\r\nid: 7\r\nevent: delta\r\ndata: {"text":"第一行\\n第二行","n":900719925474099312345}\r\n\r\ndata: [DONE]\r\n\r\n', expected: ': heartbeat\r\nid: 7\r\nevent: delta\r\ndata: {\r\ndata:   "text": "第一行\r\ndata:   第二行",\r\ndata:   "n": 900719925474099312345\r\ndata: }\r\n\r\ndata: [DONE]\r\n\r\n' },
+      { type: "sse", raw: 'event: delta\ndata: {"text":\ndata: "多行事件"}\n\n', expected: 'event: delta\ndata: {\ndata:   "text": "多行事件"\ndata: }\n\n' },
+      { type: "sse", raw: 'data: {"text":"未结束事件"}\n', expected: 'data: {"text":"未结束事件"}\n' },
+      { type: "sse", raw: 'data: {"text":"broken\n\ndata: plain error\n\n', expected: 'data: {"text":"broken\n\ndata: plain error\n\n' },
+      { type: "sse", raw: 'retry: 1000\rdata:{"ok":true}\r\rdata: [DONE]\r\r', expected: 'retry: 1000\rdata: {\rdata:   "ok": true\rdata: }\r\rdata: [DONE]\r\r' },
+    ];
+    await page.evaluate((cases) => {
+      window.savedFormattingViews = window.fixture.debug_views;
+      window.fixture.debug_views = cases.map(({ raw, type = "json" }, index) => ({ id: `format-${index}`, task: "debug.test", scope: "global", status: "success", sources: [], calls: [{ id: `format-call-${index}`, request_body: "{}", response_body: raw, response_type: type, status: "success" }] }));
+      location.hash = "debug";
+    }, bodyCases);
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    for (const [index, { raw, type = "json", expected }] of bodyCases.entries()) {
+      const entry = page.locator(`.debug-round[data-turn="format-${index}"]`);
+      if (await entry.getAttribute("open") === null) await entry.locator(":scope > summary").click();
+      await entry.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
+      assert.equal(await entry.locator(".debug-raw").textContent(), expected, `Readable ${type} preserves content and safely handles escapes`);
+      await entry.getByRole("button", { name: "原文", exact: true }).click();
+      assert.equal(await entry.locator(".debug-raw").textContent(), raw, "Original view remains byte-for-byte text");
+    }
+    await page.evaluate(() => { window.fixture.debug_views = window.savedFormattingViews; delete window.savedFormattingViews; location.hash = "overview"; });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
     assert.equal(await page.evaluate(() => window.calls.filter((call) => call.method === "POST").length), 0, "Opening must be read-only");
     for (const label of ["心情", "精力", "地点", "睡眠", "天气"]) await page.getByText(label, { exact: true }).first().waitFor();
     await page.getByRole("heading", { name: "今日时间线", exact: true }).waitFor();
@@ -103,6 +135,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.ok(await page.locator('a[href="#whitelist"]').count() >= 2);
     if (process.env.LIVING_WORLD_UI_SCREENSHOT) await page.screenshot({ path: process.env.LIVING_WORLD_UI_SCREENSHOT, fullPage: true });
     await page.locator('a[data-view="whitelist"]').click();
+    await page.locator('.whitelist-entry').first().waitFor();
     assert.equal(await page.locator('.whitelist-entry').count(), 2);
     await page.getByText("已找到历史：2 条", { exact: true }).waitFor();
     await page.getByText("首次对话／暂无历史", { exact: true }).waitFor();
@@ -192,6 +225,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await page.getByText("只能合并同一场合的记忆，避免把私人内容带到其他场合。", { exact: true }).waitFor();
     assert.equal(await page.evaluate(() => window.calls.some((call) => call.body?.action === "merge_memories")), false);
     await page.locator('a[data-view="sources"]').click();
+    await page.locator('a[data-view="sources"][aria-current="page"]').waitFor();
     assert.equal(await page.locator('[name="weather.url"],[name="search.tool_name"],[name="search.query_argument"],[name="bilibili.plugin_name"]').count(), 0);
     assert.equal(await page.locator('.source-entry').count(), 8);
     await page.getByRole("button", { name: "测试天气连接", exact: true }).click();
@@ -211,12 +245,34 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await page.getByText("测试来源暂时不可用", { exact: true }).waitFor();
     assert.equal(await page.getByRole("button", { name: "观看指定视频并保存", exact: true }).isEnabled(), true);
     await page.locator('a[data-view="debug"]').click();
+    await page.locator('a[data-view="debug"][aria-current="page"]').waitFor();
     const round = page.locator('.debug-round[data-turn="round-1"]');
     assert.equal(await page.locator('.debug-round').count(), 4);
     assert.equal(await round.getAttribute("open"), "");
     assert.equal(await round.getByRole("tab").count(), 4);
     assert.ok((await round.innerText()).includes("Living World 今日日程 · 本次私聊"));
     assert.ok((await round.innerText()).includes("插件实际加入的完整文本"));
+    const sourceCards = round.locator(".debug-sources > details.debug-source");
+    assert.equal(await sourceCards.count(), 3);
+    assert.equal(await sourceCards.evaluateAll((cards) => cards.every((card) => card.open)), true, "Sources start expanded");
+    const assertSingleColumnSources = async () => {
+      const boxes = await sourceCards.evaluateAll((cards) => cards.map((card) => { const box = card.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, bottom: box.bottom }; }));
+      for (let index = 1; index < boxes.length; index++) {
+        assert.ok(Math.abs(boxes[index].x - boxes[0].x) < 1 && Math.abs(boxes[index].width - boxes[0].width) < 1, "Every source occupies the same full-width column");
+        assert.ok(boxes[index].y >= boxes[index - 1].bottom, "Sources stack vertically");
+      }
+    };
+    await assertSingleColumnSources();
+    await sourceCards.first().locator("summary").click();
+    assert.equal(await sourceCards.first().getAttribute("open"), null);
+    await sourceCards.first().getByText("当前日程", { exact: true }).waitFor();
+    await sourceCards.first().getByText("来源：Living World 今日日程 · 本次私聊 · 放入：本轮末尾", { exact: true }).waitFor();
+    assert.equal(await sourceCards.first().locator(".debug-source-content").isVisible(), false);
+    assert.equal(await sourceCards.nth(1).getAttribute("open"), "", "Collapsing one source leaves the next expanded");
+    await sourceCards.first().locator("summary").focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await sourceCards.first().getAttribute("open"), "", "Native source disclosures support keyboard operation");
+    await sourceCards.first().locator("summary").click();
     assert.equal(await page.evaluate(() => window.debugXss), undefined);
     assert.equal(await round.locator("img").count(), 0);
     assert.ok(!(await round.innerText()).includes("个步骤"));
@@ -229,15 +285,32 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       return { text: Buffer.concat(chunks).toString("utf8"), filename: download.suggestedFilename() };
     };
     await round.getByRole("tab", { name: "② API 原始请求", exact: true }).click();
+    assert.equal(await round.getByRole("button", { name: "格式化显示", exact: true }).getAttribute("aria-pressed"), "true");
+    const formattedRequest = await round.locator(".debug-raw").textContent();
+    assert.ok(formattedRequest.startsWith('{\n  "model": "deepseek-chat",'));
+    assert.match(formattedRequest, /小夏喜欢天文和散步。\n\s+今天在教室复习函数。\n\s+课后去公园散步。/);
+    assert.ok(formattedRequest.includes('"path": "C:\\\\notes\\\\new.json"'));
+    assert.ok(formattedRequest.includes('"literal": "\\\\n"'));
+    assert.equal(await round.locator("img").count(), 0, "Formatted bodies render untrusted markup as text");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, "Long formatted JSON wraps on desktop");
+    if (process.env.LIVING_WORLD_RAW_DEBUG_SCREENSHOT) await round.screenshot({ path: process.env.LIVING_WORLD_RAW_DEBUG_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+    // Formatting is display-only, including while downloading or copying.
+    const formattedDownload = await downloadedText(() => round.getByRole("button", { name: "下载请求原文", exact: true }).click());
+    assert.equal(formattedDownload.text, await page.evaluate(() => window.rawFixture.firstRequest));
+    await round.getByRole("button", { name: "原文", exact: true }).click();
     assert.equal(await round.locator(".debug-raw").textContent(), await page.evaluate(() => window.rawFixture.firstRequest));
     const firstDownload = await downloadedText(() => round.getByRole("button", { name: "下载请求原文", exact: true }).click());
     assert.equal(firstDownload.text, await page.evaluate(() => window.rawFixture.firstRequest));
     assert.ok(firstDownload.filename.endsWith("-request.json"));
+    await round.getByRole("button", { name: "格式化显示", exact: true }).click();
     await round.getByRole("button", { name: "复制请求原文", exact: true }).click();
     await page.locator("#editor[open]").waitFor();
     assert.equal(await page.locator('#editor [name="copy"]').inputValue(), firstDownload.text);
     await page.locator("#editor-cancel").click();
+    await round.getByRole("button", { name: "原文", exact: true }).click();
     await round.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
+    assert.equal(await round.getByRole("button", { name: "格式化显示", exact: true }).getAttribute("aria-pressed"), "true", "Request and response display preferences are independent");
+    await round.getByRole("button", { name: "原文", exact: true }).click();
     assert.equal(await round.locator(".debug-raw").textContent(), await page.evaluate(() => window.rawFixture.firstResponse));
     const responseDownload = await downloadedText(() => round.getByRole("button", { name: "下载返回原文", exact: true }).click());
     assert.equal(responseDownload.text, await page.evaluate(() => window.rawFixture.firstResponse));
@@ -254,13 +327,21 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await round.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
     assert.equal(await round.locator(".debug-raw").textContent(), await page.evaluate(() => window.rawFixture.secondResponse));
     await round.getByRole("tab", { name: "① 上下文与信息来源", exact: true }).click();
-    if (process.env.LIVING_WORLD_DEBUG_SCREENSHOT) await page.screenshot({ path: process.env.LIVING_WORLD_DEBUG_SCREENSHOT, fullPage: true });
+    assert.equal(await sourceCards.first().getAttribute("open"), null, "Source collapse state survives tab and request changes");
+    await round.locator('[name="debug_call"]').selectOption("0");
+    assert.equal(await sourceCards.first().getAttribute("open"), null, "Changing requests within the source view retains disclosure state");
+    if (process.env.LIVING_WORLD_DEBUG_SCREENSHOT) await round.screenshot({ path: process.env.LIVING_WORLD_DEBUG_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
     const stream = page.locator('.debug-round[data-turn="stream-1"]');
     await stream.locator(':scope > summary').click();
+    await stream.getByRole("heading", { name: "没有可用的信息来源清单", exact: true }).waitFor();
     await stream.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
+    assert.ok((await stream.locator(".debug-raw").textContent()).includes('data: {\ndata:   "choices": ['));
+    assert.ok((await stream.locator(".debug-raw").textContent()).endsWith("data: [DONE]\n\n"));
     const streamDownload = await downloadedText(() => stream.getByRole("button", { name: "下载返回原文", exact: true }).click());
     assert.equal(streamDownload.text, await page.evaluate(() => window.rawFixture.sse));
     assert.ok(streamDownload.filename.endsWith(".sse"));
+    await stream.getByRole("button", { name: "原文", exact: true }).click();
+    assert.equal(await stream.locator(".debug-raw").textContent(), streamDownload.text);
     await stream.getByRole("tab", { name: "④ 回复阅读版", exact: true }).click();
     await stream.getByText("晚风很舒服", { exact: true }).waitFor();
     assert.ok((await stream.innerText()).includes("合并后的阅读内容"));
@@ -346,8 +427,10 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await contractChat.getByText("实际发送的契约正文", { exact: true }).waitFor();
     await contractChat.getByText("fixture-image.png", { exact: true }).waitFor();
     await contractChat.getByRole("tab", { name: "② API 原始请求", exact: true }).click();
+    await contractChat.getByRole("button", { name: "原文", exact: true }).click();
     assert.equal(await contractChat.locator(".debug-raw").textContent(), backendContract.views[0].calls[0].request_body);
     await contractChat.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
+    await contractChat.getByRole("button", { name: "原文", exact: true }).click();
     assert.equal(await contractChat.locator(".debug-raw").textContent(), backendContract.views[0].calls[0].response_body);
     await contractChat.getByRole("tab", { name: "④ 回复阅读版", exact: true }).click();
     if (process.env.LIVING_WORLD_BACKEND_DEBUG_SCREENSHOT) await page.screenshot({ path: process.env.LIVING_WORLD_BACKEND_DEBUG_SCREENSHOT, fullPage: true });
@@ -403,14 +486,20 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
         const mobileRound = page.locator('.debug-round[data-turn="round-1"]');
         for (const label of ["② API 原始请求", "③ API 原始返回", "④ 回复阅读版", "① 上下文与信息来源"]) {
           await mobileRound.getByRole("tab", { name: label, exact: true }).click();
+          if (label.startsWith("②") || label.startsWith("③")) {
+            await mobileRound.getByRole("button", { name: "格式化显示", exact: true }).click();
+            assert.equal(await mobileRound.locator(".debug-raw").evaluate((node) => node.scrollWidth <= node.clientWidth + 1), true, "Formatted bodies wrap inside the mobile reader");
+            if (label.startsWith("②") && process.env.LIVING_WORLD_RAW_DEBUG_MOBILE_SCREENSHOT) await mobileRound.screenshot({ path: process.env.LIVING_WORLD_RAW_DEBUG_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+          }
           assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, `No mobile tab overflow: ${label}`);
         }
-        if (process.env.LIVING_WORLD_DEBUG_MOBILE_SCREENSHOT) await page.screenshot({ path: process.env.LIVING_WORLD_DEBUG_MOBILE_SCREENSHOT, fullPage: true });
+        await assertSingleColumnSources();
+        if (process.env.LIVING_WORLD_DEBUG_MOBILE_SCREENSHOT) await mobileRound.screenshot({ path: process.env.LIVING_WORLD_DEBUG_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
       }
     }
     await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; location.hash = "overview"; });
     await page.locator('a[data-view="overview"][aria-current="page"]').waitFor();
     assert.deepEqual(errors, [], "No browser runtime errors");
-    process.stdout.write("UI smoke passed: state home, schedule quotas/archive/editor, whitelist UMO, fixed sources, independent digests, four debug views, exact JSON/SSE body downloads, paired calls, old snapshot labels, test/template separation, XSS, memory scopes, error feedback, import guard, responsive layout.\n");
+    process.stdout.write("UI smoke passed: state home, schedule quotas/archive/editor, whitelist UMO, fixed sources, independent digests, four debug views, single-column source disclosures, 14 JSON/SSE formatting cases, original-view toggle, exact JSON/SSE body downloads, paired calls, old snapshot labels, test/template separation, XSS, memory scopes, error feedback, import guard, responsive layout.\n");
   } finally { await browser.close(); }
 })().catch((error) => { process.stderr.write(`${error.stack}\n`); process.exitCode = 1; });
