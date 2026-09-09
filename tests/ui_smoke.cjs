@@ -90,6 +90,15 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
             : structuredClone(window.fixture.session_status.find((row) => row.umo === body.scope));
           if (body.action === "debug_build") return { request: structuredClone(window.fixture.debug_records[0].request) };
           if (body.action === "debug_test") return { status: "success", text: "测试回复", test_only: true, notice: "No business side effects" };
+          if (body.action === "regenerate_day") {
+            const old = window.fixture.life_days[0];
+            const previous = window.fixture.activities.filter((row) => row.date === body.date);
+            window.fixture.life_day_history = [{ ...structuredClone(old), id: "previous-day", archived_at: new Date().toISOString(), activities: structuredClone(previous) }];
+            const replacement = previous.map((row) => ({ ...row, id: `regenerated-${row.id}`, title: `重生成：${row.title}` }));
+            window.fixture.activities = [...window.fixture.activities.filter((row) => row.date !== body.date), ...replacement];
+            window.fixture.life_days[0] = { ...old, adopted_activities: replacement, raw_json: JSON.stringify({ activities: replacement }) };
+            return replacement;
+          }
           return { status: "success", action: body.action };
         },
       };
@@ -97,20 +106,20 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await page.goto("http://living-world.test/");
     await page.getByText("已连接 AstrBot", { exact: true }).waitFor();
     const bodyCases = [
-      { raw: '{"2":2,"1":1,"same":900719925474099312345,"same":1.2300e+04,"negative":-0}', expected: '{\n  "2": 2,\n  "1": 1,\n  "same": 900719925474099312345,\n  "same": 1.2300e+04,\n  "negative": -0\n}' },
-      { raw: '[{},[],[1,2],true,null,""]', expected: '[\n  {},\n  [],\n  [\n    1,\n    2\n  ],\n  true,\n  null,\n  ""\n]' },
+      { folds: 1, raw: '{"2":2,"1":1,"same":900719925474099312345,"same":1.2300e+04,"negative":-0}', expected: '{\n  "2": 2,\n  "1": 1,\n  "same": 900719925474099312345,\n  "same": 1.2300e+04,\n  "negative": -0\n}' },
+      { folds: 2, raw: '[{},[],[1,2],true,null,""]', expected: '[\n  {},\n  [],\n  [\n    1,\n    2\n  ],\n  true,\n  null,\n  ""\n]' },
       { raw: String.raw`"第一行\n第二行\r\n第三行\r第四行\u000a第五行\u000D\u000A第六行"`, expected: '"第一行\n第二行\n第三行\n第四行\n第五行\n第六行"' },
       { raw: String.raw`"C:\\notes\\new.json"`, expected: String.raw`"C:\\notes\\new.json"` },
-      { raw: String.raw`"字面量：\\n，Unicode 字面量：\\u000a，引号：\"，制表符：\t"`, expected: String.raw`"字面量：\\n，Unicode 字面量：\\u000a，引号：\"，制表符：\t"` },
+      { raw: String.raw`"字面量：\\n，Unicode 字面量：\\u000a，引号：\"，括号：{} []，制表符：\t"`, expected: String.raw`"字面量：\\n，Unicode 字面量：\\u000a，引号：\"，括号：{} []，制表符：\t"` },
       { raw: String.raw`"\\\n尾行"`, expected: '"\\\\\n尾行"' },
       { raw: '{"unfinished":"line\\n', expected: '{"unfinished":"line\\n' },
       { raw: 'HTTP 502\nUpstream unavailable <html>\\n', expected: 'HTTP 502\nUpstream unavailable <html>\\n' },
       { raw: '', expected: '' },
-      { type: "sse", raw: ': heartbeat\r\nid: 7\r\nevent: delta\r\ndata: {"text":"第一行\\n第二行","n":900719925474099312345}\r\n\r\ndata: [DONE]\r\n\r\n', expected: ': heartbeat\r\nid: 7\r\nevent: delta\r\ndata: {\r\ndata:   "text": "第一行\r\ndata:   第二行",\r\ndata:   "n": 900719925474099312345\r\ndata: }\r\n\r\ndata: [DONE]\r\n\r\n' },
-      { type: "sse", raw: 'event: delta\ndata: {"text":\ndata: "多行事件"}\n\n', expected: 'event: delta\ndata: {\ndata:   "text": "多行事件"\ndata: }\n\n' },
+      { folds: 1, type: "sse", raw: ': heartbeat\r\nid: 7\r\nevent: delta\r\ndata: {"text":"第一行\\n第二行","n":900719925474099312345}\r\n\r\ndata: [DONE]\r\n\r\n', expected: ': heartbeat\r\nid: 7\r\nevent: delta\r\ndata: {\r\ndata:   "text": "第一行\r\ndata:   第二行",\r\ndata:   "n": 900719925474099312345\r\ndata: }\r\n\r\ndata: [DONE]\r\n\r\n' },
+      { folds: 1, type: "sse", raw: 'event: delta\ndata: {"text":\ndata: "多行事件"}\n\n', expected: 'event: delta\ndata: {\ndata:   "text": "多行事件"\ndata: }\n\n' },
       { type: "sse", raw: 'data: {"text":"未结束事件"}\n', expected: 'data: {"text":"未结束事件"}\n' },
       { type: "sse", raw: 'data: {"text":"broken\n\ndata: plain error\n\n', expected: 'data: {"text":"broken\n\ndata: plain error\n\n' },
-      { type: "sse", raw: 'retry: 1000\rdata:{"ok":true}\r\rdata: [DONE]\r\r', expected: 'retry: 1000\rdata: {\rdata:   "ok": true\rdata: }\r\rdata: [DONE]\r\r' },
+      { folds: 1, type: "sse", raw: 'retry: 1000\rdata:{"ok":true}\r\rdata: [DONE]\r\r', expected: 'retry: 1000\rdata: {\rdata:   "ok": true\rdata: }\r\rdata: [DONE]\r\r' },
     ];
     await page.evaluate((cases) => {
       window.savedFormattingViews = window.fixture.debug_views;
@@ -118,14 +127,35 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       location.hash = "debug";
     }, bodyCases);
     await page.getByRole("button", { name: "刷新数据", exact: true }).click();
-    for (const [index, { raw, type = "json", expected }] of bodyCases.entries()) {
+    const rootFolds = (entry) => entry.locator(".debug-json-document > .debug-json-node");
+    const foldToggle = (node) => node.locator(":scope > .debug-json-toggle");
+    for (const [index, { raw, type = "json", expected, folds = 0 }] of bodyCases.entries()) {
       const entry = page.locator(`.debug-round[data-turn="format-${index}"]`);
       if (await entry.getAttribute("open") === null) await entry.locator(":scope > summary").click();
       await entry.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
       assert.equal(await entry.locator(".debug-raw").textContent(), expected, `Readable ${type} preserves content and safely handles escapes`);
+      assert.equal(await entry.locator(".debug-json-toggle").count(), folds, "Only nonempty JSON containers fold; strings and incomplete events do not");
+      assert.equal(await entry.locator(".debug-fold-controls").isVisible(), folds > 0);
+      if (folds) {
+        assert.equal(await entry.locator('.debug-json-toggle[aria-expanded="true"]').count(), folds, "JSON containers start expanded");
+        await entry.getByRole("button", { name: "全部收起", exact: true }).click();
+        assert.equal(await entry.locator('.debug-json-toggle[aria-expanded="false"]').count(), folds);
+        if (type === "json") assert.equal(await entry.locator(".debug-raw").innerText(), raw.startsWith("[") ? "[…]" : "{…}");
+        if (index === 9) assert.equal(await entry.locator(".debug-raw").innerText(), ': heartbeat\r\nid: 7\r\nevent: delta\r\ndata: {…}\r\n\r\ndata: [DONE]\r\n\r\n', "SSE metadata and event boundaries survive folding");
+        await entry.getByRole("button", { name: "全部展开", exact: true }).click();
+        assert.equal(await entry.locator(".debug-raw").textContent(), expected, "Expanding all restores the complete formatted content");
+        await foldToggle(rootFolds(entry).first()).click();
+      }
       await entry.getByRole("button", { name: "原文", exact: true }).click();
       assert.equal(await entry.locator(".debug-raw").textContent(), raw, "Original view remains byte-for-byte text");
+      assert.equal(await entry.locator(".debug-fold-controls").isVisible(), false);
     }
+    const changedBody = page.locator('.debug-round[data-turn="format-0"]');
+    await changedBody.getByRole("button", { name: "格式化显示", exact: true }).click();
+    assert.equal(await foldToggle(rootFolds(changedBody).first()).getAttribute("aria-expanded"), "false", "Raw mode preserves folding state");
+    await page.evaluate(() => { window.fixture.debug_views[0].calls[0].response_body = '{"updated":{"value":2}}'; });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    assert.equal(await changedBody.locator('.debug-json-toggle[aria-expanded="true"]').count(), 2, "Changed body resets folding for the same call");
     await page.evaluate(() => { window.fixture.debug_views = window.savedFormattingViews; delete window.savedFormattingViews; location.hash = "overview"; });
     await page.getByRole("button", { name: "刷新数据", exact: true }).click();
     assert.equal(await page.evaluate(() => window.calls.filter((call) => call.method === "POST").length), 0, "Opening must be read-only");
@@ -197,8 +227,36 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.equal(await page.locator('[name="life.activity_count"]').getAttribute("max"), "48");
     await page.getByRole("button", { name: "保存日程生成参数", exact: true }).click();
     await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor();
-    assert.equal(await page.evaluate(() => window.calls.some((call) => call.body?.action === "plan_day")), false, "Saving parameters must not regenerate");
+    assert.equal(await page.evaluate(() => window.calls.some((call) => ["plan_day", "regenerate_day"].includes(call.body?.action))), false, "Saving parameters must not regenerate");
+    assert.equal(await page.getByRole("button", { name: "补生成缺失日程", exact: true }).count(), 0);
+    await page.locator('[name="life.activity_count"]').fill("11");
+    await page.getByRole("button", { name: "重新生成日程", exact: true }).click();
+    await page.getByText("请先保存日程生成参数，再重新生成日程。", { exact: true }).waitFor();
+    await page.locator('[name="life.activity_count"]').fill("10");
+    await page.getByRole("button", { name: "保存日程生成参数", exact: true }).click();
+    await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "重新生成日程", exact: true }).click();
+    await page.getByText("重新生成今天的日程", { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.calls.some((call) => call.body?.action === "regenerate_day")), false, "Opening confirmation does not call the model");
+    await page.locator("#editor-cancel").click();
+    await page.getByRole("button", { name: "重新生成日程", exact: true }).click();
+    await page.getByRole("button", { name: "调用模型并重新生成", exact: true }).click();
+    await page.locator("#editor").waitFor({ state: "hidden" });
+    const regeneration = await page.evaluate(() => window.calls.findLast((call) => call.body?.action === "regenerate_day").body);
+    assert.equal(regeneration.date, await page.getByLabel("日程日期").inputValue());
+    assert.equal(await page.locator(".schedule-history").count(), 1);
+    assert.equal(await page.locator(".schedule-history").getAttribute("open"), null);
+    await page.locator(".schedule-history > summary").click();
+    await page.getByText("替换前的活动与实际执行记录", { exact: true }).waitFor();
+    if (process.env.LIVING_WORLD_SCHEDULE_SCREENSHOT) await page.locator("#content").screenshot({ path: process.env.LIVING_WORLD_SCHEDULE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+    await page.evaluate(() => { window.fixture.day_regenerating = true; });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    assert.equal(await page.getByRole("button", { name: "重新生成日程", exact: true }).isDisabled(), true);
+    assert.equal(await page.getByRole("button", { name: "批量调整未来活动", exact: true }).isDisabled(), true);
+    await page.evaluate(() => { window.fixture.day_regenerating = false; });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
     await page.getByLabel("日程日期").fill(await page.evaluate(() => window.testTomorrow));
+    assert.equal(await page.getByRole("button", { name: "重新生成日程", exact: true }).isDisabled(), true);
     await page.getByRole("button", { name: "编辑", exact: true }).click();
     await page.locator('#editor [name="title"]').fill("数学课，今天复习函数");
     await page.locator("#editor-submit").click(); await page.locator("#editor").waitFor({ state: "hidden" });
@@ -294,6 +352,36 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.equal(await round.locator("img").count(), 0, "Formatted bodies render untrusted markup as text");
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, "Long formatted JSON wraps on desktop");
     if (process.env.LIVING_WORLD_RAW_DEBUG_SCREENSHOT) await round.screenshot({ path: process.env.LIVING_WORLD_RAW_DEBUG_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+    const requestRoot = rootFolds(round).first();
+    const messageArray = requestRoot.locator(":scope > .debug-json-children > .debug-json-node").first();
+    const messageObjects = messageArray.locator(":scope > .debug-json-children > .debug-json-node");
+    const firstMessage = messageObjects.first();
+    await foldToggle(firstMessage).click();
+    assert.equal(await firstMessage.locator(":scope > .debug-json-children").isVisible(), false);
+    assert.equal(await messageObjects.nth(1).locator(":scope > .debug-json-children").isVisible(), true, "Collapsing a message leaves its sibling visible");
+    await foldToggle(messageArray).click();
+    assert.ok((await round.locator(".debug-raw").innerText()).includes('"messages": […]'), "Collapsed arrays retain their field name");
+    await foldToggle(messageArray).focus(); await page.keyboard.press("Enter");
+    assert.equal(await foldToggle(messageArray).getAttribute("aria-expanded"), "true", "Keyboard expands the parent");
+    assert.equal(await foldToggle(firstMessage).getAttribute("aria-expanded"), "false", "Expanding the parent preserves its child's collapsed state");
+    await round.getByRole("tab", { name: "① 上下文与信息来源", exact: true }).click();
+    await round.getByRole("tab", { name: "② API 原始请求", exact: true }).click();
+    assert.equal(await foldToggle(firstMessage).getAttribute("aria-expanded"), "false", "Tab changes retain folding");
+    await round.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
+    assert.equal(await round.locator('.debug-json-toggle[aria-expanded="false"]').count(), 0, "Response folds are independent from request folds");
+    await foldToggle(rootFolds(round).first()).click();
+    await round.getByRole("tab", { name: "② API 原始请求", exact: true }).click();
+    await round.locator('[name="debug_call"]').selectOption("1");
+    assert.equal(await round.locator('.debug-json-toggle[aria-expanded="false"]').count(), 0, "Another HTTP call starts expanded");
+    await foldToggle(rootFolds(round).first()).click();
+    await round.locator('[name="debug_call"]').selectOption("0");
+    assert.equal(await foldToggle(requestRoot).getAttribute("aria-expanded"), "true");
+    assert.equal(await foldToggle(firstMessage).getAttribute("aria-expanded"), "false", "Returning to an HTTP call restores its own folds");
+    await round.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
+    assert.equal(await foldToggle(rootFolds(round).first()).getAttribute("aria-expanded"), "false", "Request navigation does not alter the response's folds");
+    await round.getByRole("button", { name: "全部展开", exact: true }).click();
+    await round.getByRole("tab", { name: "② API 原始请求", exact: true }).click();
+    if (process.env.LIVING_WORLD_JSON_FOLD_SCREENSHOT) await round.screenshot({ path: process.env.LIVING_WORLD_JSON_FOLD_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
     // Formatting is display-only, including while downloading or copying.
     const formattedDownload = await downloadedText(() => round.getByRole("button", { name: "下载请求原文", exact: true }).click());
     assert.equal(formattedDownload.text, await page.evaluate(() => window.rawFixture.firstRequest));
@@ -303,10 +391,15 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.equal(firstDownload.text, await page.evaluate(() => window.rawFixture.firstRequest));
     assert.ok(firstDownload.filename.endsWith("-request.json"));
     await round.getByRole("button", { name: "格式化显示", exact: true }).click();
+    assert.equal(await foldToggle(firstMessage).getAttribute("aria-expanded"), "false", "Switching through original mode retains nested folds");
+    await round.getByRole("button", { name: "全部收起", exact: true }).click();
+    assert.equal(await round.locator(".debug-raw").innerText(), "{…}");
     await round.getByRole("button", { name: "复制请求原文", exact: true }).click();
     await page.locator("#editor[open]").waitFor();
     assert.equal(await page.locator('#editor [name="copy"]').inputValue(), firstDownload.text);
     await page.locator("#editor-cancel").click();
+    await round.getByRole("button", { name: "全部展开", exact: true }).click();
+    assert.equal(await round.locator(".debug-raw").textContent(), formattedRequest);
     await round.getByRole("button", { name: "原文", exact: true }).click();
     await round.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
     assert.equal(await round.getByRole("button", { name: "格式化显示", exact: true }).getAttribute("aria-pressed"), "true", "Request and response display preferences are independent");
@@ -337,6 +430,11 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await stream.getByRole("tab", { name: "③ API 原始返回", exact: true }).click();
     assert.ok((await stream.locator(".debug-raw").textContent()).includes('data: {\ndata:   "choices": ['));
     assert.ok((await stream.locator(".debug-raw").textContent()).endsWith("data: [DONE]\n\n"));
+    assert.equal(await rootFolds(stream).count(), 2, "SSE event JSON roots remain separate");
+    await foldToggle(rootFolds(stream).first()).click();
+    assert.equal(await foldToggle(rootFolds(stream).nth(1)).getAttribute("aria-expanded"), "true", "Collapsing one event leaves the next expanded");
+    await stream.getByRole("button", { name: "全部收起", exact: true }).click();
+    assert.equal(await stream.locator(".debug-raw").innerText(), "data: {…}\n\ndata: {…}\n\ndata: [DONE]\n\n");
     const streamDownload = await downloadedText(() => stream.getByRole("button", { name: "下载返回原文", exact: true }).click());
     assert.equal(streamDownload.text, await page.evaluate(() => window.rawFixture.sse));
     assert.ok(streamDownload.filename.endsWith(".sse"));
@@ -482,14 +580,22 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       await page.evaluate((target) => { location.hash = target; }, view);
       await page.locator(`a[data-view="${view}"][aria-current="page"]`).waitFor();
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, `No mobile horizontal overflow: ${view}`);
+      if (view === "schedule" && process.env.LIVING_WORLD_SCHEDULE_MOBILE_SCREENSHOT) await page.locator("#content").screenshot({ path: process.env.LIVING_WORLD_SCHEDULE_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
       if (view === "debug") {
         const mobileRound = page.locator('.debug-round[data-turn="round-1"]');
         for (const label of ["② API 原始请求", "③ API 原始返回", "④ 回复阅读版", "① 上下文与信息来源"]) {
           await mobileRound.getByRole("tab", { name: label, exact: true }).click();
           if (label.startsWith("②") || label.startsWith("③")) {
             await mobileRound.getByRole("button", { name: "格式化显示", exact: true }).click();
+            await mobileRound.getByRole("button", { name: "全部展开", exact: true }).click();
             assert.equal(await mobileRound.locator(".debug-raw").evaluate((node) => node.scrollWidth <= node.clientWidth + 1), true, "Formatted bodies wrap inside the mobile reader");
             if (label.startsWith("②") && process.env.LIVING_WORLD_RAW_DEBUG_MOBILE_SCREENSHOT) await mobileRound.screenshot({ path: process.env.LIVING_WORLD_RAW_DEBUG_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+            if (label.startsWith("②")) {
+              await foldToggle(firstMessage).click();
+              assert.equal(await firstMessage.locator(":scope > .debug-json-children").isVisible(), false, "Mobile fold controls are clickable");
+              if (process.env.LIVING_WORLD_JSON_FOLD_MOBILE_SCREENSHOT) await mobileRound.screenshot({ path: process.env.LIVING_WORLD_JSON_FOLD_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+              await mobileRound.getByRole("button", { name: "全部展开", exact: true }).click();
+            }
           }
           assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, `No mobile tab overflow: ${label}`);
         }
@@ -500,6 +606,6 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; location.hash = "overview"; });
     await page.locator('a[data-view="overview"][aria-current="page"]').waitFor();
     assert.deepEqual(errors, [], "No browser runtime errors");
-    process.stdout.write("UI smoke passed: state home, schedule quotas/archive/editor, whitelist UMO, fixed sources, independent digests, four debug views, single-column source disclosures, 14 JSON/SSE formatting cases, original-view toggle, exact JSON/SSE body downloads, paired calls, old snapshot labels, test/template separation, XSS, memory scopes, error feedback, import guard, responsive layout.\n");
+    process.stdout.write("UI smoke passed: state home, schedule quotas/archive/editor, whitelist UMO, fixed sources, independent digests, four debug views, single-column source disclosures, 14 JSON/SSE formatting cases, nested JSON folding, per-call and direction fold state, changed-body reset, keyboard/mobile controls, original-view toggle, exact JSON/SSE body downloads, paired calls, old snapshot labels, test/template separation, XSS, memory scopes, error feedback, import guard, responsive layout.\n");
   } finally { await browser.close(); }
 })().catch((error) => { process.stderr.write(`${error.stack}\n`); process.exitCode = 1; });

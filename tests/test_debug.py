@@ -79,7 +79,9 @@ async def test_complete_records_full_request_response_and_separate_template(runt
     assert private_material not in json.dumps(runtime.debug.snapshot())
 
 
-async def test_retention_is_per_task_and_never_deletes_business_records(runtime):
+async def test_retention_is_per_task_and_never_deletes_business_records(runtime, monkeypatch):
+    # Equal clock ticks still retain the most recently inserted records.
+    monkeypatch.setattr("living_world.store.time.time", lambda: 1800000000.0)
     runtime.store.put("life_days", "today", {"raw_json": "formal", "id": "today"})
     runtime.store.put("actions", "sent", {"id": "sent", "status": "success"})
     for i in range(15):
@@ -189,6 +191,40 @@ async def test_plan_button_passes_actual_today_time(runtime):
     assert abs((captured[0] - now).total_seconds()) < 10
     with pytest.raises(ValueError):
         await runtime.action({"action": "plan_day", "date": "2000-01-01"})
+
+
+async def test_regenerate_action_records_versions_and_uses_frozen_public_template(runtime):
+    from test_life import NOW, plan_rows
+
+    runtime.life._now = lambda value=None: value or NOW
+    runtime.store.put(
+        "prompt_templates", "life.plan", {"template": "Use this saved public template."}
+    )
+
+    async def generate(request):
+        runtime.host.requests.append(request)
+        text = json.dumps({"activities": plan_rows()}, ensure_ascii=False)
+        return text, {}, {"completion_text": text}
+
+    runtime.host.generate_request = generate
+    date = str(NOW.date())
+    first = await runtime.action({"action": "regenerate_day", "date": date})
+    second = await runtime.action({"action": "regenerate_day", "date": date})
+    assert len(first) == len(second) == 10
+    assert runtime.host.requests[-1]["template"] == "Use this saved public template."
+    assert runtime.host.tools == runtime.host.sent == []
+    history = runtime.store.list("life_day_history")
+    assert len(history) == 1
+    assert history[0]["full_request"]["_debug_record_id"]
+    adopted = [item for view in runtime.debug.views() for item in view["adopted"]]
+    assert any(item["title"] == "历史日程采用结果" for item in adopted)
+    assert any(item["title"] == "正式日程采用结果" for item in adopted)
+    before = runtime.store.get("life_days", f"{date}:global")
+    with pytest.raises(ValueError):
+        await runtime.action({"action": "regenerate_day", "date": "2000-01-01"})
+    runtime.debug.clear()
+    assert runtime.store.list("life_day_history") == history
+    assert runtime.store.get("life_days", f"{date}:global") == before
 
 
 @pytest.mark.parametrize(

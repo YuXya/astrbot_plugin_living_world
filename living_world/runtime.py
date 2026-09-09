@@ -253,8 +253,12 @@ class Runtime:
             return "\n\n".join(f"【{key}】\n{text(value)}" for key, value in context.items())
         return text(context)
 
-    async def complete(self, task, module, default_template, context, scope="global"):
-        template = self.debug.template(task, default_template)
+    async def complete(
+        self, task, module, default_template, context, scope="global", *, frozen_template=False
+    ):
+        template = (
+            default_template if frozen_template else self.debug.template(task, default_template)
+        )
         return await self.generate(module, template, scope, task=task, context=context)
 
     async def generate(self, module, prompt, scope="global", *, task=None, context=None):
@@ -934,6 +938,8 @@ class Runtime:
             "state": self.life.state(),
             "activities": self.life.list_activities(),
             "life_days": self.store.list("life_days"),
+            "life_day_history": self.store.list("life_day_history"),
+            "day_regenerating": self.life.regenerating,
             "day_summary": self.life.day_summary() if hasattr(self.life, "day_summary") else {},
             "actions": self.store.list("actions")[:200],
             "daily_digest_runs": self.store.list("daily_digest_runs")[:100],
@@ -1010,6 +1016,10 @@ class Runtime:
             if data.get("date") and data["date"] != day.date().isoformat():
                 raise ValueError("正式日程只补生成今天；其他日期请在调试模块编辑测试请求")
             return await self.run("life", self.life.plan_day(now=day, scope=scope))
+        if action == "regenerate_day":
+            return await self.run(
+                "life", self.life.regenerate_day(day=data.get("date"), scope=scope)
+            )
         if action == "detail_activity":
             return await self.run("life", self.life.detail(data["id"]))
         if action == "update_activity":

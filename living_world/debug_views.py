@@ -14,7 +14,11 @@ def record_groups(records):
         key = row.get("turn_id") or root.get("turn_id") or root["id"]
         groups.setdefault(key, []).append(row)
     return {
-        key: sorted(rows, key=lambda row: row.get("created_at", 0)) for key, rows in groups.items()
+        key: sorted(
+            rows,
+            key=lambda row: (row.get("created_at", 0), row.get("parent_id") in by_id),
+        )
+        for key, rows in groups.items()
     }
 
 
@@ -149,7 +153,9 @@ def build_views(records, life_days=()):
             if day.get("full_request", {}).get("_debug_record_id") in view["record_ids"]:
                 view["adopted"].append(
                     {
-                        "title": "正式日程采用结果",
+                        "title": "历史日程采用结果"
+                        if day.get("archived_at")
+                        else "正式日程采用结果",
                         "status": day.get("status"),
                         "content": {"activities": day.get("adopted_activities", [])},
                         "error": day.get("error", ""),

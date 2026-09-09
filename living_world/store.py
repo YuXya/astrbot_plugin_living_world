@@ -57,9 +57,24 @@ class Store:
     def list(self, namespace):
         with self.lock:
             rows = self.db.execute(
-                "SELECT value FROM objects WHERE namespace=? ORDER BY updated DESC", (namespace,)
+                "SELECT value FROM objects WHERE namespace=? ORDER BY updated DESC,rowid DESC",
+                (namespace,),
             ).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def apply_batch(self, writes, deletes=()):
+        """Commit related writes and removals together, or leave every namespace unchanged."""
+        rows = [
+            (namespace, key, json.dumps(value, ensure_ascii=False, allow_nan=False), time.time())
+            for namespace, key, value in writes
+        ]
+        with self.lock, self.db:
+            self.db.executemany("DELETE FROM objects WHERE namespace=? AND key=?", deletes)
+            self.db.executemany(
+                "INSERT INTO objects VALUES (?,?,?,?) ON CONFLICT(namespace,key) "
+                "DO UPDATE SET value=excluded.value,updated=excluded.updated",
+                rows,
+            )
 
     def delete(self, namespace, key):
         with self.lock, self.db:

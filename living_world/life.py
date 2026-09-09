@@ -68,6 +68,7 @@ class LifeService:
         self._plan_lock = asyncio.Lock()
         self._detail_lock = asyncio.Lock()
         self._first_tick = True
+        self.regenerating = False
 
     def _now(self, now: datetime | None = None) -> datetime:
         tz = character_timezone(self.runtime.settings)
@@ -100,9 +101,13 @@ class LifeService:
             raise ValueError("日程数量或行动数量无效，每类行动数量不能超过活动数量")
         return result
 
-    async def _complete(self, task, template, context, scope="global"):
+    async def _complete(self, task, template, context, scope="global", *, frozen_template=False):
         complete = getattr(self.runtime, "complete", None)
         if complete:
+            if frozen_template:
+                return await complete(
+                    task, "life", template, context, scope=scope, frozen_template=True
+                )
             return await complete(task, "life", template, context, scope=scope)
         return await self.runtime.generate(
             "life", template + "\n资料：" + json.dumps(context, ensure_ascii=False), scope=scope
@@ -141,8 +146,9 @@ class LifeService:
         return copy.deepcopy(state)
 
     def list_activities(self) -> list[dict]:
+        retired = {row["id"] for row in self.runtime.store.list("life_retired_activities")}
         return sorted(
-            self.runtime.store.list("activities"),
+            (row for row in self.runtime.store.list("activities") if row["id"] not in retired),
             key=lambda a: (a.get("start", ""), a.get("id", "")),
         )
 
@@ -341,6 +347,8 @@ class LifeService:
         ):
             return []
         now = self._now(now)
+        if self.regenerating:
+            return self._day_activities(now.date())
         day, key = now.date(), f"{now.date()}:global"
         async with self._plan_lock:
             marker, existing = (
@@ -440,6 +448,133 @@ class LifeService:
                 self.runtime.store.put("life_days", key, marker)
                 raise
 
+    async def regenerate_day(self, day: str | None = None, scope: str = "global") -> list[dict]:
+        """Replace today's plan atomically after generation, retaining the retired version."""
+        if self.regenerating:
+            raise ValueError("正在重新生成日程，请等待本次完成")
+        now = self._now()
+        if day and day != str(now.date()):
+            raise ValueError("只能重新生成今天的日程；其他日期请使用调试试跑")
+        if scope != "global":
+            raise ValueError("正式日程只能在全局场合重新生成")
+        self.regenerating = True
+        try:
+            parameters = copy.deepcopy(self.parameters())
+            template = PLAN_TEMPLATE
+            debug = getattr(self.runtime, "debug", None)
+            if debug:
+                template = debug.template("life.plan", template)
+            binding = self.runtime.settings.get("persona_id")
+            timezone_name = self.runtime.settings.get("character", {}).get("timezone")
+            # Tick already takes plan/detail locks in this order. Wait for its work to finish.
+            async with self._tick_lock, self._plan_lock, self._detail_lock:
+                self._check_regeneration(now, binding, timezone_name)
+                if not await scope_allowed(self.runtime, "global"):
+                    raise ValueError("当前人格未接入，旧日程保持不变")
+                request = self.plan_request(self._now())
+                request["template"] = template
+                request["context"]["parameters"] = parameters
+                raw_json = await self._complete(
+                    "life.plan", template, request["context"], frozen_template=True
+                )
+                data = parse_json(raw_json)
+                raw = data.get("activities") if isinstance(data, dict) else None
+                if not isinstance(raw, list):
+                    raise TypeError("日程响应必须是包含 activities 数组的 JSON 对象")
+                version = uuid.uuid4().hex
+                rows = [
+                    self._make_activity(
+                        item,
+                        now.date(),
+                        "global",
+                        uuid.uuid5(uuid.NAMESPACE_URL, f"living-world:plan:{version}:{i}").hex,
+                        modern=True,
+                    )
+                    for i, item in enumerate(raw)
+                ]
+                self._validate_day(rows, parameters)
+                if not await scope_allowed(self.runtime, "global"):
+                    raise ValueError("人格接入已变化，旧日程保持不变")
+                adopted_at = self._check_regeneration(now, binding, timezone_name)
+                for row in rows:
+                    row["plan_version"] = version
+                    for action in row["actions"].values():
+                        if (
+                            action["enabled"]
+                            and self._parse_time(action["at"], now.date()) <= adopted_at
+                        ):
+                            action["execution"] = {
+                                "status": "skipped",
+                                "reason": "overdue_at_regeneration",
+                                "finished_at": adopted_at.isoformat(),
+                            }
+                marker = {
+                    "date": str(now.date()),
+                    "scope": "global",
+                    "schema_version": 2,
+                    "status": "completed",
+                    "version_id": version,
+                    "origin": "manual_regeneration",
+                    "parameters": parameters,
+                    "request": request,
+                    "raw_json": raw_json,
+                    "full_request": copy.deepcopy(
+                        getattr(self.runtime, "last_requests", {}).get(
+                            ("life.plan", "global"), request
+                        )
+                    ),
+                    "created_at": now.isoformat(),
+                    "adopted_at": adopted_at.isoformat(),
+                    "adopted_activities": copy.deepcopy(rows),
+                }
+                self._replace_day(marker, rows)
+                return rows
+        finally:
+            self.regenerating = False
+
+    def _check_regeneration(self, started, binding, timezone_name):
+        if not self.runtime.enabled("life") or getattr(self.runtime, "stopped", False):
+            raise ValueError("日程生活已关闭，旧日程保持不变")
+        if (
+            self.runtime.settings.get("persona_id") != binding
+            or self.runtime.settings.get("character", {}).get("timezone") != timezone_name
+        ):
+            raise ValueError("人格或时区设置已变化，旧日程保持不变")
+        current = self._now()
+        if current.date() != started.date():
+            raise ValueError("生成期间日期已变化，旧日程保持不变，请重新生成今天的日程")
+        return current
+
+    def _replace_day(self, marker, rows):
+        day, store = marker["date"], self.runtime.store
+        all_rows = self.list_activities()
+        retired = {row["id"]: row for row in all_rows if row.get("date") == day}
+        while True:
+            children = {row["id"]: row for row in all_rows if row.get("parent_id") in retired}
+            if children.keys() <= retired.keys():
+                break
+            retired.update(children)
+        old = store.get("life_days", f"{day}:global", {}) or {}
+        writes = [("activities", row["id"], row) for row in rows]
+        if retired or old.get("status") in {"completed", "prepared"}:
+            history_id = old.get("version_id") or uuid.uuid4().hex
+            history = {
+                **old,
+                "id": history_id,
+                "date": day,
+                "scope": "global",
+                "archived_at": marker["adopted_at"],
+                "activities": list(retired.values()),
+            }
+            writes.append(("life_day_history", history_id, history))
+        writes.append(("life_days", f"{day}:global", marker))
+        # Backup merges can reintroduce old rows; retirement also survives those restores.
+        writes.extend(
+            ("life_retired_activities", key, {"id": key, "replaced_by": marker["version_id"]})
+            for key in retired
+        )
+        store.apply_batch(writes, [("activities", key) for key in retired])
+
     def _editable(self, activity, now):
         return (
             activity.get("status") == "planned"
@@ -448,6 +583,8 @@ class LifeService:
 
     def update_activities(self, updates: list[dict]) -> list[dict]:
         """Validate a complete future-only batch before writing any changes."""
+        if self.regenerating:
+            raise ValueError("正在重新生成日程，暂时不能编辑活动")
         if not isinstance(updates, list) or not updates:
             raise ValueError("需要待调整的活动列表")
         now, proposed, days = self._now(), {}, set()
@@ -543,7 +680,11 @@ class LifeService:
 
     async def revise(self, scope: str = "global", reason: str = "") -> dict:
         result = {"updated": [], "added": [], "cancelled": []}
-        if not self.runtime.enabled("life") or not await scope_allowed(self.runtime, scope):
+        if (
+            self.regenerating
+            or not self.runtime.enabled("life")
+            or not await scope_allowed(self.runtime, scope)
+        ):
             return result
         async with self._plan_lock:
             now = self._now()
@@ -567,7 +708,11 @@ class LifeService:
                 ).get("parameters"),
             }
             data = parse_json(await self._complete("life.revise", REVISE_TEMPLATE, context, scope))
-            if not self.runtime.enabled("life") or not await scope_allowed(self.runtime, scope):
+            if (
+                self.regenerating
+                or not self.runtime.enabled("life")
+                or not await scope_allowed(self.runtime, scope)
+            ):
                 return result
             if not isinstance(data, dict) or not isinstance(data.get("updates", []), list):
                 raise TypeError("日程调整响应必须包含 updates 数组")
@@ -613,6 +758,8 @@ class LifeService:
                 self._finish(child, "skipped", "parent_plan_changed", now)
 
     async def detail(self, activity_id: str) -> dict:
+        if self.regenerating:
+            raise ValueError("正在重新生成日程，暂时不能细化活动")
         return await self._detail(activity_id, self._now())
 
     async def _detail(self, activity_id, now):
@@ -956,7 +1103,8 @@ class LifeService:
         current_time, day = elapsed_clock(now), now.date()
         marker = self.runtime.store.get("life_days", f"{now.date()}:global", {}) or {}
         if (
-            marker.get("schema_version") != 2
+            self.regenerating
+            or marker.get("schema_version") != 2
             or marker.get("status") != "completed"
             or not self.runtime.enabled("memory")
         ):
@@ -980,6 +1128,8 @@ class LifeService:
             ):
                 return
             key = f"{now.date()}:{scope}"
+            if marker.get("version_id"):
+                key += f":{marker['version_id']}"
             record = self.runtime.store.get("life_scoped_revisions", key, {}) or {}
             if (
                 record.get("status") == "completed"
@@ -1032,7 +1182,7 @@ class LifeService:
             self.runtime.store.put("life_scoped_revisions", key, record)
 
     async def tick(self, now: datetime | None = None) -> None:
-        if not self.runtime.enabled("life") or self._tick_lock.locked():
+        if self.regenerating or not self.runtime.enabled("life") or self._tick_lock.locked():
             return
         async with self._tick_lock:
             now, restart = self._now(now), self._first_tick

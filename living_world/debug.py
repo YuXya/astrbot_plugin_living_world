@@ -231,7 +231,8 @@ class DebugService:
 
     def views(self):
         return build_views(
-            self.runtime.store.list("debug_records"), self.runtime.store.list("life_days")
+            self.runtime.store.list("debug_records"),
+            self.runtime.store.list("life_days") + self.runtime.store.list("life_day_history"),
         )
 
     def export_body(self, call_id, side):

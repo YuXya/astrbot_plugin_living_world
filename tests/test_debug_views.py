@@ -10,7 +10,10 @@ from living_world.debug_views import build_views
 runtime = runtime_fixture
 
 
-async def test_background_retention_keeps_complete_roots_and_clear_removes_children(runtime):
+async def test_background_retention_keeps_complete_roots_and_clear_removes_children(
+    runtime, monkeypatch
+):
+    monkeypatch.setattr("living_world.store.time.time", lambda: 1800000000.0)
     await runtime.update_settings({"debug": {"retain_per_category": 2}})
     for i in range(4):
         parent = runtime.debug.begin("news.reflect", {"index": i})

@@ -20,6 +20,7 @@ let debugCategory = "";
 let testRequest = "";
 let debugTask = "life.plan";
 const debugSelections = new Map();
+let debugBodySequence = 0;
 const debugTaskNames = { "chat.turn": "聊天回复", "reply.model": "聊天回复", "reply.request": "聊天回复", "reply.tool": "聊天工具", "life.plan": "生成日程", "life.plan_day": "生成今日日程", "life.detail": "细化活动", "life.adjust": "调整日程", "news.select": "挑选新闻", "news.read": "阅读新闻", "search.topic": "选择搜索主题", "search.note": "搜索见闻笔记", "journal.write": "生成日记", "debug.test": "模型试跑", "test": "模型试跑" };
 
 function el(tag, className, text) {
@@ -103,7 +104,7 @@ function notice(text, isError = false) {
 }
 function setBusy(value) {
   busy = value;
-  document.querySelectorAll("button").forEach((node) => { node.disabled = value; });
+  document.querySelectorAll("button").forEach((node) => { node.disabled = value || node.dataset.disabled === "true"; });
   content.setAttribute("aria-busy", String(value));
 }
 async function request(work, successText = "操作已完成") {
@@ -495,7 +496,7 @@ function scheduleSummary(activities) {
 }
 function renderSchedule() {
   const root = el("div", "stack"); const settings = snapshot.settings || {};
-  const form = settingsForm("保存日程生成参数", "每天只生成一份正式日程。时间与次数修改默认次日生效，不重建今天已有日程；保存不会调用模型。");
+  const form = settingsForm("保存日程生成参数", "每天自动生成一份正式日程。参数修改默认次日生效；保存后可点击「重新生成日程」立即用于今天。保存参数本身不会调用模型。");
   const f = (label, key, options, fallback) => field(label, `life.${key}`, valueAt(settings, `life.${key}`, fallback), options);
   const numberOptions = { type: "number", min: 0, max: 48, step: 1 };
   form.append(card("每日生成参数", "AI 在活动中安排新闻、搜索、聊天标记，三类可以落在同一个活动。", append(el("div", "form-grid"), f("每日生成时间", "daily_plan_time", { type: "time", required: true }, "06:00"), f("每天活动数", "activity_count", { ...numberOptions, min: 1 }, 10), f("新闻活动数", "news_count", numberOptions, 2), f("搜索活动数", "search_count", numberOptions, 2), f("主动聊天活动数", "social_count", numberOptions, 3), f("提前细化活动（分钟）", "detail_minutes", { type: "number", min: 0, max: 120 }, 10)), linkButton("聊天对象与白名单", "whitelist")));
@@ -508,18 +509,37 @@ function renderSchedule() {
   const date = el("input"); date.type = "date"; date.value = scheduleDate || dayNow(); date.setAttribute("aria-label", "日程日期"); date.style.width = "auto";
   date.addEventListener("change", () => { scheduleDate = date.value; render(); });
   const activities = orderedActivities(date.value);
-  const editable = activities.filter((item) => item.status === "planned" && new Date(item.start).getTime() > Date.now());
+  const editable = snapshot.day_regenerating ? [] : activities.filter((item) => item.status === "planned" && new Date(item.start).getTime() > Date.now());
   const batch = () => openEditor("批量调整未来活动", [el("p", "hint", "仅修改列出的未开始活动。可交换新闻、搜索、聊天标记，但总数不得增加；已有执行记录保持。保存不调用模型、不发送消息。"), field("活动调整 JSON", "json", stringify({ updates: editable.map((item) => ({ id: item.id, changes: { title: item.title, start: item.start, end: item.end, content: item.content || item.description || "", location: item.location || "", sleep_state: item.sleep_state || "unknown", actions: Object.fromEntries(Object.entries(item.actions || {}).map(([key, value]) => [key, { enabled: value.enabled, intent: value.intent || "", at: value.at }])) } })) }), { type: "textarea", rows: 18 })], (values) => { try { return action("update_activities", JSON.parse(values.json)); } catch (error) { notice(`JSON 格式错误：${error.message}`, true); return false; } }, "保存未来活动调整");
-  const toolbar = append(el("div", "section-toolbar"), date, append(el("div", "actions"), button("补生成缺失日程", () => confirmAction("补生成缺失的正式日程", "将真实调用模型生成指定日期的一份正式日程并保存。已有正式日程会保留；过期行动不会集中补发。", () => action("plan_day", { date: date.value }), false, "调用模型并生成"), "primary"), button("批量调整未来活动", batch, "secondary")));
+  const regenerate = button("重新生成日程", () => {
+    if (dirty) { notice("请先保存日程生成参数，再重新生成日程。", true); return; }
+    confirmAction("重新生成今天的日程", "将真实调用模型，使用最新已保存参数和当前模板替换今天整份日程。旧计划和执行记录归档保留，失败时保留原日程。新计划尚未到时的行动照常执行；白名单、发送次数和冷却限制不重置，已到时的行动不补做。", () => action("regenerate_day", { date: date.value }), false, "调用模型并重新生成");
+  }, "primary");
+  regenerate.dataset.disabled = String(date.value !== dayNow() || Boolean(snapshot.day_regenerating));
+  const batchButton = button("批量调整未来活动", batch, "secondary");
+  batchButton.dataset.disabled = String(Boolean(snapshot.day_regenerating));
+  const toolbar = append(el("div", "section-toolbar"), date, append(el("div", "actions"), regenerate, batchButton));
   const list = recordList(activities, { timeline: true, emptyTitle: "这一天还没有安排", emptyDescription: "到生成时间自动生成；首次启动缺少当天日程时才补生成。", actions: (record) => editable.includes(record) ? append(el("div", "actions"), button("编辑", () => editActivity(record), "secondary", true), !record.detailed ? button("调用 AI 细化活动", () => action("detail_activity", { id: record.id }), "secondary", true) : null) : null });
-  root.append(card("日程与实际行动", "按新闻 → 搜索 → 聊天执行；每个标记只执行一次。数量表示计划机会，实际发送仍遵守白名单与发送限制。", append(el("div", "stack"), toolbar, scheduleSummary(activities), list)));
+  root.append(card("日程与实际行动", "按新闻 → 搜索 → 聊天执行；每个版本的标记只执行一次。手动重生成会增加当天计划机会，实际发送仍遵守白名单与发送限制。", append(el("div", "stack"), toolbar, snapshot.day_regenerating ? el("p", "hint", "正在重新生成日程：等待已有执行结束并生成新计划，期间暂停日程推进和活动编辑。完成后刷新查看结果。") : el("p", "muted", "仅支持重新生成今天的日程；新结果校验通过后立即采用。"), scheduleSummary(activities), list)));
   const day = rows("life_days").find((item) => (item.date || item.day || item.id?.slice(0, 10)) === date.value && (!item.scope || item.scope === "global"));
   const original = day ? append(el("div", "stack"), details(day.parameters || day.params || {}, "当日采用的生成参数"), details(day.full_request || day.request || {}, "生成输入快照（非 API 原文）"), details(day.raw_json ?? day.raw_response ?? "升级前日程未记录模型生成文本", "模型生成的日程文本"), details(day.adopted_activities || day.adopted || activities, "校验后采用的日程"), jsonButtons(day, `living-world-schedule-${date.value}.json`)) : empty("尚无正式生成记录", "生成参数、输入快照和模型生成文本会随正式日程长期保存，不受调试保留次数限制。");
   const debugId = day?.full_request?._debug_record_id;
   const debugView = debugId ? rows("debug_views").find((view) => view.id === debugId || view.record_ids?.includes(debugId)) : null;
   const archiveLink = linkButton(debugId ? "查看这次调用的 API 原文" : "调试与调用记录", debugId ? `debug?turn=${encodeURIComponent(debugView?.id || debugId)}` : "debug");
   archiveLink.addEventListener("click", () => { debugCategory = ""; });
-  root.append(card("正式日程生成档案", "保存生成输入、模型生成文本和采用结果。实际 API 请求与返回请到调试记录查看；调试记录过期后原文可能已清理。", original, archiveLink));
+  const archives = el("div", "stack");
+  for (const previous of rows("life_day_history").filter((item) => item.date === date.value).sort((a, b) => String(b.archived_at).localeCompare(String(a.archived_at)))) {
+    const entry = append(el("details", "schedule-history"), el("summary", "", `历史版本 · ${previous.archived_at || "时间未记录"}`));
+    const previousId = previous.full_request?._debug_record_id;
+    append(entry, details(previous.parameters || {}, "该版本采用的生成参数"), details(previous.full_request || previous.request || {}, "该版本生成输入快照（非 API 原文）"), details(previous.raw_json ?? "旧版未记录模型生成文本", "该版本模型生成文本"), details(previous.adopted_activities || previous.activities || [], "该版本校验后采用的日程"), details(previous.activities || [], "替换前的活动与实际执行记录"), jsonButtons(previous, `living-world-schedule-${date.value}-${previous.id}.json`));
+    if (previousId) {
+      const previousView = rows("debug_views").find((view) => view.id === previousId || view.record_ids?.includes(previousId));
+      const link = linkButton("查看该版本的 API 原文", `debug?turn=${encodeURIComponent(previousView?.id || previousId)}`);
+      link.addEventListener("click", () => { debugCategory = ""; }); entry.append(link);
+    }
+    archives.append(entry);
+  }
+  root.append(card("正式日程生成档案", "保存当前日程和已归档历史版本。实际 API 请求与返回请到调试记录查看；调试记录过期后原文可能已清理。", append(el("div", "stack"), original, archives), archiveLink));
   root.append(card("当前生活状态", "调整状态只保存生活数据，不触发模型调用或真实消息。", details(snapshot.state || {}, "查看状态数据"), button("调整当前状态", () => openEditor("调整当前状态", [field("精力", "energy", snapshot.state?.energy ?? 70, { type: "number", min: 0, max: 100 }), field("心情", "mood", snapshot.state?.mood || "平静"), field("当前作息", "routine", snapshot.state?.routine || "", { type: "textarea" })], (patch) => action("update_state", { patch })), "secondary", true)));
   return root;
 }
@@ -655,23 +675,35 @@ function rawBodyButtons(body, filename, direction, type = "json") {
     const link = el("a"); link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
   }, "secondary", true));
 }
-function formatDebugJSON(raw) {
+function formatDebugJSON(raw, prefix = "", ending = "\n") {
   try { JSON.parse(raw); } catch { return null; }
   // Validate without reserializing: duplicate keys and numeric spelling are evidence.
   const tokens = raw.match(/"(?:\\[\s\S]|[^"\\])*"|[{}\[\],:]|[^\s{}\[\],:]+/g) || [];
-  const parts = [];
-  let depth = 0;
-  const newline = () => `\n${"  ".repeat(depth)}`;
+  const parts = [prefix], folds = [], stack = [];
+  let depth = 0, offset = prefix.length, lineStart = 0;
+  const write = (...text) => {
+    parts.push(...text);
+    for (const part of text) {
+      const lineBreak = Math.max(part.lastIndexOf("\n"), part.lastIndexOf("\r"));
+      if (lineBreak >= 0) lineStart = offset + lineBreak + 1;
+      offset += part.length;
+    }
+  };
+  const newline = () => `${ending}${prefix}${"  ".repeat(depth)}`;
   tokens.forEach((token, index) => {
     if (token === "{" || token === "[") {
-      parts.push(token); depth++;
-      if (tokens[index + 1] !== (token === "{" ? "}" : "]")) parts.push(newline());
+      const nonempty = tokens[index + 1] !== (token === "{" ? "}" : "]");
+      const fold = nonempty ? { start: offset, lineStart, end: 0, children: [] } : null;
+      if (fold) (stack.at(-1)?.children || folds).push(fold);
+      stack.push(fold); write(token); depth++;
+      if (nonempty) write(newline());
     } else if (token === "}" || token === "]") {
       depth--;
-      if (tokens[index - 1] !== (token === "}" ? "{" : "[")) parts.push(newline());
-      parts.push(token);
-    } else if (token === ",") parts.push(token, newline());
-    else if (token === ":") parts.push(": ");
+      if (tokens[index - 1] !== (token === "}" ? "{" : "[")) write(newline());
+      const fold = stack.pop(); if (fold) fold.end = offset;
+      write(token);
+    } else if (token === ",") write(token, newline());
+    else if (token === ":") write(": ");
     else if (token.startsWith('"')) {
       // Consume complete escapes so literal backslashes (including paths) stay intact.
       const text = token.replace(/\\(?:u[\da-fA-F]{4}|[\s\S])/g, (escape) => {
@@ -679,44 +711,91 @@ function formatDebugJSON(raw) {
         if (escape === "\\r" || /^\\u000d$/i.test(escape)) return "\r";
         return escape;
       });
-      parts.push(text.replace(/\r\n?|\n/g, newline));
-    } else parts.push(token);
+      write(text.replace(/\r\n?|\n/g, newline));
+    } else write(token);
   });
-  return parts.join("");
+  return { text: parts.join(""), folds };
 }
 function formatDebugBody(raw, type) {
-  if (type !== "sse") return formatDebugJSON(raw) ?? raw;
+  const plain = (text) => ({ text, folds: [] });
+  if (type !== "sse") return [formatDebugJSON(raw) ?? plain(raw)];
   const output = [];
   let event = [];
   const formatEvent = () => {
     const data = event.filter((line) => /^data(?::|$)/.test(line.text));
-    const formatted = data.length ? formatDebugJSON(data.map((line) => line.text.replace(/^data(?:: ?)?/, "")).join("\n")) : null;
-    if (formatted === null) return event.map((line) => line.raw).join("");
+    const formatted = data.length ? formatDebugJSON(data.map((line) => line.text.replace(/^data(?:: ?)?/, "")).join("\n"), "data: ", data[0].ending) : null;
+    if (formatted === null) return [plain(event.map((line) => line.raw).join(""))];
     // Format data within one complete event, retaining metadata and event boundaries.
-    return event.map((line) => {
-      if (line === data[0]) return formatted.split("\n").map((text) => `data: ${text}${line.ending}`).join("");
-      return /^data(?::|$)/.test(line.text) ? "" : line.raw;
-    }).join("");
+    return event.flatMap((line) => {
+      if (line === data[0]) return [{ ...formatted, text: formatted.text + line.ending }];
+      return /^data(?::|$)/.test(line.text) ? [] : [plain(line.raw)];
+    });
   };
   for (const line of raw.match(/[^\r\n]*(?:\r\n|\r|\n|$)/g) || []) {
     if (!line) continue;
     const ending = line.match(/(?:\r\n|\r|\n)$/)?.[0] || "";
     const text = ending ? line.slice(0, -ending.length) : line;
-    if (text === "" && ending) { output.push(formatEvent(), line); event = []; }
+    if (text === "" && ending) { output.push(...formatEvent(), plain(line)); event = []; }
     else event.push({ text, ending, raw: line });
   }
   // An event without a terminating blank line may still be in flight.
-  output.push(...event.map((line) => line.raw));
-  return output.join("");
+  output.push(plain(event.map((line) => line.raw).join("")));
+  return output;
 }
-function debugBodyViewer(raw, type, selected, direction) {
+function renderDebugBody(parts, state, idPrefix) {
+  const root = el("span", "debug-json-document"), handles = [];
+  parts.forEach((part, partIndex) => {
+    // Iterative rendering also handles deeply nested input without recursive DOM builders.
+    const pending = [{ parent: root, start: 0, end: part.text.length, folds: part.folds }];
+    while (pending.length) {
+      const frame = pending.pop();
+      let cursor = frame.start;
+      for (const fold of frame.folds) {
+        frame.parent.append(document.createTextNode(part.text.slice(cursor, fold.lineStart)));
+        const key = `${partIndex}-${fold.start}`;
+        const node = el("span", "debug-json-node"); node.dataset.fold = key;
+        const toggle = el("button", "debug-json-toggle"); toggle.type = "button";
+        const children = el("span", "debug-json-children"); children.id = `${idPrefix}-${key}`;
+        const ellipsis = el("span", "debug-json-ellipsis");
+        const kind = part.text[fold.start] === "{" ? "对象" : "数组";
+        toggle.setAttribute("aria-controls", children.id);
+        const setCollapsed = (collapsed) => {
+          if (collapsed) state.collapsed.add(key); else state.collapsed.delete(key);
+          children.hidden = collapsed; ellipsis.textContent = collapsed ? "…" : "";
+          toggle.setAttribute("aria-expanded", String(!collapsed));
+          toggle.setAttribute("aria-label", `${collapsed ? "展开" : "收起"}${kind}`);
+          toggle.title = `${collapsed ? "展开" : "收起"}${kind}`;
+        };
+        toggle.addEventListener("click", () => setCollapsed(!children.hidden));
+        setCollapsed(state.collapsed.has(key)); handles.push(setCollapsed);
+        append(node, toggle, document.createTextNode(part.text.slice(fold.lineStart, fold.start + 1)), children, ellipsis, document.createTextNode(part.text[fold.end]));
+        frame.parent.append(node);
+        pending.push({ parent: children, start: fold.start + 1, end: fold.end, folds: fold.children });
+        cursor = fold.end + 1;
+      }
+      frame.parent.append(document.createTextNode(part.text.slice(cursor, frame.end)));
+    }
+  });
+  return { root, handles };
+}
+function debugBodyViewer(raw, type, selected, direction, callKey) {
   const viewer = el("div", "debug-body-viewer");
   const controls = el("div", "actions"); controls.setAttribute("role", "group");
   controls.setAttribute("aria-label", `${direction === "request" ? "请求" : "返回"}正文显示方式`);
-  const note = el("p", "muted", "格式化仅供阅读：增加缩进并展开字符串中的换行；复制、下载始终保留原文。无法格式化的内容按原文展示。");
+  const note = el("p", "muted", "格式化仅供阅读：点击左侧箭头可收起对象或数组，正文保留换行；复制、下载始终保留完整原文。无法格式化的内容按原文展示。");
   const pre = el("pre", "debug-raw");
   selected.bodyModes ??= {};
+  selected.bodyFolds ??= new Map();
+  const stateKey = JSON.stringify([callKey, direction]);
+  let state = selected.bodyFolds.get(stateKey);
+  if (!state || state.raw !== raw || state.type !== type) {
+    state = { raw, type, collapsed: new Set() }; selected.bodyFolds.set(stateKey, state);
+  }
   let formatted;
+  const idPrefix = `debug-json-${++debugBodySequence}`;
+  const foldControls = append(el("div", "actions debug-fold-controls"),
+    button("全部展开", () => formatted?.handles.forEach((setCollapsed) => setCollapsed(false)), "secondary", true),
+    button("全部收起", () => formatted?.handles.forEach((setCollapsed) => setCollapsed(true)), "secondary", true));
   const choices = [["formatted", "格式化显示"], ["raw", "原文"]].map(([mode, label]) => {
     const choice = button(label, () => { selected.bodyModes[direction] = mode; update(); }, "secondary", true);
     controls.append(choice); return { mode, choice };
@@ -724,12 +803,16 @@ function debugBodyViewer(raw, type, selected, direction) {
   const update = () => {
     const mode = selected.bodyModes[direction] || "formatted";
     choices.forEach(({ mode: value, choice }) => choice.setAttribute("aria-pressed", String(value === mode)));
-    if (mode === "formatted") formatted ??= formatDebugBody(raw, type);
-    pre.textContent = mode === "raw" ? raw : formatted;
+    if (mode === "formatted") {
+      formatted ??= renderDebugBody(formatDebugBody(raw, type), state, idPrefix);
+      pre.replaceChildren(formatted.root);
+    } else pre.textContent = raw;
+    const hasFolds = mode === "formatted" && Boolean(formatted?.handles.length);
+    foldControls.hidden = !hasFolds; pre.classList.toggle("has-folds", hasFolds);
     pre.dataset.mode = mode;
     note.hidden = mode === "raw";
   };
-  append(viewer, controls, note, pre); update(); return viewer;
+  append(viewer, controls, foldControls, note, pre); update(); return viewer;
 }
 function readableValue(value, depth = 0) {
   if (value == null || value === "") return el("p", "muted", "暂无内容");
@@ -866,7 +949,7 @@ function renderDebugView(view, records, initiallyOpen) {
         const safeId = String(call.id || `${view.id}-${selected.call + 1}`).replace(/[^\w.-]/g, "_");
         panel.append(el("p", "muted", isRequest ? "实际发往模型接口的请求正文，仅隐藏认证凭据。复制和下载直接保留正文，不加包装。" : type === "sse" ? "这是接口实际返回的事件流（SSE），不是一份单独 JSON。④提供合并阅读，合并结果不是原文。" : "接口实际返回的正文，保留原有字段；下方内容没有经过回复提取。"));
         if (call.url || call.http_status) panel.append(el("p", "debug-endpoint", [call.method, call.url, call.http_status ? `HTTP ${call.http_status}` : ""].filter(Boolean).join(" · ")));
-        append(panel, rawBodyButtons(raw, `living-world-${safeId}-${isRequest ? "request" : "response"}.${type === "sse" ? "sse" : type === "json" ? "json" : "txt"}`, isRequest ? "request" : "response", type), debugBodyViewer(raw, type, selected, isRequest ? "request" : "response"));
+        append(panel, rawBodyButtons(raw, `living-world-${safeId}-${isRequest ? "request" : "response"}.${type === "sse" ? "sse" : type === "json" ? "json" : "txt"}`, isRequest ? "request" : "response", type), debugBodyViewer(raw, type, selected, isRequest ? "request" : "response", call.id ?? selected.call));
         if (call.error) panel.append(el("p", "danger-copy", stringify(call.error)));
       } else {
         panel.append(empty(isRequest ? "没有捕获 API 原始请求" : "没有收到可用的 API 原始返回", view.legacy ? "旧版只保存了宿主快照，不能当作 API 原文。" : call?.error || view.error || (call ? `捕获状态：${statusNames[call.capture_status] || call.capture_status || "未知"}。不使用中间参数代替原文。` : "本次没有记录到模型 HTTP 请求；请查看接入结果或捕获状态。")));
