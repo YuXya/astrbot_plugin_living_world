@@ -659,7 +659,7 @@ function renderDrives() {
   const panel = el("div", "stack drive-editor"); panel.id = "drive-editor"; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", `drive-tab-${id}`);
   const markDraft = () => { draft.configDirty = true; dirty = true; };
   const currentForm = el("form", "drive-current-form");
-  const current = field("设置当前值", "drive.value", draft.value, { type: "number", min: 0, max: 100, step: "any", required: true, hint: "可设置小数；页面展示与阶段匹配取整数部分。只应用当前值，不保存下方参数。" });
+  const current = field(`${driveNames[id]}当前值`, "drive.value", draft.value, { type: "number", min: 0, max: 100, step: "any", required: true });
   const currentInput = current.querySelector("input");
   currentInput.addEventListener("input", () => { draft.value = currentInput.value; draft.valueDirty = true; dirty = true; });
   const apply = button("应用当前值", () => {}, "primary"); apply.type = "submit";
@@ -667,18 +667,24 @@ function renderDrives() {
     event.preventDefault(); const submitted = currentInput.value;
     saveDrive(id, "set_drive_value", { value: Number(submitted) }, () => { if (draft.value === submitted) draft.valueDirty = false; });
   });
-  append(currentForm, current, append(el("div", "actions"), apply));
-  panel.append(card(`调整${driveNames[id]}`, "操作立即生效，不调用模型；已细化活动需要手动重新细化才会获得新的想法。", currentForm));
+  append(currentForm, current, apply, el("p", "muted", "0—100，可填小数；仅应用当前值。"));
+  const currentCard = append(el("section", "card drive-current-card"), currentForm);
+  currentCard.setAttribute("aria-label", `调整${driveNames[id]}`); panel.append(currentCard);
   const configForm = el("form", "stack drive-config-form");
-  const rate = field("每在线小时增加", "drive.growth_per_hour", draft.config.growth_per_hour, { type: "number", min: 0, step: "any", required: true, hint: "在线时间连续累计，离线和模块暂停时不增长；设为 0 可停止增长。" });
+  const rateFields = el("div", "drive-rate-fields");
+  const rate = field("每在线小时增加", "drive.growth_per_hour", draft.config.growth_per_hour, { type: "number", min: 0, step: "any", required: true });
   rate.querySelector("input").addEventListener("input", (event) => { draft.config.growth_per_hour = event.target.value; markDraft(); });
-  configForm.append(rate);
+  rateFields.append(rate);
   for (const [kind, value] of Object.entries(draft.config.costs)) {
     const labels = { social: "每轮主动聊天减少", news: "每次新闻阅读减少", search: "每次主动搜索减少" };
     const cost = field(labels[kind] || kind, `drive.costs.${kind}`, value, { type: "number", min: 0, step: "any", required: true });
-    cost.querySelector("input").addEventListener("input", (event) => { draft.config.costs[kind] = event.target.value; markDraft(); }); configForm.append(cost);
+    cost.querySelector("input").addEventListener("input", (event) => { draft.config.costs[kind] = event.target.value; markDraft(); }); rateFields.append(cost);
   }
-  configForm.append(el("p", "hint", "仅日程行动实际开始时扣值，失败不退还；不足时仍可执行，最低归零。聊天一轮多对象只扣一次；手动来源读取、调试试跑、被动回复、群聊插话和独立 AI 日报不扣值。"));
+  const rules = append(el("details", "drive-rules"), el("summary", "", "计算与生效规则"),
+    el("p", "", "按在线时间连续增长，离线或模块暂停时不增长；增长与消耗可设为 0。当前值可填小数，显示和阶段匹配取整数部分。"),
+    el("p", "", "仅日程行动实际开始时扣值，失败不退；不足时仍可执行，最低归零。聊天一轮多对象只扣一次；手动来源、试跑、被动回复、群聊插话和独立 AI 日报不扣。"),
+    el("p", "", "应用当前值与保存参数分别生效，不调用模型。已有细化保持原决定，需要立即采用新想法时手动重新细化。"));
+  configForm.append(rateFields, rules);
   const stages = el("div", "drive-stages");
   function renderStages(focusIndex = -1) {
     stages.replaceChildren();
@@ -695,21 +701,24 @@ function renderDrives() {
         draft.config.stages.splice(index, 1); markDraft(); renderStages(Math.max(0, index - 1));
       }, "secondary", true);
       remove.setAttribute("aria-label", `删除第 ${index + 1} 阶段`); remove.dataset.disabled = String(draft.config.stages.length === 1); remove.disabled = draft.config.stages.length === 1;
-      append(stageRow, append(el("div", "section-toolbar"), el("h3", "", `阶段 ${index + 1} · ${min}—${stage.max}`), append(el("div", "actions"), split, remove)));
-      const boundary = field("阶段结束值", `drive.stage.${index}.max`, stage.max, { type: "number", min, max: index === draft.config.stages.length - 1 ? 100 : draft.config.stages[index + 1].max - 1, step: 1, required: true, readOnly: index === draft.config.stages.length - 1, hint: index === draft.config.stages.length - 1 ? "最后一个阶段始终覆盖到 100。" : `起始值为 ${min}；修改结束值会同步调整下一阶段的起始值。` });
+      const title = el("h3", "drive-stage-title", `阶段 ${index + 1} · ${min}—${stage.max}`);
+      const boundary = field("结束值", `drive.stage.${index}.max`, stage.max, { type: "number", min, max: index === draft.config.stages.length - 1 ? 100 : draft.config.stages[index + 1].max - 1, step: 1, required: true, readOnly: index === draft.config.stages.length - 1 });
+      boundary.classList.add("drive-stage-boundary");
+      boundary.querySelector("input").title = index === draft.config.stages.length - 1 ? "最后一段固定到 100" : "修改后，下一段起始值自动跟随";
       boundary.querySelector("input").addEventListener("change", (event) => {
         const value = Number(event.target.value);
         if (!event.target.reportValidity() || !Number.isInteger(value)) { event.target.value = stage.max; return; }
         stage.max = value; markDraft(); renderStages(index);
       });
-      const meaning = field("注入的想法", `drive.stage.${index}.text`, stage.text, { type: "textarea", rows: 3, required: true });
+      const meaning = field("注入的想法", `drive.stage.${index}.text`, stage.text, { type: "textarea", rows: 1, required: true });
+      meaning.classList.add("drive-stage-meaning");
       meaning.querySelector("textarea").addEventListener("input", (event) => { stage.text = event.target.value; markDraft(); });
-      append(stageRow, boundary, meaning); stages.append(stageRow);
+      append(stageRow, title, boundary, meaning, append(el("div", "actions drive-stage-actions"), split, remove)); stages.append(stageRow);
     });
     if (focusIndex >= 0) stages.querySelector(`[data-index="${focusIndex}"] textarea`)?.focus();
   }
   renderStages();
-  configForm.append(heading("阶段与想法", "数值完整覆盖 0—100。删除阶段并入低一档；最低档删除后并入下一档。“必须聊天”仅表达强烈倾向，AI 仍自行决定是否安排行动。"), stages);
+  configForm.append(heading("阶段与想法", "修改结束值会联动下一段，最后一段固定到 100。＋ 拆分；删除并入低一档，最低档并入下一档。“必须聊天”仅为倾向，AI 自行判断。"), stages);
   const save = button("保存设置", () => {}, "primary"); save.type = "submit";
   configForm.append(append(el("div", "form-actions"), save));
   configForm.addEventListener("submit", (event) => {
@@ -717,7 +726,8 @@ function renderDrives() {
     config.growth_per_hour = Number(config.growth_per_hour); for (const key of Object.keys(config.costs)) config.costs[key] = Number(config.costs[key]);
     saveDrive(id, "save_drive_settings", { config }, () => { if (stringify(draft.config) === before) draft.configDirty = false; });
   });
-  panel.append(card("增长、消耗与阶段", "保存只更新本项参数与阶段，不覆盖当前值。顶部卡片展示已保存设置；未保存修改会在切换或刷新时保留。", configForm));
+  const configCard = card("增长、消耗与阶段", "参数单独保存，切换和刷新保留草稿。", configForm);
+  configCard.classList.add("drive-config-card"); panel.append(configCard);
   root.append(panel); dirty = hasDriveDrafts();
   return root;
 }
