@@ -410,48 +410,63 @@ function renderWhitelist() {
     const numberField = field("群号 / QQ 号", "number", numberValue, { required: true, placeholder: "只填写数字" });
     const weightField = field("抽选权重", "weight", original.weight ?? 1, { type: "number", min: 0, step: 0.1 });
     const enabledField = checkField("启用此对象", "enabled", original.enabled !== false);
-    const preview = el("p", "muted");
-    const sessionInfo = el("div", "stack session-status");
+    const preview = el("p", "session-line");
+    const sessionInfo = el("div", "session-status");
+    const debugLink = el("span", "actions");
     const showStatus = (value) => {
-      if (!value) { sessionInfo.replaceChildren(el("p", "hint", "尚未检查会话。没有历史也可以接入；检查只读，不调用模型或发送消息。")); return; }
+      const expanded = sessionInfo.querySelector("details")?.open || false;
+      const detailBody = append(el("div", "session-details-body"), preview);
+      const details = append(el("details", "session-details"), el("summary", "", "会话与检查详情"), detailBody);
+      details.open = expanded;
+      debugLink.replaceChildren();
+      if (!value) {
+        sessionInfo.replaceChildren(el("p", "session-line", "尚未检查会话。没有历史也可以接入；检查只读，不调用模型或发送消息。"), details);
+        return;
+      }
       const historyLabel = value.history_status === "found" ? `已找到历史：${value.history_count} 条` : value.history_status === "error" ? "历史读取失败" : "首次对话／暂无历史";
       const source = { host_default: "AstrBot 默认设置", conversation: "当前对话指定", session_rule: "宿主会话规则", unresolved: "尚未解析" }[value.persona_source] || value.persona_source || "未知";
       const contextStatus = value.context_status || {};
       const attempt = contextStatus.last_attempt;
       const injected = contextStatus.last_injected;
       sessionInfo.replaceChildren(append(el("div", "actions"), badge(historyLabel, value.history_status === "error" ? "bad" : ""), badge(value.allowed ? "配置允许接入" : "配置未通过", value.allowed ? "good" : "bad")),
-        el("p", "hint", `真实会话：${value.actual_scope || "未知"} · 连接类型：${value.platform_name || "未知"}`),
-        el("p", "hint", `实际人格：${value.persona_id || "未解析"} · 插件绑定：${value.bound_persona || settings.persona_id || "未设置"} · 人格来源：${source}`),
-        el("p", "hint", `${value.reason || ""}${value.reason_code ? `（${value.reason_code}）` : ""}`),
-        el("p", "hint", `历史来源：${value.history_source || "未知"} · 对话：${value.conversation_id || "暂无"} · ${stamp(value.checked_at)}`));
-      if (value.history_error) sessionInfo.append(el("p", "danger-copy", value.history_error));
-      sessionInfo.append(el("p", "hint", attempt ? `最近处理：${stamp(attempt.at)} · ${attempt.reason}` : "尚未观察到实际聊天接入；配置检查通过不代表已经注入上下文。"));
-      if (injected) sessionInfo.append(el("p", "hint", `最近实际注入：${stamp(injected.at)} · ${injected.reason}`));
+        el("p", "session-line", `实际人格：${value.persona_id || "未解析"} · 插件绑定：${value.bound_persona || settings.persona_id || "未设置"} · 人格来源：${source}`));
+      detailBody.append(
+        el("p", "session-line", `真实会话：${value.actual_scope || "未知"} · 连接类型：${value.platform_name || "未知"}`),
+        el("p", "session-line", `历史来源：${value.history_source || "未知"} · 对话：${value.conversation_id || "暂无"} · ${stamp(value.checked_at)}`));
+      const reason = `${value.reason || ""}${value.reason_code ? `（${value.reason_code}）` : ""}`;
+      if (reason) (value.allowed ? detailBody : sessionInfo).append(el("p", value.allowed ? "session-line" : "session-line danger-copy", reason));
+      if (value.history_error) sessionInfo.append(el("p", "session-line danger-copy", value.history_error));
+      if (attempt) {
+        const sameInjection = injected && attempt.at === injected.at && attempt.turn_id === injected.turn_id && attempt.reason === injected.reason;
+        (sameInjection ? detailBody : sessionInfo).append(el("p", "session-line", `最近处理：${stamp(attempt.at)} · ${attempt.reason}`));
+      } else if (!injected) sessionInfo.append(el("p", "session-line", "尚未观察到实际聊天接入；配置检查通过不代表已经注入上下文。"));
+      if (injected) sessionInfo.append(el("p", "session-line", `最近实际注入：${stamp(injected.at)} · ${injected.reason}`));
       const turn = attempt?.turn_id || injected?.turn_id;
       if (turn) {
-        sessionInfo.append(el("p", "hint", `对应聊天轮次：${turn}`));
+        detailBody.append(el("p", "session-line", `对应聊天轮次：${turn}`));
         if (rows("debug_records").some((row) => row.turn_id === turn)) {
           const link = linkButton("查看这轮接入记录", `debug?turn=${encodeURIComponent(turn)}`);
           link.addEventListener("click", () => { debugCategory = ""; });
-          sessionInfo.append(link);
+          debugLink.append(link);
         }
-        else sessionInfo.append(el("p", "hint", "该轮调试记录已清理、超出保留数量或当时未开启调试；接入状态仍保留。"));
+        else detailBody.append(el("p", "session-line", "该轮调试记录已清理、超出保留数量或当时未开启调试；接入状态仍保留。"));
       }
+      sessionInfo.append(details);
     };
     const controls = append(el("div", "form-grid whitelist-fields"), connectionField, typeField, numberField, weightField);
     const entry = { original, originalUMO, connection, type, numberValue, box, controls, enabledField }; entries.push(entry);
     const currentScope = () => { const v = readFields(controls); return v.connection === connection && v.type === type && v.number === numberValue && originalUMO ? originalUMO : `${v.connection}:${v.type}:${v.number.trim()}`; };
     const update = () => { preview.textContent = `会话标识：${currentScope()} · 自动填写，无需手工拼接`; showStatus(rows("session_status").find((row) => row.umo === currentScope())); };
     controls.addEventListener("input", update); update();
-    append(box, controls, append(el("div", "section-toolbar"), enabledField, button("移除这个对象", () => { entries.splice(entries.indexOf(entry), 1); box.remove(); dirty = true; }, "danger", true)), preview);
-    box.append(sessionInfo, button("检查会话与历史", async () => {
+    append(box, controls, append(el("div", "section-toolbar"), enabledField, button("移除这个对象", () => { entries.splice(entries.indexOf(entry), 1); box.remove(); dirty = true; }, "danger", true)));
+    box.append(sessionInfo, append(el("div", "actions session-status-actions"), button("检查会话与历史", async () => {
       const result = await request(() => bridge.apiPost("action", { action: "inspect_session", scope: currentScope() }), "会话检查完成；没有调用模型或发送消息");
       if (result !== false) {
         snapshot.session_status = [...rows("session_status").filter((row) => row.umo !== result.umo), clone(result)];
         showStatus(result);
       }
-    }, "secondary", true));
-    if (number.includes("_")) box.append(el("p", "hint", "已有配置包含群成员会话标识；不改目标时保留该标识。聊天记录和人格判断仍使用真实场合。"));
+    }, "secondary", true), debugLink));
+    if (number.includes("_")) box.append(el("p", "session-line", "已有配置包含群成员会话标识；不改目标时保留该标识。聊天记录和人格判断仍使用真实场合。"));
     holder.append(box);
   };
   (settings.sessions || []).forEach(add);

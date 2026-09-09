@@ -51,7 +51,14 @@ def material():
                 "scope": PRIVATE,
             }
         ],
-        "experiences": [{"id": "internal-event-id", "source": "fiction", "text": "忘带笔"}],
+        "experiences": [
+            {
+                "id": "internal-event-id",
+                "source": "fiction",
+                "text": "忘带笔",
+                "created_at": "2026-09-06T12:00:00+08:00",
+            }
+        ],
         "observations": [
             {
                 "id": "internal-observation-id",
@@ -80,10 +87,9 @@ def test_readable_projection_keeps_evidence_and_excludes_storage_fields():
         "今日日程",
         "上数学课",
         "昨天约好讨论习题",
-        "角色虚构经历",
+        "角色经历（12：00）：",
         "忘带笔",
         "不是本次新观看",
-        "https://example.org/math",
         "想试试证明",
     ):
         assert expected in text
@@ -96,6 +102,9 @@ def test_readable_projection_keeps_evidence_and_excludes_storage_fields():
         "不应泄露",
         "精力",
         "75",
+        "https://example.org/math",
+        "阅读依据：",
+        "出处：",
     ):
         assert unwanted not in text
     assert all(row["content"] in text for row in bundle["sources"])
@@ -207,3 +216,51 @@ async def test_group_text_excludes_record_metadata_but_preserves_quotes(world):
     text = next(p.text for p in req.extra_user_content_parts if p.text.startswith(DYNAMIC_MARKER))
     assert "小明：[引用老师: 带课本] 我记住了" in text
     assert "internal-" not in text and "conversation_id" not in text and GROUP not in text
+
+
+async def test_actual_chat_material_cleans_links_without_editing_user_history_or_debug(world):
+    runtime, manager, provider = world
+    now = datetime.fromisoformat("2026-09-09T19:00:00+08:00")
+    runtime.life._now = lambda value=None: value or now
+    source_url = "https://example.test/source?source=reading"
+    user_url = "https://example.test/user-shared"
+    raw = f"搜索所得：中文新闻摘要\n阅读依据：search_results\n来源：{source_url}"
+    original = runtime.record_event(raw, source="search", scope=PRIVATE, key="source-event")
+    runtime.record_event("今天的散步经历", source="fiction", key="today-event")
+    observation = {
+        "id": "source-observation",
+        "scope": PRIVATE,
+        "module": "search",
+        "text": raw,
+        "factual_summary": "中文新闻摘要",
+        "reading_basis": "search_results",
+        "sources": [source_url],
+    }
+    runtime.store.put("observations", observation["id"], observation)
+    historical = {"id": "historic-debug", "request_body": raw, "response_body": source_url}
+    runtime.store.put("debug_records", historical["id"], historical)
+    event = Event(PRIVATE, f"看看这个 {user_url}")
+    history = [{"role": "user", "content": f"之前发过 {user_url}"}]
+    cid = await manager.new_conversation(PRIVATE)
+    req = ProviderRequest(
+        prompt=event.message_str,
+        system_prompt="稳定人格",
+        contexts=copy.deepcopy(history),
+        conversation=manager.rows[cid],
+    )
+    runner = await runner_for(world, event, req)
+    await consume(runner)
+    injected = next(
+        p.text for p in req.extra_user_content_parts if p.text.startswith(DYNAMIC_MARKER)
+    )
+    assert source_url not in injected and "阅读依据：" not in injected
+    assert injected.count("角色经历（19：00）：今天的散步经历") == 1
+    assert user_url in req.prompt and req.contexts == history
+    record = next(
+        row for row in runtime.store.list("debug_records") if row.get("task") == "chat.context"
+    )
+    assert record["request"]["injected_text"] == injected
+    assert injected in json.dumps(provider.calls[0], ensure_ascii=False).replace("\\n", "\n")
+    assert runtime.store.get("events", original["id"]) == original
+    assert runtime.store.get("observations", observation["id"]) == observation
+    assert runtime.store.get("debug_records", historical["id"]) == historical

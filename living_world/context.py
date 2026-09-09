@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import re
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 PLACEMENT = "本轮动态资料（不写入聊天历史）"
 STATUS = {
@@ -26,6 +28,177 @@ BASIS = {
     "video_search_results": "视频搜索结果，不代表观看",
     "video_analysis": "依赖插件本次视频分析结果",
 }
+FICTION_NOTICE = "角色经历属于角色虚构日常，不是真实网络事实；计划不代表已经发生。"
+_URL = re.compile(r"(?:https?://|www\.)[^\s<>\"'`【】\u3000-\u303f\uff00-\uffef]+", re.I)
+_LINK_START = re.compile(r"!?\[([^\]\n]*)\]\(")
+_PREFIX = re.compile(
+    r"^(?:[-*•]\s*)?(?:(?:经历|记忆)[，,]\s*)?"
+    r"(?:角色虚构经历|角色虚构生活|已记录经历|角色经历(?:[（(][^）)\n]*[）)])?)"
+    r"\s*(?:[:：]\s*|$)"
+)
+_HEADER = re.compile(r"^[【\[]?(?:近期经历|相关记忆与人物认知)[】\]]?[:：]?$")
+
+
+def clean_life_text(value):
+    """Clean automatic material only; never apply this to chat history or raw evidence."""
+    text = _text(value).replace("\r\n", "\n").replace("\r", "\n")
+    # Consume balanced destinations so parentheses in URLs cannot leave broken markup.
+    for match in reversed(list(_LINK_START.finditer(text))):
+        start, end, depth = match.end(), match.end(), 1
+        while end < len(text) and depth and text[end] != "\n":
+            if text[end] == "(" and (end == 0 or text[end - 1] != "\\"):
+                depth += 1
+            elif text[end] == ")" and (end == 0 or text[end - 1] != "\\"):
+                depth -= 1
+            end += 1
+        if not depth and re.match(r"<?(?:https?://|www\.)", text[start:end].lstrip(), re.I):
+            text = text[: match.start()] + match[1] + text[end:]
+    references = re.findall(r"(?mi)^\s*\[([^\]]+)\]:\s*(?:https?://|www\.).*$", text)
+    for reference in references:
+        text = re.sub(r"\[([^\]\n]+)\]\[" + re.escape(reference) + r"\]", r"\1", text)
+    lines = []
+    for line in text.splitlines():
+        line = line.strip()
+        while _PREFIX.match(line):
+            line = _PREFIX.sub("", line, count=1).strip()
+        if _HEADER.fullmatch(line):
+            continue
+        if re.match(r"^(?:[-*•]\s*)?(?:阅读依据|来源|出处)\s*[:：]", line):
+            continue
+        if re.match(r"^\[[^\]]+\]:\s*(?:https?://|www\.)", line, re.I):
+            continue
+        line = re.sub(r"([。；;])\s*(?:阅读依据|来源|出处)\s*[:：].*$", r"\1", line)
+        line = _URL.sub("", line)
+        line = re.sub(r"<\s*>", "", line).strip()
+        if line and not line.strip("-*• :：、，。;；,.!?！？()（）[]"):
+            continue
+        if line or (lines and lines[-1]):
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def material_time(value, now):
+    """Interpret stored timestamps in the character timezone, without inventing a date."""
+    try:
+        if isinstance(value, bool) or value is None:
+            return None
+        moment = (
+            datetime.fromtimestamp(value, UTC)
+            if isinstance(value, (int, float))
+            else datetime.fromisoformat(str(value))
+        )
+        return (moment.replace(tzinfo=now.tzinfo) if moment.tzinfo is None else moment).astimezone(
+            now.tzinfo
+        )
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def is_role_experience(row):
+    return (
+        not row.get("profile")
+        and row.get("kind", "event") == "event"
+        and (
+            row.get("source") == "fiction"
+            or (
+                not row.get("source")
+                and re.match(r"^(?:[-*•]\s*)?角色虚构", _text(row.get("text")))
+            )
+        )
+    )
+
+
+def event_id(row, *, memory=False):
+    key = str(row.get("id", ""))
+    return str(
+        row.get("source_event_id")
+        or (key.removeprefix("event:") if not memory or key.startswith("event:") else "")
+    )
+
+
+def prepare_life_record(row, now, *, memory=False, event_lookup=None):
+    """Return a presentation copy; lineage lookups must stay within the original scope."""
+    result = dict(row)
+    identity = event_id(row, memory=memory)
+    origin = event_lookup(identity) if identity and event_lookup else None
+    moment = material_time(result.get("occurred_at"), now)
+    if origin and origin.get("scope", "global") == row.get("scope", "global"):
+        result["source_event_id"] = identity
+        moment = (
+            moment
+            or material_time(origin.get("occurred_at"), now)
+            or material_time(origin.get("created_at"), now)
+        )
+        if not result.get("source"):
+            result["source"] = origin.get("source", "")
+    moment = moment or material_time(result.get("created_at"), now)
+    if is_role_experience(result):
+        if moment is None or moment.date() != now.date():
+            return None
+        result["source"] = "fiction"
+    if not result.get("reading_basis"):
+        basis = re.search(r"(?m)^\s*阅读依据\s*[:：]\s*(\w+)\s*$", _text(row.get("text")))
+        if basis and basis[1] in BASIS:
+            result["reading_basis"] = basis[1]
+    result["text"] = clean_life_text(result.get("text"))
+    if not result["text"]:
+        return None
+    if moment:
+        result["occurred_at"] = moment.isoformat()
+    return result
+
+
+def record_keys(row, now, *, memory=False):
+    """Deduplicate known lineage, or exact legacy copies at the same instant and scope."""
+    scope, identity = row.get("scope", "global"), event_id(row, memory=memory)
+    keys = {(scope, "event", identity)} if identity else set()
+    moment = material_time(row.get("occurred_at"), now) or material_time(row.get("created_at"), now)
+    if moment and not identity:
+        keys.add((scope, "body", moment.isoformat(), clean_life_text(row.get("text"))))
+    return keys
+
+
+def prepare_life_records(records, now, *, memory=False, event_lookup=None, seen=None):
+    seen = set() if seen is None else seen
+    prepared = []
+    for row in records:
+        item = prepare_life_record(row, now, memory=memory, event_lookup=event_lookup)
+        if item is None:
+            continue
+        keys = record_keys(item, now, memory=memory)
+        if keys & seen:
+            continue
+        seen.update(keys)
+        moment = material_time(item.get("occurred_at"), now)
+        if moment:
+            seen.add((item.get("scope", "global"), "body", moment.isoformat(), item["text"]))
+        prepared.append(item)
+    if not memory:
+        prepared.sort(
+            key=lambda row: (
+                material_time(row.get("occurred_at"), now)
+                or datetime.min.replace(tzinfo=now.tzinfo)
+            ),
+            reverse=True,
+        )
+    return prepared
+
+
+def record_text(row, now, *, memory=False):
+    value = clean_life_text(row.get("text"))
+    if is_role_experience(row):
+        moment = material_time(row.get("occurred_at"), now) or material_time(
+            row.get("created_at"), now
+        )
+        return f"角色经历（{moment:%H：%M}）：{value}" if moment else ""
+    label = (
+        ("人物认知" if row.get("profile") else KINDS.get(row.get("kind"), "记忆"))
+        if memory
+        else "已记录经历"
+    )
+    if basis := BASIS.get(row.get("reading_basis")):
+        value = basis + "；" + value
+    return f"{label}：{value}"
 
 
 def source_item(title, source, content, placement=PLACEMENT):
@@ -49,44 +222,47 @@ def activity_text(row):
     if not row:
         return "此刻没有正在进行的活动。"
     when = "—".join(filter(None, (_clock(row.get("start")), _clock(row.get("end")))))
-    title = _text(row.get("title")) or _text(row.get("content")) or "未命名活动"
+    title = clean_life_text(row.get("title")) or clean_life_text(row.get("content")) or "未命名活动"
     status = STATUS.get(row.get("status"), "")
     lines = [" · ".join(filter(None, (when, title, status)))]
     seen = {title}
     for name in ("content", "description", "incident"):
-        text = _text(row.get(name))
+        text = clean_life_text(row.get(name))
         if text and text not in seen:
             lines.append(("生活小插曲：" if name == "incident" else "") + text)
             seen.add(text)
     for name, label in (("location", "地点"), ("sleep_state", "睡眠")):
-        if _text(row.get(name)):
-            lines.append(f"{label}：{row[name]}")
+        if value := clean_life_text(row.get(name)):
+            lines.append(f"{label}：{value}")
     return "；".join(lines)
 
 
+def activity_material(row):
+    """Keep editable IDs and controls while cleaning only projected outline prose."""
+    return {
+        key: clean_life_text(value)
+        if key in {"title", "content", "description", "incident", "location", "sleep_state"}
+        else value
+        for key, value in row.items()
+    }
+
+
 def observation_text(row):
-    lines = []
+    basis = BASIS.get(row.get("reading_basis"), "")
+    if row.get("from_memory"):
+        basis = BASIS["public_video_memory"]
+    lines = [basis] if basis else []
     for field, label in (
         ("title", "标题"),
         ("selection_reason", "选题理由"),
         ("factual_summary", "事实摘要"),
         ("impression", "角色感想"),
     ):
-        value = _text(row.get(field))
+        value = clean_life_text(row.get(field))
         if value:
             lines.append(f"{label}：{value}")
     if not _text(row.get("factual_summary")) and _text(row.get("text")):
-        lines.append(_text(row["text"]))
-    basis = BASIS.get(row.get("reading_basis"), "阅读依据未注明")
-    if row.get("from_memory"):
-        basis = BASIS["public_video_memory"]
-    lines.append("阅读依据：" + basis)
-    links = row.get("sources", [])
-    if not isinstance(links, list):
-        links = [links]
-    links = [_text(link) for link in links if _text(link)]
-    if links:
-        lines.append("出处：" + "、".join(links))
+        lines.append(clean_life_text(row["text"]))
     return "\n".join(lines)
 
 
@@ -95,6 +271,15 @@ def context_from_data(data):
     if not isinstance(data, dict):
         raise TypeError("Living World context must be an object")
     sources = []
+    try:
+        now = datetime.fromisoformat(data.get("current_time", ""))
+    except (ValueError, TypeError):
+        now = datetime.now(UTC)
+    try:
+        tz = ZoneInfo(data["timezone"])
+    except (KeyError, TypeError, ValueError, ZoneInfoNotFoundError):
+        tz = now.tzinfo or UTC
+    now = now.replace(tzinfo=tz) if now.tzinfo is None else now.astimezone(tz)
 
     def add(title, source, content):
         sources.append(source_item(title, source, content))
@@ -115,7 +300,7 @@ def context_from_data(data):
     else:
         add("生活状态", "模块设置", "生活状态模块已关闭，本轮未读取状态。")
     schedule = data.get("schedule", {})
-    notice = _text(schedule.get("notice"))
+    notice = clean_life_text(schedule.get("notice"))
     if schedule.get("status") == "disabled":
         add("当前活动", "日程模块设置", "日程生活模块已关闭，本轮未读取当前活动。")
     else:
@@ -127,26 +312,21 @@ def context_from_data(data):
         "\n".join(filter(None, [notice, *(f"- {activity_text(row)}" for row in rows)]))
         or "今天尚未生成可用日程，不代表角色没有日程能力。",
     )
-    memories = data.get("memories", [])
-    memory_lines = []
-    for row in memories:
-        label = "人物认知" if row.get("profile") else KINDS.get(row.get("kind"), "记忆")
-        if row.get("source") == "fiction":
-            label += "，角色虚构经历"
-        value = _text(row.get("text"))
-        if value:
-            memory_lines.append(f"- {label}：{value}")
+    seen = set()
+    events = {str(row.get("id", "")): row for row in data.get("experiences", [])}
+    experiences = prepare_life_records(data.get("experiences", []), now, seen=seen)
+    memories = prepare_life_records(
+        data.get("memories", []), now, memory=True, event_lookup=events.get, seen=seen
+    )
+    memory_lines = [f"- {record_text(row, now, memory=True)}" for row in memories]
+    if any(is_role_experience(row) for row in experiences + memories):
+        add("经历说明", "角色生活记录的类型", FICTION_NOTICE)
     add(
         "相关记忆与人物认知",
         "记忆库按当前场合与人物检索的结果",
         "\n".join(memory_lines) or "本轮没有可用的相关记忆。",
     )
-    experience_lines = []
-    for row in data.get("experiences", []):
-        value = _text(row.get("text"))
-        if value:
-            label = "角色虚构经历" if row.get("source") == "fiction" else "已记录经历"
-            experience_lines.append(f"- {label}：{value}")
+    experience_lines = [f"- {record_text(row, now)}" for row in experiences]
     if experience_lines:
         add("近期经历", "生活记录中当前场合可见的经历", "\n".join(experience_lines))
     for row in data.get("observations", []):

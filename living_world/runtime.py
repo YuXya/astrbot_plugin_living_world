@@ -11,7 +11,15 @@ from zoneinfo import ZoneInfo
 
 from . import __version__
 from .config import DIGEST_SOURCES, MODULES, NEWS_SOURCES, merge, settings_from
-from .context import normalize_context, source_item
+from .context import (
+    FICTION_NOTICE,
+    activity_material,
+    clean_life_text,
+    normalize_context,
+    prepare_life_records,
+    record_text,
+    source_item,
+)
 from .debug import DebugService, json_value
 from .drives import DriveService
 from .drives_migration import migrate_drives
@@ -477,7 +485,6 @@ class Runtime:
             draft = self.life.detail_request(activity, now=now)
             template, context = draft["template"], draft["context"]
         else:
-            records = self.memory.recall(scope=scope, limit=10, reinforce=False)
             activity = self.life.current(scope)
             available = await self.context_text(scope, reinforce=False)
             observations = [
@@ -486,16 +493,22 @@ class Runtime:
                 if o.get("scope") in {"global", scope} and o.get("module") == module
             ]
             latest = observations[0] if observations else {}
-            context.update(context=available, memories=records, activity=activity)
+            context.update(context=available)
             if task == "memory.reflect":
-                context["known"] = records
+                context["known"] = self.memory.recall(scope=scope, limit=10, reinforce=False)
             elif task == "life.revise":
                 now = self.life._now()
+                context.pop("context", None)
                 context.update(
                     scope=scope,
                     reason="本次测试的调整理由",
+                    memories=[
+                        record_text(row, now, memory=True)
+                        for row in self.life._memories(scope, now=now)
+                    ],
+                    经历说明=FICTION_NOTICE,
                     editable=[
-                        self.life._view(a, scope)
+                        activity_material(self.life._view(a, scope))
                         for a in self.life.list_activities()
                         if a.get("scope") in {"global", scope}
                         and a.get("date") == str(now.date())
@@ -505,11 +518,11 @@ class Runtime:
             elif task == "news.select":
                 context.update(
                     candidates=latest.get("candidates", []),
-                    activity=(activity or {}).get("title", ""),
+                    activity=clean_life_text((activity or {}).get("title", "")),
                 )
             elif task == "search.topic":
-                context["activity_or_question"] = (activity or {}).get(
-                    "title", "请填写本次想搜索的问题"
+                context["activity_or_question"] = clean_life_text(
+                    (activity or {}).get("title", "请填写本次想搜索的问题")
                 )
             elif module == "social":
                 context.update(
@@ -639,38 +652,46 @@ class Runtime:
             "notice": "只调用模型并保存调试记录；不执行工具、不发 QQ、不改变正式日程或记忆",
         }
 
-    def record_event(self, text, scope="global", kind="event", source="", key=None):
+    def record_event(
+        self, text, scope="global", kind="event", source="", key=None, *, occurred_at=None
+    ):
         key = key or uuid.uuid4().hex
         event = {
             "id": key,
-            "text": str(text)[:16000],
+            "text": (clean_life_text(text) if source == "fiction" else str(text))[:16000],
             "scope": scope,
             "kind": kind,
             "source": source,
             "created_at": time.time(),
+            "occurred_at": occurred_at or self.life._now().isoformat(),
         }
-        self.store.claim("events", key, event)
-        if self.enabled("memory"):
-            prefix = "角色虚构经历：" if source == "fiction" else "已记录经历："
-            self.memory.remember(
-                prefix + event["text"],
-                scope=scope,
-                kind="event",
-                source=source or kind,
-                key="event:" + key,
-            )
+        with self.store.transaction():
+            if not self.store.claim("events", key, event):
+                return self.store.get("events", key)
+            if self.enabled("memory") and event["text"].strip():
+                self.memory.remember(
+                    event["text"][:8000],
+                    scope=scope,
+                    kind="event",
+                    source=source or kind,
+                    key="event:" + key,
+                    source_event_id=key,
+                    occurred_at=event["occurred_at"],
+                )
         return event
 
     async def context_text(self, scope="global", person_id="", query="", *, reinforce=True):
         if not await self.scope_allowed(scope):
             return ""
+        now = self.life._now()
         records = self.memory.recall(
-            query, scope=scope, person_id=person_id, limit=10, reinforce=reinforce
+            query, scope=scope, person_id=person_id, limit=10, reinforce=reinforce, context_now=now
         )
         records = [r for r in records if self._source_enabled(r.get("source", ""))]
         data = {
             "memories": records,
-            "current_time": self.life._now().isoformat(),
+            "current_time": now.isoformat(),
+            "timezone": self.settings["character"]["timezone"],
             "schedule": {
                 "status": "disabled",
                 "notice": "日程生活模块已关闭，本轮没有读取角色日程。",
@@ -687,11 +708,15 @@ class Runtime:
         if self.enabled("life"):
             data["schedule"] = self.life.schedule_context(scope)
             data["activity"] = self.life.current(scope)
-            data["experiences"] = [
-                e
-                for e in self.store.list("events")
-                if e.get("scope") in {"global", scope} and self._source_enabled(e.get("source", ""))
-            ][:10]
+            data["experiences"] = prepare_life_records(
+                [
+                    e
+                    for e in self.store.list("events")
+                    if e.get("scope") in {"global", scope}
+                    and self._source_enabled(e.get("source", ""))
+                ],
+                now,
+            )[:10]
         data["observations"] = [
             o
             for o in self.store.list("observations")

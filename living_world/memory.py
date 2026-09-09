@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from .prompts import PROMPTS
+from .context import prepare_life_record, record_keys
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,8 @@ class MemoryService:
         source: str = "",
         key: str | None = None,
         sources: list | None = None,
+        source_event_id: str | None = None,
+        occurred_at: str | None = None,
     ) -> dict:
         """Remember a trusted caller's content without promoting its scope."""
         if not self.runtime.enabled("memory"):
@@ -134,6 +137,10 @@ class MemoryService:
         if profile and scope == "global":
             raise ValueError("Global profiles require evidence-backed reflect() extraction")
         metadata = {"sources": sources} if sources is not None else {}
+        if source_event_id is not None:
+            metadata["source_event_id"] = source_event_id
+        if occurred_at is not None:
+            metadata["occurred_at"] = occurred_at
         return self._remember(
             text,
             kind=kind,
@@ -252,6 +259,7 @@ class MemoryService:
         person_id: str = "",
         limit: int = 8,
         reinforce: bool = True,
+        context_now: datetime | None = None,
     ) -> list[dict]:
         """Return and reinforce relevant memories visible in this exact context."""
         if not self.runtime.enabled("memory") or limit <= 0:
@@ -261,7 +269,19 @@ class MemoryService:
         query_terms = _terms(query)
         scored = []
         for record in self._visible(scope, person_id):
-            normalized = _normalize(record["text"])
+            projected = (
+                prepare_life_record(
+                    record,
+                    context_now,
+                    memory=True,
+                    event_lookup=lambda key: self.runtime.store.get("events", key),
+                )
+                if context_now is not None
+                else record
+            )
+            if projected is None:
+                continue
+            normalized = _normalize(projected["text"])
             overlap = query_terms & _terms(normalized)
             phrase = bool(query and query in normalized)
             if query and not overlap and not phrase:
@@ -270,12 +290,24 @@ class MemoryService:
             freshness = 1 / (1 + max(0, (now - _now(record["updated_at"])).total_seconds()) / 86400)
             score = relevance + 3 * phrase + self._strength(record, now) * 0.15 + freshness * 0.1
             score += 0.15 if record.get("important") else 0
-            scored.append((score, record["updated_at"], record))
+            scored.append((score, record["updated_at"], record, projected))
         scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return [
-            self._reinforce(record, now) if reinforce else copy.deepcopy(record)
-            for _, _, record in scored[: min(int(limit), 100)]
-        ]
+        results, seen = [], set()
+        for _, _, record, projected in scored:
+            if context_now is not None:
+                keys = record_keys(projected, context_now, memory=True)
+                if keys & seen:
+                    continue
+                seen.update(keys)
+            result = self._reinforce(record, now) if reinforce else copy.deepcopy(record)
+            if context_now is not None:
+                for field in ("text", "occurred_at", "source_event_id", "source", "reading_basis"):
+                    if field in projected:
+                        result[field] = projected[field]
+            results.append(result)
+            if len(results) >= min(int(limit), 100):
+                break
+        return results
 
     def update(self, id: str, changes: dict) -> dict:
         """Allow administrative edits while preventing accidental scope widening."""

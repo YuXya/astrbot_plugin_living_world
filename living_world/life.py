@@ -15,7 +15,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .prompts import PROMPTS
 from .life_actions import ActionLedger
-from .context import activity_text
+from .context import (
+    FICTION_NOTICE,
+    activity_material,
+    activity_text,
+    clean_life_text,
+    is_role_experience,
+    prepare_life_records,
+    record_text,
+)
 
 ACTION_ORDER = ("news", "search", "social")
 FINAL_STATUSES = frozenset({"completed", "failed", "skipped", "cancelled"})
@@ -270,16 +278,26 @@ class LifeService(ActionLedger):
             }
         return actions
 
-    def _memories(self, scope: str, *, reinforce=False) -> list[dict]:
+    def _memories(self, scope: str, *, reinforce=False, now=None) -> list[dict]:
         if not self.runtime.enabled("memory"):
             return []
-        records = [
-            e
-            for e in self.runtime.memory.recall(
-                query="", scope=scope, limit=100 if scope != "global" else 12, reinforce=reinforce
-            )
-            if e.get("scope", "global") in {"global", scope}
-        ]
+        now = self._now(now)
+        records = prepare_life_records(
+            [
+                e
+                for e in self.runtime.memory.recall(
+                    query="",
+                    scope=scope,
+                    limit=100 if scope != "global" else 12,
+                    reinforce=reinforce,
+                    context_now=now,
+                )
+                if e.get("scope", "global") in {"global", scope}
+            ],
+            now,
+            memory=True,
+            event_lookup=lambda key: self.runtime.store.get("events", key),
+        )
         if scope != "global":
             records = [e for e in records if e.get("scope") == scope][:6] + [
                 e for e in records if e.get("scope", "global") == "global"
@@ -324,7 +342,11 @@ class LifeService(ActionLedger):
             "date": str(now.date()),
             "now": now.isoformat(),
             "parameters": (marker.get("parameters") if formal else None) or self.parameters(),
-            "memories": self._memories("global", reinforce=False),
+            "memories": [
+                record_text(row, now, memory=True)
+                for row in self._memories("global", reinforce=False, now=now)
+            ],
+            "经历说明": FICTION_NOTICE,
         }
         if self.runtime.enabled("state"):
             context["state"] = self.state()
@@ -666,8 +688,11 @@ class LifeService(ActionLedger):
                 "reason": reason,
                 "now": now.isoformat(),
                 "scope": scope,
-                "memories": self._memories(scope),
-                "editable": [self._view(a, scope) for a in editable.values()],
+                "memories": [
+                    record_text(row, now, memory=True) for row in self._memories(scope, now=now)
+                ],
+                "经历说明": FICTION_NOTICE,
+                "editable": [activity_material(self._view(a, scope)) for a in editable.values()],
                 "parameters": (
                     self.runtime.store.get("life_days", f"{now.date()}:global", {}) or {}
                 ).get("parameters"),
@@ -738,13 +763,22 @@ class LifeService(ActionLedger):
             and row.get("date") == str(day)
             and row.get("scope") in {"global", scope}
         ]
-        memories = [str(row.get("text", "")) for row in self._memories(scope)]
-        events = [
-            str(row.get("text", ""))
-            for row in self.runtime.store.list("events")
-            if row.get("scope", "global") in {"global", scope}
-            and row.get("source") in {"news", "search", "action"}
-        ][:12]
+        seen = set()
+        event_rows = prepare_life_records(
+            [
+                row
+                for row in self.runtime.store.list("events")
+                if row.get("scope", "global") in {"global", scope}
+                and row.get("source") in {"news", "search", "action"}
+            ],
+            now,
+        )[:12]
+        event_rows = prepare_life_records(event_rows, now, seen=seen)
+        memory_rows = prepare_life_records(
+            self._memories(scope, now=now), now, memory=True, seen=seen
+        )
+        memories = [record_text(row, now, memory=True) for row in memory_rows]
+        events = [record_text(row, now) for row in event_rows]
         outcome_names = {"news": "新闻", "search": "搜索", "social": "主动聊天"}
         for result in self.runtime.store.list("actions"):
             if (
@@ -771,11 +805,11 @@ class LifeService(ActionLedger):
             + f"。聊天免打扰 {social.get('quiet_start', '23:00')}—{social.get('quiet_end', '08:00')}；"
             "对象在实际执行时由白名单抽取，并再次检查冷却及发送限制。",
         }
+        if any(is_role_experience(row) for row in memory_rows):
+            context["经历说明"] = FICTION_NOTICE
         if self.runtime.enabled("state"):
             state = self.state()
-            context["角色状态与作息"] = (
-                f"心情：{state['mood']}；作息：{state['routine']}"
-            )
+            context["角色状态与作息"] = f"心情：{state['mood']}；作息：{state['routine']}"
         thoughts = self.runtime.drives.thoughts()
         if thoughts:
             context["当前想法"] = thoughts
@@ -1078,11 +1112,12 @@ class LifeService(ActionLedger):
                 "life_fiction_claims", activity["id"], {"at": now.isoformat()}
             ):
                 self.runtime.record_event(
-                    f"角色虚构生活：{activity['title']}。{activity.get('incident', '')}",
+                    clean_life_text(f"{activity['title']}。{activity.get('incident', '')}"),
                     scope=activity["scope"],
                     kind="event",
                     source="fiction",
                     key=f"life:{activity['id']}",
+                    occurred_at=now.isoformat(),
                 )
                 if activity["scope"] == "global" and self.runtime.enabled("state"):
                     changes = {}
@@ -1126,8 +1161,7 @@ class LifeService(ActionLedger):
             counts[kind] = {
                 "arranged": len(enabled),
                 "started": sum(
-                    item.get("kind") == kind and item.get("date") == str(day)
-                    for item in starts
+                    item.get("kind") == kind and item.get("date") == str(day) for item in starts
                 ),
                 "success": sum(a.get("execution", {}).get("status") == "success" for a in enabled),
                 "skipped": sum(a.get("execution", {}).get("status") == "skipped" for a in enabled),
