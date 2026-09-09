@@ -7,6 +7,13 @@ from zoneinfo import ZoneInfo
 
 from .drives import DRIVE_DEFAULTS, validate_drive
 
+DEFAULT_GROUP_REPLY_PROMPT = (
+    "本轮只回应当前发言最重要的一点，通常用一句自然的短句；不分段、不列清单，不连续追问或罗列多个建议。\n"
+    "保持人格设定的语言、称呼和语气。生活、日程、状态、记忆及群消息用于理解当前话题，"
+    "不要逐项复述、总结或扩写，也不要添加无必要的动作描写。\n"
+    "工具调用的说明、结果和失败提示也要简短收住，不重复背景，不展开内部处理过程。"
+)
+
 MODULES = (
     "state",
     "drives",
@@ -71,6 +78,7 @@ DEFAULTS = {
         "location": "",
         "sleep_state": "未知",
     },
+    "reply": {"group_prompt": DEFAULT_GROUP_REPLY_PROMPT},
     "life": {
         "tick_seconds": 60,
         "detail_minutes": 10,
@@ -125,6 +133,7 @@ def settings_from(patch=None):
         "drives",
         "models",
         "character",
+        "reply",
         "life",
         "social",
         "news",
@@ -256,12 +265,15 @@ def settings_from(patch=None):
                 raise ValueError("日报需填写 UP 主 UID、搜索词和 HH:MM 时间")
     for section, keys in {
         "character": ("profile", "world", "mood", "location", "sleep_state"),
+        "reply": ("group_prompt",),
         "models": tuple(DEFAULTS["models"]),
         "weather": ("location", "api_host", "auth_mode", "credential"),
         "bilibili": ("plugin_name",),
     }.items():
         if any(not isinstance(result[section].get(key), str) for key in keys):
             raise TypeError(f"{section} 的文本字段无效")
+    if len(result["reply"]["group_prompt"]) > 8000:
+        raise ValueError("本轮群聊回复要求不能超过 8000 字符")
     if result["weather"]["auth_mode"] not in {"api_key", "jwt"}:
         raise ValueError("和风认证方式必须为 API Key 或 JWT")
     result["bilibili"]["plugin_name"] = "astrbot_plugin_bilibili_ai_bot"

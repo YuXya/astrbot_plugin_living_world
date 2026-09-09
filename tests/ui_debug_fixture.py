@@ -6,6 +6,15 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+GROUP_REPLY_DEFAULT = next(
+    ast.literal_eval(node.value)
+    for node in ast.parse((ROOT / "living_world" / "config.py").read_text(encoding="utf-8")).body
+    if isinstance(node, ast.Assign)
+    and any(
+        isinstance(target, ast.Name) and target.id == "DEFAULT_GROUP_REPLY_PROMPT"
+        for target in node.targets
+    )
+)
 
 
 def load_module(name, file):
@@ -252,6 +261,7 @@ print(
             "records": records,
             "views": views.build_views(records, days),
             "format_cases": format_cases,
+            "group_reply_default": GROUP_REPLY_DEFAULT,
         },
         ensure_ascii=False,
     )

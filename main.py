@@ -169,7 +169,7 @@ class Main(Star):
         runtime.note_scope(event.unified_msg_origin)
         await runtime.chat.augment(event, req)
 
-    @filter.on_agent_begin()
+    @filter.on_agent_begin(priority=-1000000)
     async def trace_agent_begin(self, event, run_context):
         if self.runtime:
             self.runtime.chat.agent_begin(event, run_context)

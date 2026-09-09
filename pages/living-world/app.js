@@ -387,6 +387,11 @@ function renderSettings() {
   const providers = [{ value: "", label: "沿用默认模型" }, ...rows("providers").map((row) => ({ value: row.id, label: row.name || row.id }))];
   form.append(card("角色与世界", "使用指定 AstrBot 人格，补充角色资料与生活背景。精力与寂寞值在「内在状态」管理。", append(el("div", "form-grid"), f("绑定人格", "persona_id", { options: personas, required: true }), f("时区", "character.timezone", {}, "Asia/Shanghai"), f("角色补充资料", "character.profile", { type: "textarea" }), f("世界设定", "character.world", { type: "textarea" }), f("初始情绪", "character.mood", {}, "平静"), f("初始地点", "character.location", { hint: "没有当前日程地点时采用此设置，留空显示未知。" }), f("初始睡眠状态", "character.sleep_state", { options: ["未知", "清醒", "睡眠"] }, "未知"))));
   form.append(card("业务能力", "关闭停止该项行为并保留已有数据；开启后按日程和模块规则运行。", modulePanel(true)));
+  const groupReply = f("本轮群聊回复要求", "reply.group_prompt", { type: "textarea", rows: 5, hint: "默认按极短模式接话。文案可改；保存后从下一轮群聊生效。留空则不附加要求，最多 8000 字符。" }, snapshot.reply_defaults?.group_prompt || "");
+  groupReply.querySelector("textarea").maxLength = 8000;
+  const groupReplyBox = card("群聊回复", "注入位置固定：本轮 user 消息最后，位于生活资料块之外、之后。只用于已接入的普通群聊回复，不写入聊天历史。", append(el("div", "stack"), groupReply, button("恢复极短默认文案", () => { groupReply.querySelector("textarea").value = snapshot.reply_defaults?.group_prompt || ""; dirty = true; notice("已填入默认文案，点击「保存全部设置」后生效"); }, "secondary", true)));
+  groupReplyBox.id = "group-reply-settings";
+  form.append(groupReplyBox);
   const models = el("div", "form-grid");
   [["默认模型", "default"], ["生活与日程", "life"], ["记忆提炼", "memory"], ["主动社交", "social"], ["外部见闻", "exploration"], ["日记与笔记", "journal"]].forEach(([label, key]) => models.append(f(label, `models.${key}`, { options: providers })));
   form.append(card("模型分配", "模块留空继承默认模型；默认模型留空沿用宿主配置。", models));

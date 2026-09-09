@@ -10,7 +10,14 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from . import __version__
-from .config import DIGEST_SOURCES, MODULES, NEWS_SOURCES, merge, settings_from
+from .config import (
+    DEFAULT_GROUP_REPLY_PROMPT,
+    DIGEST_SOURCES,
+    MODULES,
+    NEWS_SOURCES,
+    merge,
+    settings_from,
+)
 from .context import (
     FICTION_NOTICE,
     activity_material,
@@ -1018,6 +1025,7 @@ class Runtime:
         return {
             "version": __version__,
             "settings": self.settings,
+            "reply_defaults": {"group_prompt": DEFAULT_GROUP_REPLY_PROMPT},
             "modules": [
                 {
                     "id": m,

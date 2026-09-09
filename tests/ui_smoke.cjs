@@ -19,7 +19,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       if (!["index.html", "app.js", "style.css"].includes(file)) return route.abort();
       return route.fulfill({ status: 200, contentType: file.endsWith(".js") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "text/html", body: fs.readFileSync(path.join(pageRoot, file)) });
     });
-    await page.addInitScript(() => {
+    await page.addInitScript((groupReplyDefault) => {
       const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
       const tomorrow = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date(Date.now() + 86400000));
       const scope = "qq:FriendMessage:42";
@@ -52,6 +52,8 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       };
       window.fixture.version = "0.2.3-test";
       delete window.fixture.settings.character.energy; delete window.fixture.state.energy;
+      window.fixture.settings.reply = { group_prompt: groupReplyDefault };
+      window.fixture.reply_defaults = { group_prompt: groupReplyDefault };
       for (const kind of ["news", "search", "social"]) delete window.fixture.settings.life[`${kind}_count`];
       window.fixture.settings.modules.drives = true;
       window.fixture.drives = { enabled: true, meters: {
@@ -148,7 +150,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
           return { status: "success", action: body.action };
         },
       };
-    });
+    }, backendContract.group_reply_default);
     await page.goto("http://living-world.test/");
     await page.getByText("已连接 AstrBot", { exact: true }).waitFor();
     const bodyCases = [
@@ -269,6 +271,11 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.equal(settings.sessions[2].weight, 0.5);
     assert.equal(await page.getByRole("button", { name: "抽选对象并发送", exact: true }).count(), 0);
     await page.locator('a[data-view="settings"]').click();
+    const groupReplyField = page.locator('[name="reply.group_prompt"]');
+    assert.equal(await groupReplyField.inputValue(), backendContract.group_reply_default);
+    assert.ok((await page.locator("#group-reply-settings").innerText()).includes("本轮 user 消息最后"));
+    const groupReplyCustom = "只用一句短句接话。\n保留文字 <script>window.__groupReplyXss = 1</script>。";
+    await groupReplyField.fill(groupReplyCustom);
     await page.locator('[name="character.profile"]').fill("新的角色资料");
     await page.locator('[name="character.location"]').fill("海边小城");
     await page.locator('[name="character.sleep_state"]').selectOption("清醒");
@@ -279,6 +286,17 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.equal(settings.character.profile, "新的角色资料"); assert.equal(settings.modules.news, true);
     assert.equal(settings.character.location, "海边小城"); assert.equal(settings.character.sleep_state, "清醒");
     assert.equal(settings.retained_unknown.keep, true); assert.equal(settings.life.retained_nested, true);
+    assert.equal(settings.reply.group_prompt, groupReplyCustom);
+    assert.equal(await page.evaluate(() => window.__groupReplyXss), undefined);
+    await page.locator('a[data-view="overview"]').click();
+    await page.locator('a[data-view="settings"]').click();
+    assert.equal(await groupReplyField.inputValue(), groupReplyCustom);
+    await page.getByRole("button", { name: "恢复极短默认文案", exact: true }).click();
+    assert.equal(await groupReplyField.inputValue(), backendContract.group_reply_default);
+    assert.equal(await page.evaluate(() => window.fixture.settings.reply.group_prompt), groupReplyCustom, "Restoring the form must wait for Save");
+    await page.getByRole("button", { name: "保存全部设置", exact: true }).click();
+    await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor();
+    if (process.env.LIVING_WORLD_GROUP_REPLY_SCREENSHOT) await page.locator("#group-reply-settings").screenshot({ path: process.env.LIVING_WORLD_GROUP_REPLY_SCREENSHOT });
     assert.equal(await page.locator('[name="character.energy"]').count(), 0, "Energy is configured only in the new module");
     await page.locator('a[data-view="drives"]').click();
     await page.getByRole("tab", { name: "寂寞值", exact: true }).waitFor();
@@ -792,6 +810,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       await page.evaluate((target) => { location.hash = target; }, view);
       await page.locator(`a[data-view="${view}"][aria-current="page"]`).waitFor();
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, `No mobile horizontal overflow: ${view}`);
+      if (view === "settings" && process.env.LIVING_WORLD_GROUP_REPLY_MOBILE_SCREENSHOT) await page.locator("#group-reply-settings").screenshot({ path: process.env.LIVING_WORLD_GROUP_REPLY_MOBILE_SCREENSHOT });
       if (view === "schedule" && process.env.LIVING_WORLD_SCHEDULE_MOBILE_SCREENSHOT) await page.locator("#content").screenshot({ path: process.env.LIVING_WORLD_SCHEDULE_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
       if (view === "debug") {
         const mobileRound = page.locator('.debug-round[data-turn="round-1"]');

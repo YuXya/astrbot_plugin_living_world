@@ -16,7 +16,10 @@ from astrbot.core.provider.sources.openai_responses_source import ProviderOpenAI
 from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
 from mcp.types import CallToolResult, TextContent
 from openai import APIStatusError
-from test_chat import Event, consume, runner_for
+from test_chat import GROUP, PRIVATE, Event, consume, runner_for
+
+from living_world.chat import GROUP_REPLY_HEADING
+from living_world.config import DEFAULT_GROUP_REPLY_PROMPT
 
 pytest_plugins = ("test_chat",)
 
@@ -409,8 +412,9 @@ async def test_concurrent_managed_calls_do_not_capture_unmanaged_same_sdk_client
     assert "不接入插件的另一场合秘密" not in json.dumps(rows, ensure_ascii=False)
 
 
+@pytest.mark.parametrize("scope", [PRIVATE, GROUP])
 async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
-    real_providers, wire_server
+    real_providers, wire_server, scope
 ):
     async def handler(request, row):
         data = json.loads(row["request_body"])
@@ -438,7 +442,7 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
     )
     runner = await runner_for(
         real_world,
-        Event(),
+        Event(scope),
         ProviderRequest(prompt="查数学", system_prompt="Student", func_tool=ToolSet([tool])),
         Executor(),
     )
@@ -449,6 +453,33 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
     assert "第三方工具内部秘密" not in json.dumps(calls, ensure_ascii=False)
     assert any("数学工具的真实结果" in call["request_body"] for call in calls)
     assert runner.get_final_llm_resp().completion_text == "工具结果已收到"
+    if scope == GROUP:
+        for call in calls:
+            messages = json.loads(call["request_body"])["messages"]
+            user = next(message for message in reversed(messages) if message["role"] == "user")
+            assert user["content"][-1]["text"].endswith(DEFAULT_GROUP_REPLY_PROMPT)
+            assert sum(GROUP_REPLY_HEADING in part.get("text", "") for part in user["content"]) == 1
+            assert GROUP_REPLY_HEADING not in messages[0]["content"]
+
+
+@pytest.mark.parametrize("responses", [False, True])
+async def test_editable_group_prompt_reaches_actual_http_user_tail(
+    real_providers, wire_server, responses
+):
+    real_world = real_providers(responses=responses)
+    runtime, _, _ = real_world
+    custom = "只回答本轮一个重点。\n不要展开背景。"
+    await runtime.update_settings({"reply": {"group_prompt": custom}})
+    runner = await runner_for(real_world, Event(GROUP, "今天怎么样？"))
+    await consume(runner)
+    raw = wire_server.records[0]["request_body"]
+    assert http_calls(runtime)[0]["request_body"] == raw
+    payload = json.loads(raw)
+    messages = payload.get("messages", payload.get("input"))
+    user = next(message for message in reversed(messages) if message.get("role") == "user")
+    assert user["content"][-1]["text"].endswith(GROUP_REPLY_HEADING + "\n" + custom)
+    assert raw.count(GROUP_REPLY_HEADING) == 1
+    assert GROUP_REPLY_HEADING not in payload.get("instructions", "")
 
 
 async def test_daily_schedule_reaches_http_body_with_no_diagnostic_ids_or_private_leak(

@@ -15,6 +15,7 @@ from .social import destination
 
 logger = logging.getLogger(__name__)
 DYNAMIC_MARKER = "<living_world_context>"
+GROUP_REPLY_HEADING = "【本轮群聊回复要求】"
 
 
 def _text(parts):
@@ -464,6 +465,19 @@ class ChatService:
                 + dynamic
                 + "\n</living_world_context>"
             )
+            group_prompt = self.runtime.settings["reply"]["group_prompt"].strip()
+            if event.get_group_id() and group_prompt:
+                reply_text = GROUP_REPLY_HEADING + "\n" + group_prompt
+                part.text += "\n\n" + reply_text
+                sources.append(
+                    source_item(
+                        "本轮群聊回复要求",
+                        "02 角色、模型与模块 → 群聊回复（本轮开始时的已保存文案）",
+                        reply_text,
+                        "本轮 user 消息最后；生活资料块之外、之后；不写入聊天历史",
+                    )
+                )
+                trace["group_context_text"] = part.text
             part._no_save = True
             req.extra_user_content_parts = [*(req.extra_user_content_parts or []), part]
             trace.update(managed=True, request=req, original=original)
@@ -546,10 +560,11 @@ class ChatService:
         ):
             return
         trace["run_context"] = run_context
-        if "saved_contexts" not in trace or trace.get("history_hidden"):
-            self.note_context(trace, "injected", "Living World 上下文已交给宿主 Agent")
-            return
         try:
+            self._place_group_reply_last(trace, run_context)
+            if "saved_contexts" not in trace or trace.get("history_hidden"):
+                self.note_context(trace, "injected", "Living World 上下文已交给宿主 Agent")
+                return
             history = self._historical_messages(copy.deepcopy(trace["saved_contexts"]))
             messages = run_context.messages
             at = 1 if messages and getattr(messages[0], "role", "") == "system" else 0
@@ -579,6 +594,36 @@ class ChatService:
             event.set_extra("living_world_reply", False)
             self.note_context(trace, "failed", "群历史替换失败，已沿用宿主：" + str(exc)[:200])
             self.record(trace, "chat.history_replace", {"error": str(exc)}, status="failed")
+
+    @staticmethod
+    def _place_group_reply_last(trace, run_context):
+        """Move this turn's temporary block after late additions and media."""
+        text = trace.get("group_context_text")
+        if not text:
+            return
+
+        def owned(part):
+            return getattr(part, "_no_save", False) and getattr(part, "text", None) == text
+
+        for message in reversed(run_context.messages):
+            if getattr(message, "role", "") != "user":
+                continue
+            content = getattr(message, "content", None)
+            if not isinstance(content, list):
+                break
+            parts = [part for part in content if owned(part)]
+            if not parts:
+                break
+            message.content = [part for part in content if not owned(part)] + parts[:1]
+            req = trace["request"]
+            extras = req.extra_user_content_parts or []
+            own_extras = [part for part in extras if owned(part)]
+            if own_extras:
+                req.extra_user_content_parts = [
+                    part for part in extras if not owned(part)
+                ] + own_extras[:1]
+            return
+        raise ValueError("本轮群聊临时资料已被其他链路改动，无法确认回复要求位置")
 
     def restore_history(self, event, run_context):
         trace = event.get_extra("living_world_trace")
