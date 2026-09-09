@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import UTC, date, datetime
 
 from .life import character_timezone, scope_allowed
+from .context import brief_text
 from .prompts import PROMPTS
+
+logger = logging.getLogger(__name__)
 
 
 class JournalService:
@@ -45,6 +49,80 @@ class JournalService:
             return moment.astimezone(character_timezone(self.runtime.settings)).date().isoformat()
         except (TypeError, ValueError, OverflowError, OSError):
             return ""
+
+    def brief_request(self, entry: dict) -> dict:
+        return {
+            "date": entry.get("day", ""),
+            "kind": entry.get("kind", "journal"),
+            "max_chars": self.runtime.settings.get("memory", {}).get("brief_max_chars", 200),
+            "document": entry.get("text", ""),
+            "sources": entry.get("sources", []),
+        }
+
+    async def _complete(self, task, kind, data, scope):
+        template = PROMPTS[task]
+        if hasattr(self.runtime, "complete"):
+            return (await self.runtime.complete(task, kind, template, data, scope)).strip()
+        return (
+            await self.runtime.generate(
+                kind, template + json.dumps(data, ensure_ascii=False), scope=scope
+            )
+        ).strip()
+
+    async def summarize(self, entry_id: str, *, regenerate=False) -> dict:
+        """Generate an explicit brief for an archived document, without rewriting its body."""
+        async with self._lock:
+            entry = self.runtime.store.get("journals", entry_id)
+            if not entry:
+                raise ValueError("日记或笔记已不存在")
+            if entry.get("summary") and not regenerate:
+                return entry
+            return await self._summarize(entry)
+
+    async def _summarize(self, entry: dict) -> dict:
+        kind, scope, key = entry["kind"], entry.get("scope", "global"), entry["id"]
+        if not self.runtime.enabled(kind) or not await scope_allowed(self.runtime, scope):
+            return {"status": "skipped", "reason": "module_disabled"}
+        data = self.brief_request(entry)
+        try:
+            summary = brief_text(
+                await self._complete(kind + ".brief", kind, data, scope), data["max_chars"]
+            )
+            if not summary:
+                raise ValueError("模型未生成有效简报")
+        except Exception:
+            logger.warning(
+                "Journal brief generation failed; archived text is retained", exc_info=True
+            )
+            # A failed regeneration must keep the previous usable brief.
+            current = self.runtime.store.get("journals", key)
+            if current == entry and not current.get("summary"):
+                current.update(summary_status="failed")
+                self.runtime.store.put("journals", key, current)
+            return {**(current or {}), "status": "partial", "reason": "brief_failed"}
+        if not self.runtime.enabled(kind) or not await scope_allowed(self.runtime, scope):
+            return {"status": "skipped", "reason": "module_disabled"}
+        with self.runtime.store.transaction():
+            if self.runtime.store.get("journals", key) != entry:
+                return {"status": "skipped", "reason": "entry_changed"}
+            updated = {
+                **entry,
+                "summary": summary,
+                "summary_status": "ready",
+                "summary_at": datetime.now(UTC).timestamp(),
+            }
+            self.runtime.store.put("journals", key, updated)
+            if self.runtime.enabled("memory"):
+                self.runtime.memory.remember(
+                    summary,
+                    kind="emotional" if kind == "journal" else "knowledge",
+                    scope=scope,
+                    source=kind + ":brief",
+                    key=f"journal:{key}",
+                    sources=entry.get("sources", []),
+                    journal_day=entry["day"],
+                )
+        return updated
 
     async def generate(self, day: str = "", scope: str = "global", kind: str = "journal") -> dict:
         if kind == "note":
@@ -99,12 +177,13 @@ class JournalService:
             if self.runtime.enabled("memory"):
                 memories = [
                     entry
-                    for entry in self.runtime.memory.recall(query="", scope=scope, limit=8)
+                    for entry in self.runtime.memory.recall(
+                        query="", scope=scope, include_journals=False
+                    )
                     if entry.get("scope", "global") in {"global", scope}
                     and (entry.get("profile") or entry.get("kind") in {"knowledge", "emotional"})
                     and not str(entry.get("source", "")).startswith("journal")
                 ]
-            template = PROMPTS["journal.write"]
             data = {
                 "date": day,
                 "kind": kind,
@@ -112,16 +191,7 @@ class JournalService:
                 "events": events,
                 "memories": memories,
             }
-            if hasattr(self.runtime, "complete"):
-                text = (
-                    await self.runtime.complete(kind + ".write", kind, template, data, scope)
-                ).strip()
-            else:
-                text = (
-                    await self.runtime.generate(
-                        kind, template + json.dumps(data, ensure_ascii=False), scope=scope
-                    )
-                ).strip()
+            text = await self._complete(kind + ".write", kind, data, scope)
             if not self.runtime.enabled(kind) or not await scope_allowed(self.runtime, scope):
                 return {"status": "skipped", "reason": "module_disabled"}
             if not text:
@@ -142,24 +212,10 @@ class JournalService:
                 "scope": scope,
                 "kind": kind,
                 "text": text,
+                "summary_status": "pending",
                 "sources": sources,
                 "created_at": datetime.now(UTC).timestamp(),
             }
             if not self.runtime.store.claim("journals", key, entry):
                 return self.runtime.store.get("journals", key)
-            if self.runtime.enabled("memory"):
-                label = "角色日记" if kind == "journal" else "见闻笔记"
-                fiction = (
-                    "（含明确标记的虚构角色经历）"
-                    if any(source["fiction"] for source in sources)
-                    else ""
-                )
-                self.runtime.memory.remember(
-                    f"{label}{fiction} {day}：{text}",
-                    kind="emotional" if kind == "journal" else "knowledge",
-                    scope=scope,
-                    source=kind,
-                    key=f"journal:{key}",
-                    sources=sources,
-                )
-            return entry
+            return await self._summarize(entry)

@@ -282,13 +282,14 @@ class LifeService(ActionLedger):
         if not self.runtime.enabled("memory"):
             return []
         now = self._now(now)
+        limit = int(self.runtime.settings.get("memory", {}).get("context_limit", 10))
         records = prepare_life_records(
             [
                 e
                 for e in self.runtime.memory.recall(
                     query="",
                     scope=scope,
-                    limit=100 if scope != "global" else 12,
+                    limit=limit,
                     reinforce=reinforce,
                     context_now=now,
                 )
@@ -299,10 +300,10 @@ class LifeService(ActionLedger):
             event_lookup=lambda key: self.runtime.store.get("events", key),
         )
         if scope != "global":
-            records = [e for e in records if e.get("scope") == scope][:6] + [
+            records = [e for e in records if e.get("scope") == scope] + [
                 e for e in records if e.get("scope", "global") == "global"
-            ][:6]
-        return records[:12]
+            ]
+        return records[:limit]
 
     def _day_activities(self, day: date) -> list[dict]:
         return [

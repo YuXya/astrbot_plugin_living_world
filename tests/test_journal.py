@@ -1,4 +1,5 @@
 import copy
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -29,6 +30,15 @@ class Store:
             return False
         self.put(namespace, key, value)
         return True
+
+    @contextmanager
+    def transaction(self):
+        before = copy.deepcopy(self.data)
+        try:
+            yield
+        except BaseException:
+            self.data = before
+            raise
 
 
 class Memory:
@@ -111,7 +121,8 @@ async def test_public_journal_cannot_use_private_evidence_or_future_plans():
         assert excluded not in prompt
     assert {source["id"] for source in entry["sources"]} == {"fiction", "sent"}
     assert runtime.memory.writes[0]["scope"] == "global"
-    assert "虚构角色经历" in runtime.memory.writes[0]["text"]
+    assert runtime.memory.writes[0]["source"] == "journal:brief"
+    assert any(s["fiction"] for s in runtime.memory.writes[0]["sources"])
 
 
 @pytest.mark.asyncio
@@ -136,7 +147,7 @@ async def test_generation_is_deduplicated_by_kind_day_scope_across_restart():
     first = await JournalService(runtime).generate("2026-09-05")
     second = await JournalService(runtime).generate("2026-09-05")
     assert first == second
-    assert len(runtime.calls) == len(runtime.memory.writes) == 1
+    assert len(runtime.calls) == 2 and len(runtime.memory.writes) == 1
     note = await JournalService(runtime).generate("2026-09-05", kind="notes")
     assert note["id"] != first["id"]
     assert note["sources"][0]["source"] == "https://example.test/news"

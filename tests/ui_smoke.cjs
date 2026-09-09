@@ -147,6 +147,11 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
             Object.assign(row, body.patch, { detailed: false, actions: {}, description: "", detail_version: "" });
             return structuredClone(row);
           }
+          if (body.action === "summarize_journal") {
+            const row = window.fixture.entries.find((entry) => entry.id === body.id);
+            Object.assign(row, { summary: "简报：看到了星星。<script>window.briefXss=true</script>", summary_status: "ready" });
+            return structuredClone(row);
+          }
           return { status: "success", action: body.action };
         },
       };
@@ -495,6 +500,16 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.equal(batch.updates.length, 1); assert.ok(!Object.hasOwn(batch.updates[0].changes, "actions"), "Batch edits only submit the outline");
     await page.locator("#editor-submit").click(); await page.locator("#editor").waitFor({ state: "hidden" });
     await page.locator('a[data-view="memory"]').click();
+    assert.equal(await page.getByLabel("相关记忆总条数", { exact: false }).inputValue(), "10");
+    assert.equal(await page.getByLabel("其中日记／笔记最多", { exact: false }).inputValue(), "2");
+    assert.equal(await page.getByLabel("每份简报最多字符", { exact: false }).inputValue(), "200");
+    await page.getByLabel("相关记忆总条数", { exact: false }).fill("6");
+    await page.getByLabel("其中日记／笔记最多", { exact: false }).fill("1");
+    await page.getByLabel("每份简报最多字符", { exact: false }).fill("120");
+    await page.getByRole("button", { name: "保存上下文用量", exact: true }).click();
+    await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.fixture.settings.memory), { context_limit: 6, journal_limit: 1, brief_max_chars: 120 });
+    if (process.env.LIVING_WORLD_MEMORY_SCREENSHOT) await page.locator("#memory-context-settings").screenshot({ path: process.env.LIVING_WORLD_MEMORY_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
     assert.equal(await page.evaluate(() => window.xss), undefined); assert.equal(await page.locator("#content img").count(), 0);
     await page.getByRole("searchbox", { name: "搜索记忆" }).fill("流星雨");
     assert.equal(await page.locator("#content .record").count(), 1);
@@ -523,6 +538,19 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.equal(settings.daily_digest.sources[0].keywords, "早报 日报");
     assert.ok(!Object.hasOwn(settings, "name"), "Source row fields must not leak into top-level settings");
     await page.locator('a[data-view="journal"]').click();
+    const archiveText = "晚风很舒服，回家看到一颗很亮的星。";
+    assert.equal(await page.getByText(archiveText, { exact: true }).isVisible(), false);
+    await page.getByText("查看完整正文", { exact: true }).click();
+    assert.equal(await page.getByText(archiveText, { exact: true }).isVisible(), true);
+    await page.getByRole("button", { name: "生成简报", exact: true }).click();
+    await page.getByRole("button", { name: "调用 AI 生成简报", exact: true }).click();
+    await page.locator("#editor").waitFor({ state: "hidden" });
+    await page.getByRole("button", { name: "重新生成简报", exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.briefXss), undefined);
+    assert.equal(await page.evaluate(() => window.fixture.entries[0].text), archiveText);
+    const briefAction = await page.evaluate(() => window.calls.findLast((call) => call.body?.action === "summarize_journal").body);
+    assert.equal(briefAction.id, "j1"); assert.equal(briefAction.regenerate, false);
+    if (process.env.LIVING_WORLD_JOURNAL_SCREENSHOT) await page.locator("#journal-entries").screenshot({ path: process.env.LIVING_WORLD_JOURNAL_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
     await page.getByText("手动读取来源（真实调用并保存见闻）", { exact: true }).click();
     await page.getByLabel("视频 BV 号", { exact: true }).fill("BV1test");
     await page.evaluate(() => { window.failNext = true; });
@@ -810,6 +838,8 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       await page.evaluate((target) => { location.hash = target; }, view);
       await page.locator(`a[data-view="${view}"][aria-current="page"]`).waitFor();
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, `No mobile horizontal overflow: ${view}`);
+      if (view === "memory" && process.env.LIVING_WORLD_MEMORY_MOBILE_SCREENSHOT) await page.locator("#memory-context-settings").screenshot({ path: process.env.LIVING_WORLD_MEMORY_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+      if (view === "journal" && process.env.LIVING_WORLD_JOURNAL_MOBILE_SCREENSHOT) await page.locator("#journal-entries").screenshot({ path: process.env.LIVING_WORLD_JOURNAL_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
       if (view === "settings" && process.env.LIVING_WORLD_GROUP_REPLY_MOBILE_SCREENSHOT) await page.locator("#group-reply-settings").screenshot({ path: process.env.LIVING_WORLD_GROUP_REPLY_MOBILE_SCREENSHOT });
       if (view === "schedule" && process.env.LIVING_WORLD_SCHEDULE_MOBILE_SCREENSHOT) await page.locator("#content").screenshot({ path: process.env.LIVING_WORLD_SCHEDULE_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
       if (view === "debug") {

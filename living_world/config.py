@@ -107,6 +107,9 @@ DEFAULTS = {
         "forget_threshold": 0.15,
         "recall_boost": 0.2,
         "reflection_limit": 8,
+        "context_limit": 10,
+        "journal_limit": 2,
+        "brief_max_chars": 200,
     },
     "journal": {"hour": 23},
     "model_timeout_seconds": 90,
@@ -213,8 +216,13 @@ def settings_from(patch=None):
         ("journal", "hour"): (0, 23),
         ("debug", "retain_per_category"): (1, 1000),
         ("bilibili", "recent_limit"): (1, 50),
+        ("memory", "context_limit"): (0, 50),
+        ("memory", "journal_limit"): (0, 50),
+        ("memory", "brief_max_chars"): (50, 1000),
     }
     for (section, key), (low, high) in bounds.items():
+        if section == "memory" and isinstance(result[section][key], bool):
+            raise ValueError(f"{section}.{key} 必须为整数")
         value = float(result[section][key])
         if not math.isfinite(value) or not low <= value <= high:
             raise ValueError(f"{section}.{key} 必须在 {low} 到 {high} 之间")
@@ -223,6 +231,9 @@ def settings_from(patch=None):
             "limit",
             "hour",
             "recent_limit",
+            "context_limit",
+            "journal_limit",
+            "brief_max_chars",
         }:
             if not value.is_integer():
                 raise ValueError(f"{section}.{key} 必须为整数")

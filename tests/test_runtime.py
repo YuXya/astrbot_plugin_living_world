@@ -246,7 +246,7 @@ async def test_current_chat_memory_can_form_scoped_diary(runtime):
     runtime.memory.update(row["id"], {"text": "明天下午约好聊天"})
     runtime.host.answers = ["今天约好明天下午聊天。"]
     entry = await runtime.journal.generate(scope=PRIVATE)
-    prompt = runtime.host.calls[-1][1]
+    prompt = runtime.host.calls[-2][1]
     assert "明天下午约好聊天" in prompt and "明天早上约好聊天" not in prompt
     assert entry["scope"] == PRIVATE
     assert not runtime.journal.list_entries("global")

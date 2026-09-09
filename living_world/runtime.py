@@ -491,6 +491,14 @@ class Runtime:
             activity = {**self.life._view(activity, scope), "scope": scope}
             draft = self.life.detail_request(activity, now=now)
             template, context = draft["template"], draft["context"]
+        elif task in {"journal.brief", "notes.brief"}:
+            entries = [e for e in self.journal.list_entries(scope) if e.get("kind") == module]
+            entry = next(
+                (e for e in entries if e.get("scope", "global") == scope), next(iter(entries), None)
+            )
+            context = self.journal.brief_request(
+                entry or {"kind": module, "text": "请填写要生成简报的原文"}
+            )
         else:
             activity = self.life.current(scope)
             available = await self.context_text(scope, reinforce=False)
@@ -502,7 +510,7 @@ class Runtime:
             latest = observations[0] if observations else {}
             context.update(context=available)
             if task == "memory.reflect":
-                context["known"] = self.memory.recall(scope=scope, limit=10, reinforce=False)
+                context["known"] = self.memory.recall(scope=scope, reinforce=False)
             elif task == "life.revise":
                 now = self.life._now()
                 context.pop("context", None)
@@ -692,7 +700,7 @@ class Runtime:
             return ""
         now = self.life._now()
         records = self.memory.recall(
-            query, scope=scope, person_id=person_id, limit=10, reinforce=reinforce, context_now=now
+            query, scope=scope, person_id=person_id, reinforce=reinforce, context_now=now
         )
         records = [r for r in records if self._source_enabled(r.get("source", ""))]
         data = {
@@ -1190,6 +1198,14 @@ class Runtime:
         if action == "delete_entry":
             self.journal.delete(data["id"])
             return {"status": "success"}
+        if action == "summarize_journal":
+            entry = self.store.get("journals", data["id"])
+            if not entry:
+                raise ValueError("日记或笔记已不存在")
+            return await self.run(
+                entry["kind"],
+                self.journal.summarize(data["id"], regenerate=bool(data.get("regenerate"))),
+            )
         if action == "explore":
             return await self.execute_action(
                 data["source"], {"query": data.get("query", "")}, scope

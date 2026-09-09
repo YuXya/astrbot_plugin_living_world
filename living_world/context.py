@@ -108,6 +108,25 @@ def is_role_experience(row):
     )
 
 
+def is_journal_memory(row):
+    return str(row.get("source", "")).split(":", 1)[0] in {"journal", "notes"} or str(
+        row.get("id", "")
+    ).startswith("journal:")
+
+
+def is_fiction_journal(row):
+    return row.get("source") == "journal:brief" and any(
+        isinstance(source, dict) and (source.get("fiction") or source.get("source") == "fiction")
+        for source in row.get("sources", [])
+    )
+
+
+def brief_text(value, limit=200):
+    """Bound a reading projection without modifying the archived document."""
+    text = " ".join(clean_life_text(value).split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
 def event_id(row, *, memory=False):
     key = str(row.get("id", ""))
     return str(
@@ -119,6 +138,11 @@ def event_id(row, *, memory=False):
 def prepare_life_record(row, now, *, memory=False, event_lookup=None):
     """Return a presentation copy; lineage lookups must stay within the original scope."""
     result = dict(row)
+    if memory and is_journal_memory(row):
+        if row.get("source") not in {"journal:brief", "notes:brief"}:
+            return None
+        if is_fiction_journal(row) and row.get("journal_day") != now.date().isoformat():
+            return None
     identity = event_id(row, memory=memory)
     origin = event_lookup(identity) if identity and event_lookup else None
     moment = material_time(result.get("occurred_at"), now)
@@ -186,6 +210,10 @@ def prepare_life_records(records, now, *, memory=False, event_lookup=None, seen=
 
 def record_text(row, now, *, memory=False):
     value = clean_life_text(row.get("text"))
+    if memory and is_journal_memory(row):
+        label = "日记简报" if str(row.get("source", "")).startswith("journal") else "笔记简报"
+        day = row.get("journal_day", "")
+        return f"{label}{'（' + day + '）' if day else ''}：{value}"
     if is_role_experience(row):
         moment = material_time(row.get("occurred_at"), now) or material_time(
             row.get("created_at"), now
@@ -319,7 +347,7 @@ def context_from_data(data):
         data.get("memories", []), now, memory=True, event_lookup=events.get, seen=seen
     )
     memory_lines = [f"- {record_text(row, now, memory=True)}" for row in memories]
-    if any(is_role_experience(row) for row in experiences + memories):
+    if any(is_role_experience(row) or is_fiction_journal(row) for row in experiences + memories):
         add("经历说明", "角色生活记录的类型", FICTION_NOTICE)
     add(
         "相关记忆与人物认知",

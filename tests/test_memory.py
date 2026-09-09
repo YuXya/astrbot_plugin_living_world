@@ -223,7 +223,8 @@ class MemoryTests(unittest.TestCase):
             )
         )
         disabled.clear()
-        self.assertEqual(len(self.memory.recall()), 7)
+        # Legacy journals remain archived until a brief is generated.
+        self.assertEqual(len(self.memory.recall()), 5)
 
     def test_merged_and_derived_memories_keep_source_disabled_boundaries(self):
         self.runtime._source_enabled = lambda source: source != "news"

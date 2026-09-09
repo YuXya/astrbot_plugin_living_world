@@ -24,7 +24,7 @@ let debugBodySequence = 0;
 let selectedDrive = "loneliness";
 const driveDrafts = new Map();
 const driveNames = { loneliness: "寂寞值", energy: "精力" };
-const debugTaskNames = { "chat.turn": "聊天回复", "reply.model": "聊天回复", "reply.request": "聊天回复", "reply.tool": "聊天工具", "life.plan": "生成日程", "life.plan_day": "生成今日日程", "life.detail": "细化活动", "life.adjust": "调整日程", "news.select": "挑选新闻", "news.read": "阅读新闻", "search.topic": "选择搜索主题", "search.note": "搜索见闻笔记", "journal.write": "生成日记", "debug.test": "模型试跑", "test": "模型试跑" };
+const debugTaskNames = { "chat.turn": "聊天回复", "reply.model": "聊天回复", "reply.request": "聊天回复", "reply.tool": "聊天工具", "life.plan": "生成日程", "life.plan_day": "生成今日日程", "life.detail": "细化活动", "life.adjust": "调整日程", "news.select": "挑选新闻", "news.read": "阅读新闻", "search.topic": "选择搜索主题", "search.note": "搜索见闻笔记", "journal.write": "生成日记", "journal.brief": "日记简报", "notes.write": "生成笔记", "notes.brief": "笔记简报", "debug.test": "模型试跑", "test": "模型试跑" };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -141,7 +141,7 @@ async function action(name, payload = {}) {
     await readState();
     render();
     return result ?? true;
-  }, (result) => result?.status === "skipped" ? `本次未执行：${result.text || result.reason || "请查看操作结果"}` : result?.status === "failed" ? `本次执行失败：${result.text || result.error || result.reason || "请查看操作结果"}` : "操作已完成，请查看执行结果");
+  }, (result) => result?.reason === "brief_failed" ? "简报生成失败，已保留正文和已有简报；可点击生成简报重试。" : result?.status === "skipped" ? `本次未执行：${result.text || result.reason || "请查看操作结果"}` : result?.status === "failed" ? `本次执行失败：${result.text || result.error || result.reason || "请查看操作结果"}` : "操作已完成，请查看执行结果");
 }
 async function saveSettings(settings) {
   return request(async () => {
@@ -768,6 +768,16 @@ function editMemory(record = {}) {
 }
 function renderMemory() {
   const root = el("div", "stack");
+  const limits = settingsForm("保存上下文用量", "从下一次组装上下文生效，不调用模型、不删除记忆。已发出的请求和历史调试保持原样。");
+  limits.id = "memory-context-settings";
+  limits.addEventListener("submit", (event) => { event.preventDefault(); saveSettings(applyFields(clone(snapshot.settings), limits)); });
+  const memorySettings = snapshot.settings?.memory || {};
+  limits.append(card("上下文用量", "用于聊天、日程生成、调整、细化及自动试跑资料中的相关记忆。日记／笔记占总条数，不额外叠加；实际命中可能更少。", append(el("div", "form-grid memory-context-fields"),
+    field("相关记忆总条数", "memory.context_limit", memorySettings.context_limit ?? 10, { type: "number", min: 0, max: 50, step: 1, hint: "默认 10，范围 0—50；0 表示不注入相关记忆和人物认知。" }),
+    field("其中日记／笔记最多", "memory.journal_limit", memorySettings.journal_limit ?? 2, { type: "number", min: 0, max: 50, step: 1, hint: "默认 2，范围 0—50；0 表示不注入日记／笔记简报。" }),
+    field("每份简报最多字符", "memory.brief_max_chars", memorySettings.brief_max_chars ?? 200, { type: "number", min: 50, max: 1000, step: 1, hint: "默认 200，范围 50—1000；含标点。降低后立即限制旧简报的注入长度。" })
+  )));
+  root.append(limits, el("p", "hint", "这里限制相关记忆区；日程、近期经历、见闻和宿主聊天历史是其他资料区，不计入这些条数。日记／笔记全文仍可在「新闻、搜索与日记」查看；旧记录没有简报时不注入，可在那里点击「生成简报」。含虚构日常的日记简报仅在对应角色日期召回。"));
   const search = el("input"); search.type = "search"; search.placeholder = "搜索内容、人物或场合"; search.value = memorySearch; search.setAttribute("aria-label", "搜索记忆");
   const kindSelect = field("分类", "filter-kind", memoryKind, { options: [{ value: "", label: "全部分类" }, ...Object.entries(kindNames).filter(([key]) => ["knowledge", "event", "skill", "emotional", "profile"].includes(key)).map(([value, label]) => ({ value, label }))] }).querySelector("select"); kindSelect.setAttribute("aria-label", "筛选记忆分类");
   const scopeSelect = field("场合", "filter-scope", memoryScope, { options: [{ value: "", label: "全部场合" }, ...scopeOptions()] }).querySelector("select"); scopeSelect.setAttribute("aria-label", "筛选记忆场合");
@@ -813,9 +823,15 @@ function realSourceAction(source, label, queryLabel = "", placeholder = "") {
 function renderJournal() {
   const root = el("div", "stack");
   append(root, append(el("div", "grid"), card("新闻阅读", "候选内容 → 按兴趣选择 → 阅读 → 感想。", observationList(rows("observations").filter((item) => observationKind(item, "news") || observationKind(item, "daily_digest")))), card("主动搜索记录", "活动和记忆中的兴趣成为查询，结果形成见闻笔记。", observationList(rows("observations").filter((item) => observationKind(item, "search"))))));
-  const generate = () => openEditor("生成日记或笔记", [el("p", "hint", "真实调用模型，使用已有经历生成并保存记录，不发送消息。"), field("日期", "date", dayNow(), { type: "date", required: true }), field("类型", "kind", "journal", { options: [{ value: "journal", label: "生活日记" }, { value: "note", label: "见闻笔记" }] }), field("所属场合", "scope", "global", { options: scopeOptions(), hint: "只使用该场合允许回顾的内容。" })], (values) => action("generate_journal", values), "调用 AI 并保存记录");
-  const entryActions = (record) => append(el("div", "actions"), button("删除记录", () => confirmAction("删除这篇记录", "删除选中的日记或笔记，原始见闻和记忆继续保留，不调用模型。", () => action("delete_entry", { id: record.id }), true, "删除记录"), "danger", true));
-  append(root, append(el("div", "grid"), card("日记与见闻笔记", "从已有经历出发，保留来源场合。", recordList(rows("entries"), { actions: entryActions }), button("生成日记或笔记", generate, "secondary", true)), card("天气与 B 站见闻", "搜索、已观看与历史记忆分别标明。", observationList(rows("observations").filter((item) => !observationKind(item, "news") && !observationKind(item, "search") && !observationKind(item, "daily_digest"))))));
+  const generate = () => openEditor("生成日记或笔记", [el("p", "hint", "先调用模型生成并保存正文，再调用一次模型提炼上下文简报，不发送消息。简报失败保留正文，可单独重试。"), field("日期", "date", dayNow(), { type: "date", required: true }), field("类型", "kind", "journal", { options: [{ value: "journal", label: "生活日记" }, { value: "note", label: "见闻笔记" }] }), field("所属场合", "scope", "global", { options: scopeOptions(), hint: "只使用该场合允许回顾的内容。" })], (values) => action("generate_journal", values), "调用 AI 并保存记录");
+  const entries = el("div", "stack"); entries.id = "journal-entries";
+  for (const record of rows("entries")) {
+    const preview = record.summary ? el("p", "record-body", record.summary) : el("p", "hint", record.summary_status === "failed" ? "简报生成失败，正文已保留；当前不注入这篇全文，可点击生成简报重试。" : "尚无简报，当前不注入这篇全文。点击生成简报后可参与召回。");
+    const actions = append(el("div", "actions"), button(record.summary ? "重新生成简报" : "生成简报", () => confirmAction("生成上下文简报", "调用一次模型提炼这篇原文并保存简报，不改正文、不发送消息。失败保留已有简报；适用记忆开关、用量和场合限制。", () => action("summarize_journal", { id: record.id, regenerate: Boolean(record.summary) }), false, "调用 AI 生成简报"), "secondary", true), button("删除记录", () => confirmAction("删除这篇记录", "删除选中的日记或笔记及其派生记忆，不删除原始见闻，不调用模型。", () => action("delete_entry", { id: record.id }), true, "删除记录"), "danger", true));
+    entries.append(append(el("article", "record"), append(el("div", "record-head"), append(el("div"), el("h3", "record-title", `${record.day || ""} ${kindNames[record.kind] || "日记"}`), el("p", "hint", `所属场合：${scopeLabel(record.scope)}`)), actions), preview, append(el("details"), el("summary", "", "查看完整正文"), el("div", "record-body", record.text || ""))));
+  }
+  if (!rows("entries").length) entries.append(empty());
+  append(root, append(el("div", "grid"), card("日记与见闻笔记", "正文与简报分别保存；注入条数和简报长度在「记忆与人物 → 上下文用量」设置。", entries, button("生成日记或笔记", generate, "secondary", true)), card("天气与 B 站见闻", "搜索、已观看与历史记忆分别标明。", observationList(rows("observations").filter((item) => !observationKind(item, "news") && !observationKind(item, "search") && !observationKind(item, "daily_digest"))))));
   const manual = append(el("details", "card"), el("summary", "", "手动读取来源（真实调用并保存见闻）"), append(el("div", "grid manual-sources"), card("新闻", "立即阅读一次，与日程执行记录分开。", realSourceAction("news", "读取新闻并写感想")), card("网页搜索", "沿用 AstrBot 网页搜索设置。", realSourceAction("search", "搜索并保存见闻", "搜索内容", "留空由 AI 根据活动选择主题")), card("和风天气", "读取已配置地点的天气。", realSourceAction("weather", "读取天气并保存")), card("B 站搜索", "搜索结果不会记成已经观看。", realSourceAction("bilibili", "搜索 B 站视频", "视频关键词")), card("观看视频", "调用 Bilibili AI Bot 的指定视频观看能力。", realSourceAction("bilibili_watch", "观看指定视频并保存", "视频 BV 号", "BV…")), card("公开视频记忆", "读取历史见闻，不记成今天新看过。", realSourceAction("bilibili_recent", "读取公开视频记忆"))));
   root.append(manual);
   return root;
