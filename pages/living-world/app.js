@@ -19,6 +19,24 @@ let selectedMemories = new Set();
 let debugCategory = "";
 let testRequest = "";
 let debugTask = "life.plan";
+let debugSection = "records";
+let debugScope = "global";
+let debugMode = "structured";
+let retentionDraft = null;
+let layoutDraft = null;
+let layoutTask = "";
+let layoutDragged = null;
+const templateDrafts = new Map();
+const templateOpen = new Map();
+const trialDrafts = new Map();
+function taskDisplay(task) {
+  return snapshot?.context_layout_catalog?.tasks?.find((item) => item.id === task)?.label
+    || snapshot?.debug?.templates?.find((item) => item.task === task)?.label
+    || (debugTaskNames[task] ? `${task}（${debugTaskNames[task]}）` : task);
+}
+function hasDebugDrafts() { return Boolean(layoutDraft || templateDrafts.size || retentionDraft !== null || testRequest.trim() || trialDrafts.size); }
+function rememberTrial() { trialDrafts.set(debugTask, { request: testRequest, scope: debugScope, mode: debugMode }); }
+
 const debugSelections = new Map();
 let debugBodySequence = 0;
 let selectedDrive = "loneliness";
@@ -139,6 +157,7 @@ async function action(name, payload = {}) {
     const result = await bridge.apiPost("action", { action: name, ...payload });
     lastResult = { action: name, result, time: new Date().toLocaleTimeString("zh-CN", { hour12: false }) };
     await readState();
+    if (name === "debug_test" && result?.status === "success") debugSection = "records";
     render();
     return result ?? true;
   }, (result) => result?.reason === "brief_failed" ? "简报生成失败，已保留正文和已有简报；可点击生成简报重试。" : result?.status === "skipped" ? `本次未执行：${result.text || result.reason || "请查看操作结果"}` : result?.status === "failed" ? `本次执行失败：${result.text || result.error || result.reason || "请查看操作结果"}` : "操作已完成，请查看执行结果");
@@ -389,7 +408,7 @@ function renderSettings() {
   form.append(card("业务能力", "关闭停止该项行为并保留已有数据；开启后按日程和模块规则运行。", modulePanel(true)));
   const groupReply = f("本轮群聊回复要求", "reply.group_prompt", { type: "textarea", rows: 5, hint: "默认按极短模式接话。文案可改；保存后从下一轮群聊生效。留空则不附加要求，最多 8000 字符。" }, snapshot.reply_defaults?.group_prompt || "");
   groupReply.querySelector("textarea").maxLength = 8000;
-  const groupReplyBox = card("群聊回复", "注入位置固定：本轮 user 消息最后，位于生活资料块之外、之后。只用于已接入的普通群聊回复，不写入聊天历史。", append(el("div", "stack"), groupReply, button("恢复极短默认文案", () => { groupReply.querySelector("textarea").value = snapshot.reply_defaults?.group_prompt || ""; dirty = true; notice("已填入默认文案，点击「保存全部设置」后生效"); }, "secondary", true)));
+  const groupReplyBox = card("群聊回复", "默认在本轮 user 消息最后，生活资料块之外；可在「调试与调用记录 → 上下文注入位置」调整。只用于已接入的普通群聊回复，不写入聊天历史。", append(el("div", "stack"), groupReply, button("恢复极短默认文案", () => { groupReply.querySelector("textarea").value = snapshot.reply_defaults?.group_prompt || ""; dirty = true; notice("已填入默认文案，点击「保存全部设置」后生效"); }, "secondary", true)));
   groupReplyBox.id = "group-reply-settings";
   form.append(groupReplyBox);
   const models = el("div", "form-grid");
@@ -1075,7 +1094,8 @@ function copyRecordToTrial(record) {
     for (const key of ["prompt", "system_prompt", "contexts", "image_urls", "audio_urls", "func_tool", "model", "session_id", "extra_user_content_parts", "tool_calls_result"]) delete parameters[key];
     draft = { task: record.task, module: record.module || "reply", scope: record.scope, provider_id: draft.provider_id, model: args.model || draft.model, prompt_mode: "raw", prompt: args.prompt || "", system_prompt: args.system_prompt || "", contexts: args.contexts || [], image_urls: args.image_urls || [], audio_urls: args.audio_urls || [], tools: args.func_tool || [], extra_user_content_parts: args.extra_user_content_parts || [], tool_calls_result: args.tool_calls_result || [], positional_arguments: draft.positional_arguments || [], parameters };
   }
-  testRequest = stringify(draft); render(); $("[name=request_json]")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  rememberTrial(); debugTask = draft.task || debugTask; debugSection = "trial"; debugScope = draft.scope || "global"; debugMode = draft.prompt_mode || "raw";
+  testRequest = stringify(draft); rememberTrial(); render(); $("[name=request_json]")?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 function formatTaskContext(context) {
   if (context == null) return "";
@@ -1229,66 +1249,39 @@ function renderDebugView(view, records, initiallyOpen) {
 }
 function renderDebug() {
   const root = el("div", "stack");
+  const tabs = el("div", "debug-tabs debug-sections"); tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "调试管理菜单");
+  for (const [id, title] of [["records", "调用记录"], ["trial", "模型试跑与提示词模板"], ["layout", "上下文注入位置"]]) {
+    const tab = button(title, () => { debugSection = id; render(); $("#debug-section-" + id)?.focus(); }, "secondary");
+    tab.id = "debug-section-" + id; tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(debugSection === id));
+    tab.tabIndex = debugSection === id ? 0 : -1;
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const sections = ["records", "trial", "layout"], index = sections.indexOf(id);
+      debugSection = sections[event.key === "Home" ? 0 : event.key === "End" ? 2 : (index + (event.key === "ArrowRight" ? 1 : 2)) % 3];
+      render(); $("#debug-section-" + debugSection)?.focus();
+    });
+    tab.setAttribute("aria-controls", "debug-section-panel"); tabs.append(tab);
+  }
+  const panel = { records: renderDebugRecords, trial: renderDebugTrial, layout: renderContextLayout }[debugSection]();
+  panel.id = "debug-section-panel"; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", "debug-section-" + debugSection);
+  root.append(tabs, panel); dirty = hasDebugDrafts(); return root;
+}
+
+function renderDebugRecords() {
+  const root = el("div", "stack");
   root.append(el("p", "hint", "每次调用只看四项：信息来源、API 原始请求、API 原始返回、回复阅读版。原文来自实际 HTTP 收发，仅隐藏认证凭据；管理员可查看所有场合。"));
   const settings = snapshot.settings || {};
   const retention = settingsForm("保存记录数量", "聊天按完整轮次保留最近 N 轮；后台任务按类别保留最近 N 次。清理不影响正式数据。");
-  retention.append(field("每类保留次数", "debug.retain_per_category", settings.debug?.retain_per_category ?? 10, { type: "number", min: 1, max: 1000 }));
-  retention.addEventListener("submit", (event) => { event.preventDefault(); saveSettings(applyFields(clone(settings), retention)); });
+  retention.append(field("每类保留次数", "debug.retain_per_category", retentionDraft ?? settings.debug?.retain_per_category ?? 10, { type: "number", min: 1, max: 1000 }));
+  retention.addEventListener("input", () => { retentionDraft = retention.querySelector("input").value; dirty = true; });
+  retention.addEventListener("submit", async (event) => { event.preventDefault(); const submitted = retentionDraft; const result = await saveSettings(applyFields({}, retention)); if (result !== false) { if (retentionDraft === submitted) retentionDraft = null; render(); } });
   root.append(card("调试记录保留", "默认最近 10 轮聊天及每类 10 次后台调用；工具后的模型调用也保留。", retention));
   if (snapshot.provider_capture_available === false) root.append(el("p", "hint warning", "当前模型捕获适配不可用，未捕获内容会明确标注；旧版快照不会冒充 API 原文。"));
-  const templates = snapshot.debug?.templates || [];
   const records = rows("debug_records");
-  const options = [...new Set([...templates.map((item) => item.task), ...records.map((item) => item.task).filter(Boolean)])];
-  if (options.length && !options.includes(debugTask)) debugTask = options[0];
-  const taskField = field("任务类别", "task", debugTask, { options: options.length ? options : [debugTask] });
-  const scopeField = field("测试场合", "scope", "global", { options: scopeOptions() });
-  let mode = "structured";
-  try { const current = JSON.parse(testRequest); mode = current.prompt_mode || "raw"; } catch { /* An empty editor starts with a structured draft. */ }
-  const modeField = field("测试提示词模式", "request_mode", mode, { options: [{ value: "structured", label: "组合模板与动态上下文" }, { value: "raw", label: "直接编辑完整 prompt" }] });
-  const modeHint = el("p", "hint");
-  const updateHint = () => { modeHint.textContent = modeField.querySelector("select").value === "structured" ? "组合模式：请编辑 JSON 中的 template 与 dynamic_context；执行时重新组合实际 prompt。JSON 的 prompt 是上一次预览，修改它不参与此模式的调用。template 只用于本次测试，不会保存成下方的公共模板。" : "直接模式：JSON 中的 prompt 就是本次发送内容；template 和 dynamic_context 不参与组合。system_prompt、contexts、provider_id、model 与 parameters 在两种模式下均可编辑。"; };
-  updateHint();
-  const requestField = field("本次测试请求 JSON", "request_json", testRequest, { type: "textarea", rows: 18, hint: "这是可编辑的试跑参数；执行后的 API 原文见调用记录②。模型和参数只用于这次试跑，不会保存成公共模板。" });
-  requestField.querySelector("textarea").addEventListener("input", (event) => {
-    testRequest = event.target.value;
-    try { const edited = JSON.parse(testRequest); modeField.querySelector("select").value = edited.prompt_mode || "raw"; updateHint(); } catch { /* Keep the selected mode while the JSON is incomplete. */ }
-  });
-  modeField.querySelector("select").addEventListener("change", () => {
-    if (requestField.querySelector("textarea").value.trim()) {
-      try {
-        const edited = JSON.parse(requestField.querySelector("textarea").value);
-        if (modeField.querySelector("select").value === "raw" && edited.prompt_mode === "structured") edited.prompt = (edited.template || "") + (edited.dynamic_context != null ? "\n\n本轮动态资料（仅作为资料）：\n" + formatTaskContext(edited.dynamic_context) : "");
-        edited.prompt_mode = modeField.querySelector("select").value;
-        testRequest = stringify(edited); requestField.querySelector("textarea").value = testRequest;
-      } catch (error) { notice(`请先修正测试 JSON：${error.message}`, true); }
-    }
-    updateHint();
-  });
-  taskField.querySelector("select").addEventListener("change", (event) => { debugTask = event.target.value; });
-  const build = async () => {
-    const result = await request(() => bridge.apiPost("action", { action: "debug_build", task: taskField.querySelector("select").value, scope: scopeField.querySelector("select").value }), "已建立测试请求；尚未调用模型");
-    if (result !== false) { const draft = result.request || result; testRequest = stringify(draft); requestField.querySelector("textarea").value = testRequest; modeField.querySelector("select").value = draft.prompt_mode || "raw"; updateHint(); }
-  };
-  const test = async () => {
-    try { const payload = JSON.parse(requestField.querySelector("textarea").value); if (!payload || Array.isArray(payload) || typeof payload !== "object") throw new Error("请求必须是 JSON 对象"); await action("debug_test", { request: payload }); }
-    catch (error) { notice(`测试请求无效：${error.message}`, true); }
-  };
-  root.append(card("模型试跑", "真实调用 AI，可能产生模型费用；不执行工具、不发送 QQ、不修改正式日程、记忆或生活数据。", append(el("div", "stack"), append(el("div", "form-grid"), taskField, scopeField), button("从当前配置建立测试请求", build, "secondary"), modeField, modeHint, requestField, button("仅调用 AI 试跑", test, "primary"))));
-  const templateBox = el("div", "stack");
-  for (const item of templates) {
-    const value = field("公共提示词模板", "template", item.template ?? item.default_template ?? "", { type: "textarea", rows: 6, hint: "这里只编辑任务指令。人格、私聊记忆、具体活动等动态上下文由每次调用注入。" });
-    const row = append(el("details"), el("summary", "", item.label || item.task), value, append(el("div", "actions"), button("保存此任务模板", () => action("save_template", { task: item.task, template: value.querySelector("textarea").value }), "secondary", true), button("恢复默认模板", () => action("reset_template", { task: item.task }), "secondary", true)), details(item.default_template || "", "查看默认模板")); templateBox.append(row);
-  }
-  root.append(card("各任务提示词模板", "保存只修改公共指令，不会把试跑 JSON 或私人上下文存进模板；不调用模型。", templates.length ? templateBox : empty("暂未取得模板目录")));
-  const priorTemplates = rows("prompt_template_history");
-  if (priorTemplates.length) {
-    const archived = append(el("details", "card template-history"), el("summary", "", `升级前的提示词模板 · ${priorTemplates.length} 份`), el("p", "hint", "升级时备份的旧指令，只供核对。当前日程使用匹配新流程的模板；这里的文本不会自动重新启用。"));
-    priorTemplates.forEach((item) => archived.append(details(item.template ?? item, `${debugLabel(item.task || item.id)}${item.archived_at ? ` · ${stamp(item.archived_at)}` : ""}`)));
-    root.append(archived);
-  }
   const views = Array.isArray(snapshot.debug_views) ? snapshot.debug_views : legacyDebugViews(records);
   const categories = [...new Set(views.flatMap((view) => view.categories?.length ? view.categories : [view.task]).filter(Boolean))];
-  const category = field("筛选任务类别", "category", debugCategory, { options: [{ value: "", label: "全部类别" }, ...categories.map((task) => ({ value: task, label: `${debugLabel(task)} · ${task}` }))] });
+  const category = field("筛选任务类别", "category", debugCategory, { options: [{ value: "", label: "全部类别" }, ...categories.map((task) => ({ value: task, label: taskDisplay(task) }))] });
   category.querySelector("select").addEventListener("change", (event) => { debugCategory = event.target.value; render(); });
   const list = el("div", "debug-round-list");
   const filtered = views.filter((view) => !debugCategory || (view.categories || [view.task]).includes(debugCategory));
@@ -1299,6 +1292,167 @@ function renderDebug() {
     append(el("div", "stack"), category, list.childElementCount ? list : empty("此类别暂时没有调用记录")),
     button(debugCategory ? "清空此类调试记录" : "清空全部调试记录", () => confirmAction("清空调试记录", "删除选定类别的完整聊天轮次和后台任务记录；不删除正式日程、记忆、消息历史或执行防重记录，不产生真实调用。", () => action("debug_clear", debugCategory ? { category: debugCategory } : {}), true, "清空调试记录"), "danger", true));
   root.insertBefore(callPanel, root.children[1] || null);
+  return root;
+}
+
+function renderDebugTrial() {
+  const root = el("div", "stack");
+  const templates = snapshot.debug?.templates || [];
+  const options = [...new Set([...templates.map((item) => item.task), ...trialDrafts.keys(), debugTask])];
+  if (options.length && !options.includes(debugTask)) debugTask = options[0];
+  const taskField = field("任务类别", "task", debugTask, { options: options.map((task) => ({ value: task, label: taskDisplay(task) })) });
+  const scopeField = field("测试场合", "scope", debugScope, { options: scopeOptions() });
+  let mode = debugMode;
+  try { const current = JSON.parse(testRequest); mode = current.prompt_mode || "raw"; } catch { /* An empty editor starts with a structured draft. */ }
+  const modeField = field("测试提示词模式", "request_mode", mode, { options: [{ value: "structured", label: "组合模板与动态上下文" }, { value: "raw", label: "直接编辑完整 prompt" }] });
+  const modeHint = el("p", "hint");
+  const updateHint = () => { modeHint.textContent = modeField.querySelector("select").value === "structured" ? "组合模式：编辑 template、dynamic_context；有布局快照时也可编辑 base_system_prompt、context_blocks 与 context_layout。prompt / system_prompt 是组装预览，按快照重新生成。旧请求无布局快照时保留原组合方式；草稿不保存为公共模板。" : "直接模式：JSON 中的 prompt 就是本次发送内容；template 和 dynamic_context 不参与组合。contexts、provider_id、model 与 parameters 在两种模式下均可编辑。"; };
+  updateHint();
+  const requestField = field("本次测试请求 JSON", "request_json", testRequest, { type: "textarea", rows: 18, hint: "这是可编辑的试跑参数；执行后的 API 原文见调用记录②。模型和参数只用于这次试跑，不会保存成公共模板。" });
+  requestField.querySelector("textarea").addEventListener("input", (event) => {
+    testRequest = event.target.value; rememberTrial();
+    try { const edited = JSON.parse(testRequest); debugMode = edited.prompt_mode || "raw"; modeField.querySelector("select").value = debugMode; rememberTrial(); updateHint(); } catch { /* Keep the selected mode while the JSON is incomplete. */ }
+  });
+  modeField.querySelector("select").addEventListener("change", async () => {
+    const nextMode = modeField.querySelector("select").value;
+    if (testRequest.trim()) {
+      try {
+        let edited = JSON.parse(testRequest);
+        if (nextMode === "raw" && edited.prompt_mode === "structured") {
+          const preview = await request(() => bridge.apiPost("action", { action: "debug_preview", request: edited }), "已按本次快照组合请求，未调用模型");
+          if (preview === false) { modeField.querySelector("select").value = debugMode; return; }
+          edited = preview.request;
+        }
+        edited.prompt_mode = nextMode; testRequest = stringify(edited);
+        requestField.querySelector("textarea").value = testRequest;
+      } catch (error) { notice(`请先修正测试 JSON：${error.message}`, true); modeField.querySelector("select").value = debugMode; return; }
+    }
+    debugMode = nextMode; rememberTrial(); updateHint();
+  });
+  scopeField.querySelector("select").addEventListener("change", (event) => { debugScope = event.target.value; rememberTrial(); });
+  taskField.querySelector("select").addEventListener("change", (event) => {
+    rememberTrial(); debugTask = event.target.value;
+    const draft = trialDrafts.get(debugTask);
+    testRequest = draft?.request || ""; debugScope = draft?.scope || "global"; debugMode = draft?.mode || "structured"; render();
+  });
+  const build = async () => {
+    const result = await request(() => bridge.apiPost("action", { action: "debug_build", task: taskField.querySelector("select").value, scope: scopeField.querySelector("select").value }), "已建立测试请求；尚未调用模型");
+    if (result !== false) { const draft = result.request || result; testRequest = stringify(draft); requestField.querySelector("textarea").value = testRequest; debugMode = draft.prompt_mode || "raw"; modeField.querySelector("select").value = debugMode; rememberTrial(); updateHint(); }
+  };
+  const test = async () => {
+    try { const payload = JSON.parse(requestField.querySelector("textarea").value); if (!payload || Array.isArray(payload) || typeof payload !== "object") throw new Error("请求必须是 JSON 对象"); await action("debug_test", { request: payload }); }
+    catch (error) { notice(`测试请求无效：${error.message}`, true); }
+  };
+  root.append(card("模型试跑", "真实调用 AI，可能产生模型费用；不执行工具、不发送 QQ、不修改正式日程、记忆或生活数据。", append(el("div", "stack"), append(el("div", "form-grid"), taskField, scopeField), button("从当前配置建立测试请求", build, "secondary"), modeField, modeHint, requestField, button("仅调用 AI 试跑", test, "primary"))));
+  const templateBox = el("div", "stack");
+  for (const item of templates) {
+    const value = field("公共提示词模板", "template", templateDrafts.get(item.task) ?? item.template ?? item.default_template ?? "", { type: "textarea", rows: 6, hint: "这里只编辑任务指令。人格、私聊记忆、具体活动等动态上下文由每次调用注入。" });
+    value.querySelector("textarea").addEventListener("input", (event) => { templateDrafts.set(item.task, event.target.value); dirty = true; });
+    const finish = async (operation) => {
+      const submitted = value.querySelector("textarea").value;
+      const result = await operation(); if (result !== false) { if (templateDrafts.get(item.task) === submitted) templateDrafts.delete(item.task); render(); }
+    };
+    const row = append(el("details"), el("summary", "", taskDisplay(item.task)), value,
+      append(el("div", "actions"),
+        button("保存此任务模板", () => finish(() => action("save_template", { task: item.task, template: value.querySelector("textarea").value })), "secondary", true),
+        button("恢复默认模板", () => finish(() => action("reset_template", { task: item.task })), "secondary", true)),
+      details(item.default_template || "", "查看默认模板"));
+    row.open = templateOpen.get(item.task) || false;
+    row.addEventListener("toggle", () => templateOpen.set(item.task, row.open));
+    templateBox.append(row);
+  }
+  root.append(card("各任务提示词模板", "保存只修改公共指令，不会把试跑 JSON 或私人上下文存进模板；不调用模型。", templates.length ? templateBox : empty("暂未取得模板目录")));
+  const priorTemplates = rows("prompt_template_history");
+  if (priorTemplates.length) {
+    const archived = append(el("details", "card template-history"), el("summary", "", `升级前的提示词模板 · ${priorTemplates.length} 份`), el("p", "hint", "升级时备份的旧指令，只供核对。当前日程使用匹配新流程的模板；这里的文本不会自动重新启用。"));
+    priorTemplates.forEach((item) => archived.append(details(item.template ?? item, `${taskDisplay(item.task || item.id)}${item.archived_at ? ` · ${stamp(item.archived_at)}` : ""}`)));
+    root.append(archived);
+  }
+  return root;
+}
+
+function renderContextLayout() {
+  const root = el("div", "stack");
+  const catalog = snapshot.context_layout_catalog;
+  if (!catalog || !snapshot.settings?.context_layout) return empty("请更新并重载插件以取得上下文目录");
+  const config = layoutDraft || snapshot.settings.context_layout;
+  const task = catalog.tasks.find((item) => item.id === layoutTask);
+  const override = Boolean(layoutTask && config.tasks[layoutTask]);
+  const current = (layoutTask && config.tasks[layoutTask]) || config.default;
+  const available = new Set(task?.blocks || catalog.blocks.map((item) => item.id));
+  const blockNames = new Map(catalog.blocks.map((item) => [item.id, item]));
+  const heading = field("调整范围", "layout_task", layoutTask, { options: [{ value: "", label: "全局默认" }, ...catalog.tasks.map((item) => ({ value: item.id, label: item.label }))] });
+  heading.querySelector("select").dataset.skip = "1";
+  heading.querySelector("select").addEventListener("change", (event) => { layoutTask = event.target.value; render(); });
+  root.append(card("上下文注入位置", "同一角色内从上到下就是注入顺序。拖动资料行或使用上下按钮；原始内容定位行只读，资料可以放到它的前后。设置只决定位置，资料仍按模块开关、数量、日期和场合筛选。", heading));
+  const mark = () => { layoutDraft ||= clone(snapshot.settings.context_layout); dirty = true; return layoutDraft; };
+  const editable = !layoutTask || override;
+  const editedList = () => { const value = mark(); return layoutTask ? value.tasks[layoutTask] : value.default; };
+  if (layoutTask) {
+    const controls = el("div", "actions");
+    controls.append(el("span", "muted", override ? "本任务使用独立列表，全局排序修改不影响此任务。" : "本任务正在继承全局默认；仅显示本任务适用的资料块。"));
+    controls.append(override
+      ? button("恢复继承全局", () => { mark().tasks[layoutTask] = null; render(); }, "secondary")
+      : button("为本任务单独设置", () => { mark().tasks[layoutTask] = clone(current); render(); }, "secondary"));
+    root.append(controls);
+  }
+  const move = (id, role, target = null, after = false) => {
+    if (!editable || busy || id?.startsWith("anchor.")) return;
+    const value = editedList();
+    for (const lane of ["system", "user"]) value[lane] = value[lane].filter((item) => item !== id);
+    const at = target === null ? value[role].length : value[role].indexOf(target) + (after ? 1 : 0);
+    value[role].splice(Math.max(0, at), 0, id); layoutDragged = null; render();
+    const row = [...content.querySelectorAll("[data-block-id]")].find((item) => item.dataset.blockId === id);
+    row?.querySelector("button,select")?.focus();
+  };
+  for (const role of ["system", "user"]) {
+    const lane = el("section", "layout-lane"); lane.dataset.role = role;
+    lane.append(el("h3", "", role === "system" ? "system · 系统上下文" : "user · 本轮用户上下文"));
+    const list = el("ol", "layout-list"); list.setAttribute("aria-label", `${role} 注入顺序`);
+    const visible = current[role].filter((id) => available.has(id));
+    visible.forEach((id, index) => {
+      const info = blockNames.get(id);
+      const row = el("li", `layout-row${info.anchor ? " layout-anchor" : ""}`); row.dataset.blockId = id;
+      row.draggable = editable && !info.anchor;
+      const name = append(el("div", "layout-name"), el("strong", "", info.label), el("small", "muted", info.anchor ? "原始内容定位行 · 不改写正文" : "拖动或使用上下按钮调整顺序"));
+      const controls = el("div", "layout-controls");
+      if (!info.anchor) {
+        const destination = field("注入角色", "layout_role", role, { options: ["system", "user"] });
+        const select = destination.querySelector("select"); select.dataset.skip = "1";
+        select.disabled = !editable; select.setAttribute("aria-label", `${info.label}的注入角色`);
+        select.addEventListener("change", () => move(id, select.value));
+        const up = button("↑", () => move(id, role, visible[index - 1]), "secondary");
+        const down = button("↓", () => move(id, role, visible[index + 1], true), "secondary");
+        up.setAttribute("aria-label", `上移${info.label}`); down.setAttribute("aria-label", `下移${info.label}`);
+        up.disabled = !editable || index === 0; down.disabled = !editable || index === visible.length - 1;
+        up.dataset.disabled = String(up.disabled); down.dataset.disabled = String(down.disabled);
+        controls.append(destination, up, down);
+        row.addEventListener("dragstart", (event) => { if (busy) { event.preventDefault(); return; } layoutDragged = id; event.dataTransfer.setData("text/plain", id); event.dataTransfer.effectAllowed = "move"; });
+        row.addEventListener("dragend", () => { layoutDragged = null; });
+      }
+      row.addEventListener("dragover", (event) => { if (layoutDragged && editable && !busy) { event.preventDefault(); event.stopPropagation(); } });
+      row.addEventListener("drop", (event) => {
+        if (!layoutDragged || layoutDragged === id) return;
+        event.preventDefault(); event.stopPropagation();
+        const bounds = row.getBoundingClientRect(); move(layoutDragged, role, id, event.clientY > bounds.top + bounds.height / 2);
+      });
+      row.append(name, controls); list.append(row);
+    });
+    list.addEventListener("dragover", (event) => { if (layoutDragged && editable && !busy) event.preventDefault(); });
+    list.addEventListener("drop", (event) => { if (layoutDragged) { event.preventDefault(); move(layoutDragged, role); } });
+    lane.append(list); root.append(lane);
+  }
+  const save = async () => {
+    const value = clone(layoutDraft || config);
+    const result = await saveSettings({ context_layout: value });
+    if (result !== false) { if (JSON.stringify(layoutDraft || config) === JSON.stringify(value)) layoutDraft = null; render(); }
+  };
+  root.append(append(el("div", "actions"), button("保存上下文位置", save, "primary"),
+    button(layoutTask ? "重置本任务为初始位置" : "恢复全局初始位置", () => {
+      const value = mark();
+      if (layoutTask) value.tasks[layoutTask] = clone(catalog.default); else value.default = clone(catalog.default);
+      render();
+    }, "secondary")), el("p", "hint", "保存后下一轮生效；正在调用工具的轮次沿用原快照。重置只修改表单，保存后生效。没有材料的行不会增加注入；临时资料不写入聊天历史。"));
   return root;
 }
 
@@ -1371,16 +1525,16 @@ function render() {
   if (lastResult && view !== "settings") content.firstChild.append(card("最近一次操作结果", `${lastResult.time} · ${lastResult.action}`, details(lastResult.result, "查看后端执行结果")));
   setBusy(busy);
 }
-window.addEventListener("hashchange", () => { dirty = false; render(); });
-window.addEventListener("beforeunload", (event) => { if (dirty || hasDriveDrafts()) { event.preventDefault(); event.returnValue = ""; } });
+window.addEventListener("hashchange", () => { dirty = false; if (location.hash.startsWith("#debug?")) debugSection = "records"; render(); });
+window.addEventListener("beforeunload", (event) => { if (dirty || hasDriveDrafts() || hasDebugDrafts()) { event.preventDefault(); event.returnValue = ""; } });
 $("#navigation").addEventListener("click", (event) => {
   const link = event.target.closest("a[data-view]");
-  if (!link || !dirty || location.hash === "#drives") return;
+  if (!link || !dirty || ["#drives", "#debug"].includes(location.hash)) return;
   event.preventDefault();
   confirmAction("离开尚未保存的设置", "本页的修改尚未保存，离开后需要重新填写。", () => { dirty = false; location.hash = link.dataset.view; }, false, "放弃修改并离开");
 });
 $("#refresh").addEventListener("click", () => {
-  if (dirty && location.hash !== "#drives") confirmAction("刷新并放弃未保存的修改", "刷新会重新读取后端数据，覆盖当前未保存的设置。", refresh, false, "刷新");
+  if (dirty && !["#drives", "#debug"].includes(location.hash)) confirmAction("刷新并放弃未保存的修改", "刷新会重新读取后端数据，覆盖当前未保存的设置。", refresh, false, "刷新");
   else refresh();
 });
 try {

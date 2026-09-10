@@ -26,6 +26,7 @@ def load_module(name, file):
 
 views = load_module("ui_debug_views", "debug_views.py")
 wire = load_module("ui_wire", "wire.py")
+layout = load_module("ui_layout", "layout.py")
 
 
 def call(identifier, response, request=None):
@@ -262,6 +263,8 @@ print(
             "views": views.build_views(records, days),
             "format_cases": format_cases,
             "group_reply_default": GROUP_REPLY_DEFAULT,
+            "context_layout_catalog": layout.catalog(),
+            "context_layout_defaults": layout.DEFAULT_SETTINGS,
         },
         ensure_ascii=False,
     )

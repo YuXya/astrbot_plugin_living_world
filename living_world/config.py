@@ -6,6 +6,10 @@ import re
 from zoneinfo import ZoneInfo
 
 from .drives import DRIVE_DEFAULTS, validate_drive
+from .layout import (
+    DEFAULT_SETTINGS as LAYOUT_DEFAULTS,
+    validate_settings as validate_layout_settings,
+)
 
 DEFAULT_GROUP_REPLY_PROMPT = (
     "本轮只回应当前发言最重要的一点，通常用一句自然的短句；不分段、不列清单，不连续追问或罗列多个建议。\n"
@@ -79,6 +83,7 @@ DEFAULTS = {
         "sleep_state": "未知",
     },
     "reply": {"group_prompt": DEFAULT_GROUP_REPLY_PROMPT},
+    "context_layout": copy.deepcopy(LAYOUT_DEFAULTS),
     "life": {
         "tick_seconds": 60,
         "detail_minutes": 10,
@@ -131,6 +136,7 @@ def settings_from(patch=None):
     if patch is not None and not isinstance(patch, dict):
         raise ValueError("配置必须是对象")
     result = merge(DEFAULTS, patch or {})
+    result["context_layout"] = validate_layout_settings(result["context_layout"])
     for section in (
         "modules",
         "drives",

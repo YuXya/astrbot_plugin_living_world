@@ -145,7 +145,9 @@ async def test_chat_uses_chinese_context_and_exact_source_snapshot(world):
     await consume(runner)
     part = next(p for p in req.extra_user_content_parts if p.text.startswith(DYNAMIC_MARKER))
     entry = next(r for r in runtime.store.list("debug_records") if r["task"] == "chat.context")
-    assert entry["request"]["injected_text"] == part.text
+    segments = entry["request"]["injection_segments"]
+    assert segments["user"]["after"] == part.text
+    assert entry["request"]["injected_text"] == segments["system"]["after"] + "\n\n" + part.text
     sources = entry["request"]["sources"]
     historical = next(r for r in sources if r["title"] == "聊天历史")
     assert historical["content"] == history
@@ -161,7 +163,8 @@ async def test_chat_uses_chinese_context_and_exact_source_snapshot(world):
     ):
         assert unwanted not in part.text
     assert "数学课要带笔" in part.text and "小明" in part.text
-    assert "稳定人格" in req.system_prompt and "喜欢数学的莉莉" in req.system_prompt
+    assert req.system_prompt == "稳定人格"
+    assert "喜欢数学的莉莉" in json.dumps(provider.calls[0], ensure_ascii=False)
     assert "喜欢数学的莉莉" not in part.text
     assert part.text in json.dumps(provider.calls[0], ensure_ascii=False).replace("\\n", "\n")
     assert runtime.store.get("memories", memory["id"])["access_count"] == 1
@@ -259,7 +262,7 @@ async def test_actual_chat_material_cleans_links_without_editing_user_history_or
     record = next(
         row for row in runtime.store.list("debug_records") if row.get("task") == "chat.context"
     )
-    assert record["request"]["injected_text"] == injected
+    assert record["request"]["injection_segments"]["user"]["after"] == injected
     assert injected in json.dumps(provider.calls[0], ensure_ascii=False).replace("\\n", "\n")
     assert runtime.store.get("events", original["id"]) == original
     assert runtime.store.get("observations", observation["id"]) == observation

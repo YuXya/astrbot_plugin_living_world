@@ -11,15 +11,18 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 from astrbot.api.provider import ProviderRequest
+from astrbot.core.agent.message import dump_messages_with_checkpoints
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.provider.sources.openai_responses_source import ProviderOpenAIResponses
 from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
 from mcp.types import CallToolResult, TextContent
 from openai import APIStatusError
 from test_chat import GROUP, PRIVATE, Event, consume, runner_for
+from test_layout import content_text, moved
 
 from living_world.chat import GROUP_REPLY_HEADING
 from living_world.config import DEFAULT_GROUP_REPLY_PROMPT
+from living_world.layout import DEFAULT_LAYOUT
 
 pytest_plugins = ("test_chat",)
 
@@ -413,8 +416,9 @@ async def test_concurrent_managed_calls_do_not_capture_unmanaged_same_sdk_client
 
 
 @pytest.mark.parametrize("scope", [PRIVATE, GROUP])
+@pytest.mark.parametrize("custom_layout", [False, True])
 async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
-    real_providers, wire_server, scope
+    real_providers, wire_server, scope, custom_layout
 ):
     async def handler(request, row):
         data = json.loads(row["request_body"])
@@ -429,9 +433,17 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
     wire_server.handler = handler
     real_world = real_providers()
     runtime, _, provider = real_world
+    if custom_layout:
+        layout = moved(DEFAULT_LAYOUT, "group_reply", "system", "anchor.system")
+        layout = moved(layout, "profile", "user", "anchor.user")
+        await runtime.update_settings(
+            {"context_layout": {"default": layout}, "character": {"profile": "FROZEN_PROFILE"}}
+        )
 
     class Executor:
         async def execute(self, **kwargs):
+            if custom_layout:
+                await runtime.update_settings({"context_layout": {"default": DEFAULT_LAYOUT}})
             await provider.text_chat(prompt="第三方工具内部秘密", request_max_retries=1)
             yield CallToolResult(content=[TextContent(type="text", text="数学工具的真实结果")])
 
@@ -453,13 +465,104 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
     assert "第三方工具内部秘密" not in json.dumps(calls, ensure_ascii=False)
     assert any("数学工具的真实结果" in call["request_body"] for call in calls)
     assert runner.get_final_llm_resp().completion_text == "工具结果已收到"
-    if scope == GROUP:
+    if custom_layout:
+        for call in calls:
+            messages = json.loads(call["request_body"])["messages"]
+            user = content_text(
+                next(
+                    message["content"]
+                    for message in reversed(messages)
+                    if message["role"] == "user"
+                )
+            )
+            system = content_text(
+                next(message["content"] for message in messages if message["role"] == "system")
+            )
+            assert user.index("FROZEN_PROFILE") < user.index("查数学")
+            assert "FROZEN_PROFILE" not in system
+            assert GROUP_REPLY_HEADING not in user
+            assert (GROUP_REPLY_HEADING in system) == (scope == GROUP)
+            if scope == GROUP:
+                assert system.index(GROUP_REPLY_HEADING) < system.index("Student")
+                assert call["request_body"].count(GROUP_REPLY_HEADING) == 1
+    elif scope == GROUP:
         for call in calls:
             messages = json.loads(call["request_body"])["messages"]
             user = next(message for message in reversed(messages) if message["role"] == "user")
             assert user["content"][-1]["text"].endswith(DEFAULT_GROUP_REPLY_PROMPT)
             assert sum(GROUP_REPLY_HEADING in part.get("text", "") for part in user["content"]) == 1
             assert GROUP_REPLY_HEADING not in messages[0]["content"]
+
+
+@pytest.mark.parametrize("responses", [False, True])
+@pytest.mark.parametrize("scope", [PRIVATE, GROUP])
+async def test_ordered_layout_matches_actual_http_and_excludes_saved_history(
+    real_providers, wire_server, responses, scope
+):
+    real_world = real_providers(responses=responses)
+    runtime, _, _ = real_world
+    layout = moved(DEFAULT_LAYOUT, "experiences", "user", "memories")
+    layout = moved(layout, "news", "system", "anchor.system")
+    layout = moved(layout, "group_reply", "system")
+    await runtime.update_settings(
+        {"context_layout": {"default": layout}, "modules": {"news": True}}
+    )
+    runtime.memory.remember("MEMORY_SENTINEL mathematics", scope=scope)
+    runtime.store.put(
+        "events",
+        "experience",
+        {
+            "id": "experience",
+            "text": "EXPERIENCE_SENTINEL",
+            "scope": scope,
+            "source": "fiction",
+            "occurred_at": runtime.life._now().isoformat(),
+        },
+    )
+    runtime.store.put(
+        "observations",
+        "news",
+        {"id": "news", "module": "news", "scope": scope, "text": "NEWS_SENTINEL"},
+    )
+    runtime.store.put(
+        "observations",
+        "secret",
+        {
+            "id": "secret",
+            "module": "news",
+            "scope": "qq:FriendMessage:999",
+            "text": "PRIVATE_SECRET",
+        },
+    )
+    req = ProviderRequest(prompt="mathematics", system_prompt="SYSTEM_ANCHOR")
+    runner = await runner_for(real_world, Event(scope, "mathematics"), req)
+    await consume(runner)
+    raw = wire_server.records[0]["request_body"]
+    assert http_calls(runtime)[0]["request_body"] == raw
+    payload = json.loads(raw)
+    messages = payload.get("messages", payload.get("input"))
+    system = payload.get("instructions") or content_text(
+        next(message["content"] for message in messages if message.get("role") == "system")
+    )
+    user = content_text(
+        next(message["content"] for message in reversed(messages) if message.get("role") == "user")
+    )
+    assert system.index("NEWS_SENTINEL") < system.index("SYSTEM_ANCHOR")
+    assert user.index("EXPERIENCE_SENTINEL") < user.index("MEMORY_SENTINEL")
+    assert "NEWS_SENTINEL" not in user and "PRIVATE_SECRET" not in raw
+    assert (GROUP_REPLY_HEADING in system) == (scope == GROUP)
+    assert GROUP_REPLY_HEADING not in user
+    assert all(
+        raw.count(text) == 1 for text in ("NEWS_SENTINEL", "MEMORY_SENTINEL", "EXPERIENCE_SENTINEL")
+    )
+    saved = json.dumps(
+        dump_messages_with_checkpoints(runner.run_context.messages), ensure_ascii=False
+    )
+    assert all(
+        text not in saved
+        for text in ("NEWS_SENTINEL", "MEMORY_SENTINEL", "EXPERIENCE_SENTINEL", GROUP_REPLY_HEADING)
+    )
+    assert req.system_prompt == "SYSTEM_ANCHOR"
 
 
 @pytest.mark.parametrize("responses", [False, True])

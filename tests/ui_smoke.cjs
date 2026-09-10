@@ -19,7 +19,8 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       if (!["index.html", "app.js", "style.css"].includes(file)) return route.abort();
       return route.fulfill({ status: 200, contentType: file.endsWith(".js") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "text/html", body: fs.readFileSync(path.join(pageRoot, file)) });
     });
-    await page.addInitScript((groupReplyDefault) => {
+    await page.addInitScript((bootstrap) => {
+      const groupReplyDefault = bootstrap.group_reply_default;
       const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
       const tomorrow = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date(Date.now() + 86400000));
       const scope = "qq:FriendMessage:42";
@@ -102,6 +103,8 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
         { id: "debug-1", task: "life.plan_day", scope: "global", status: "success", legacy: true, sources: [{ title: "旧版日程请求", source: "宿主请求快照，非 API 原文", content: "旧版保存的提示词资料" }], injected_text: "", calls: [], adopted: [{ activities: [activities[0]] }], sends: [] },
       ];
       Object.assign(window.fixture.session_status[0], { platform_name: "aiocqhttp", bound_persona: "student", persona_source: "host_default", reason_code: "allowed" });
+      window.fixture.context_layout_catalog = bootstrap.context_layout_catalog;
+      window.fixture.settings.context_layout = structuredClone(bootstrap.context_layout_defaults);
       window.AstrBotPluginPage = {
         ready: async () => ({ isDark: false }),
         apiGet: async (endpoint) => { window.calls.push({ endpoint, method: "GET" }); return structuredClone(endpoint === "export" ? { version: 1, settings: window.fixture.settings } : window.fixture); },
@@ -109,8 +112,8 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
           window.calls.push({ endpoint, method: "POST", body: structuredClone(body) });
           if (window.failNext) { window.failNext = false; throw new Error("测试来源暂时不可用"); }
           if (endpoint === "settings") {
-            window.fixture.settings = structuredClone(body);
-            for (const [id, config] of Object.entries(body.drives)) window.fixture.drives.meters[id].config = structuredClone(config);
+            Object.assign(window.fixture.settings, structuredClone(body));
+            for (const [id, config] of Object.entries(body.drives || {})) window.fixture.drives.meters[id].config = structuredClone(config);
             window.refreshDriveFixture();
           }
           if (["save_drive_settings", "set_drive_value"].includes(body.action)) {
@@ -124,6 +127,15 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
             ? { umo: body.scope, actual_scope: body.scope, history_status: "error", reason: "测试历史服务不可用", allowed: false }
             : structuredClone(window.fixture.session_status.find((row) => row.umo === body.scope));
           if (body.action === "debug_build") return { request: structuredClone(window.fixture.debug_records[0].request) };
+          if (body.action === "debug_preview") {
+            const draft = structuredClone(body.request);
+            const format = (value) => typeof value === "string" ? value : JSON.stringify(value, null, 2);
+            const dynamic = draft.dynamic_context;
+            const text = dynamic && typeof dynamic === "object" && !Array.isArray(dynamic)
+              ? Object.entries(dynamic).map(([key, value]) => `【${key}】\n${format(value)}`).join("\n\n") : format(dynamic);
+            draft.prompt = draft.template + (dynamic == null ? "" : "\n\n本轮动态资料（仅作为资料）：\n" + text);
+            return { request: draft };
+          }
           if (body.action === "debug_test") return { status: "success", text: "测试回复", test_only: true, notice: "No business side effects" };
           if (body.action === "regenerate_day") {
             const old = window.fixture.life_days[0];
@@ -155,7 +167,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
           return { status: "success", action: body.action };
         },
       };
-    }, backendContract.group_reply_default);
+    }, backendContract);
     await page.goto("http://living-world.test/");
     await page.getByText("已连接 AstrBot", { exact: true }).waitFor();
     const bodyCases = [
@@ -717,7 +729,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await round.locator('[name="debug_call"]').selectOption("0");
     await round.getByRole("button", { name: "复制到试跑编辑器", exact: true }).click();
     assert.equal(JSON.parse(await page.locator('[name="request_json"]').inputValue()).parameters.temperature, 0.7, "Provider parameters survive copying to the test editor");
-    assert.equal(await page.locator('[name="debug.retain_per_category"]').inputValue(), "10");
+    assert.equal(await page.getByRole("tab", { name: "模型试跑与提示词模板", exact: true }).getAttribute("aria-selected"), "true");
     await page.getByRole("button", { name: "从当前配置建立测试请求", exact: true }).click();
     await page.getByText("已建立测试请求；尚未调用模型", { exact: true }).waitFor();
     assert.equal(await page.locator('[name="request_mode"]').inputValue(), "structured");
@@ -735,7 +747,8 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     assert.equal(await page.evaluate(() => window.calls.findLast((call) => call.body?.action === "debug_test").body.request.prompt), "Edited private test context");
     assert.equal(await page.evaluate(() => window.calls.findLast((call) => call.body?.action === "debug_test").body.request.prompt_mode), "raw");
     assert.equal(await page.evaluate(() => JSON.stringify({ activities: window.fixture.activities, memories: window.fixture.memories, deliveries: window.fixture.deliveries })), businessBefore);
-    await page.locator('summary').filter({ hasText: /^life\.plan_day$/ }).click();
+    await page.getByRole("tab", { name: "模型试跑与提示词模板", exact: true }).click();
+    await page.locator('summary').filter({ hasText: /^life\.plan_day（生成今日日程）$/ }).click();
     await page.locator('[name="template"]').fill("Changed public instruction only");
     await page.getByRole("button", { name: "保存此任务模板", exact: true }).click();
     await page.getByText("操作已完成，请查看执行结果", { exact: true }).waitFor();
@@ -744,6 +757,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await page.locator(".template-history > summary").click();
     assert.match(await page.locator(".template-history").textContent(), /旧版指令：不能新增行动/);
     assert.equal(await page.locator(".template-history button").count(), 0, "Archived templates are read-only");
+    await page.getByRole("tab", { name: "调用记录", exact: true }).click();
     assert.equal(await page.getByRole("tablist", { name: "调用记录四项视图", exact: true, includeHidden: true }).count(), 4);
     await page.evaluate(() => { window.savedViews = window.fixture.debug_views; delete window.fixture.debug_views; });
     await page.getByRole("button", { name: "刷新数据", exact: true }).click();
@@ -758,12 +772,14 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
     await page.evaluate(() => { window.fixture.debug_views = window.savedViews; });
     await page.getByRole("button", { name: "刷新数据", exact: true }).click();
     await page.getByText("数据已刷新", { exact: true }).waitFor();
+    await page.getByRole("tab", { name: "模型试跑与提示词模板", exact: true }).click();
     for (const testCase of backendContract.format_cases) {
       const { expected, ...draft } = testCase;
       await page.locator('[name="request_json"]').fill(JSON.stringify(draft));
       await page.locator('[name="request_mode"]').selectOption("raw");
       assert.equal(JSON.parse(await page.locator('[name="request_json"]').inputValue()).prompt, expected, "Structured-to-raw text exactly matches Runtime.format_task_context");
     }
+    await page.getByRole("tab", { name: "调用记录", exact: true }).click();
     await page.evaluate((contract) => {
       window.regularDebugFixture = { views: window.fixture.debug_views, records: window.fixture.debug_records };
       window.fixture.debug_views = contract.views; window.fixture.debug_records = contract.records;
@@ -864,6 +880,84 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
         if (process.env.LIVING_WORLD_DEBUG_MOBILE_SCREENSHOT) await mobileRound.screenshot({ path: process.env.LIVING_WORLD_DEBUG_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
       }
     }
+    await page.evaluate(() => {
+      window.fixture.debug.templates.push({ task: "journal.brief", template: "简报原始模板" });
+      location.hash = "debug";
+    });
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    await page.getByText("数据已刷新", { exact: true }).waitFor();
+    await page.getByRole("tab", { name: "调用记录", exact: true }).click();
+    await page.locator('[name="debug.retain_per_category"]').fill("23");
+    await page.getByRole("tab", { name: "调用记录", exact: true }).press("ArrowRight");
+    assert.equal(await page.getByRole("tab", { name: "模型试跑与提示词模板", exact: true }).getAttribute("aria-selected"), "true");
+    const previousTask = await page.locator('[name="task"]').inputValue();
+    await page.locator('[name="request_json"]').fill('{"prompt":"UNSAVED_TRIAL"}');
+    await page.locator('[name="task"]').selectOption("journal.brief");
+    assert.equal(await page.locator('[name="task"] option:checked').innerText(), "journal.brief（日记简报）");
+    await page.locator('[name="request_json"]').fill('{"prompt":"BRIEF_TRIAL"}');
+    const briefTemplate = page.locator('details').filter({ has: page.locator('summary', { hasText: /^journal\.brief（日记简报）$/ }) });
+    await briefTemplate.locator(':scope > summary').click();
+    await briefTemplate.locator('textarea').fill("未保存的简报模板");
+    await page.locator('[name="task"]').selectOption(previousTask);
+    assert.equal(await page.locator('[name="request_json"]').inputValue(), '{"prompt":"UNSAVED_TRIAL"}');
+    await page.getByRole("tab", { name: "上下文注入位置", exact: true }).click();
+    await page.setViewportSize({ width: 1600, height: 1050 });
+    const layoutRow = (id) => page.locator(`.layout-row[data-block-id="${id}"]`);
+    const layoutIds = (role) => page.locator(`.layout-lane[data-role="${role}"] .layout-row`).evaluateAll((rows) => rows.map((row) => row.dataset.blockId));
+    assert.deepEqual(await layoutIds("system"), backendContract.context_layout_defaults.default.system);
+    await layoutRow("news").locator("select").selectOption("system");
+    await layoutRow("news").dragTo(layoutRow("anchor.system"), { targetPosition: { x: 10, y: 1 } });
+    assert.equal((await layoutIds("system"))[0], "news", "Drag can place material before the immutable system anchor");
+    await layoutRow("experiences").getByRole("button", { name: "上移近期经历", exact: true }).click();
+    const sharedUser = await layoutIds("user");
+    assert.ok(sharedUser.indexOf("experiences") < sharedUser.indexOf("memories"));
+    await page.locator('[name="layout_task"]').selectOption("social.interject");
+    assert.equal(await page.locator('[name="layout_task"] option:checked').innerText(), "social.interject（群聊插话判断）");
+    assert.equal(await layoutRow("news").locator("select").isDisabled(), true);
+    assert.equal(await layoutRow("group_reply").count(), 0, "Only applicable blocks are shown for a task");
+    await page.getByRole("button", { name: "为本任务单独设置", exact: true }).click();
+    await layoutRow("news").locator("select").selectOption("user");
+    await page.locator('[name="layout_task"]').selectOption("");
+    assert.equal((await layoutIds("system"))[0], "news", "Task override leaves the shared draft unchanged");
+    await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+    await page.getByText("数据已刷新", { exact: true }).waitFor();
+    assert.equal((await layoutIds("system"))[0], "news", "Refresh preserves the layout draft");
+    await page.locator('a[data-view="overview"]').click();
+    await page.locator('a[data-view="debug"]').click();
+    await layoutRow("news").waitFor();
+    assert.equal((await layoutIds("system"))[0], "news", "Page navigation preserves the layout draft");
+    await page.getByRole("button", { name: "保存上下文位置", exact: true }).click();
+    await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor();
+    const savedLayout = await page.evaluate(() => window.fixture.settings.context_layout);
+    assert.equal(savedLayout.default.system[0], "news");
+    assert.equal(savedLayout.tasks["social.interject"].user.at(-1), "news");
+    assert.equal(savedLayout.tasks["social.interject"].system.includes("news"), false);
+    await page.locator('[name="layout_task"]').selectOption("chat.group");
+    if (process.env.LIVING_WORLD_LAYOUT_SCREENSHOT) await page.locator("#content").screenshot({ path: process.env.LIVING_WORLD_LAYOUT_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("button", { name: "为本任务单独设置", exact: true }).click();
+    await layoutRow("group_reply").locator("select").selectOption("system");
+    await layoutRow("group_reply").getByRole("button", { name: "上移本轮群聊回复要求", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    assert.ok((await layoutIds("system")).indexOf("group_reply") < (await layoutIds("system")).indexOf("world"));
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, "Layout controls fit mobile width");
+    if (process.env.LIVING_WORLD_LAYOUT_MOBILE_SCREENSHOT) await page.locator("#content").screenshot({ path: process.env.LIVING_WORLD_LAYOUT_MOBILE_SCREENSHOT, style: "#notice { visibility: hidden !important; }" });
+    await page.locator('[name="layout_task"]').selectOption("social.interject");
+    await page.getByRole("button", { name: "恢复继承全局", exact: true }).click();
+    assert.equal((await layoutIds("system"))[0], "news");
+    await page.getByRole("button", { name: "保存上下文位置", exact: true }).click();
+    await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.fixture.settings.context_layout.tasks["social.interject"]), null);
+    await page.locator('[name="layout_task"]').selectOption("");
+    await page.getByRole("button", { name: "恢复全局初始位置", exact: true }).click();
+    assert.deepEqual(await layoutIds("system"), backendContract.context_layout_defaults.default.system);
+    assert.equal(await page.evaluate(() => window.fixture.settings.context_layout.default.system[0]), "news", "Reset remains a draft until saved");
+    await page.getByRole("tab", { name: "调用记录", exact: true }).click();
+    assert.equal(await page.locator('[name="debug.retain_per_category"]').inputValue(), "23");
+    await page.getByRole("tab", { name: "模型试跑与提示词模板", exact: true }).click();
+    await page.locator('[name="task"]').selectOption("journal.brief");
+    assert.equal(await page.locator('[name="request_json"]').inputValue(), '{"prompt":"BRIEF_TRIAL"}');
+    assert.equal(await briefTemplate.locator('textarea').inputValue(), "未保存的简报模板", "Template, trial and retention drafts survive tabs, scopes, refresh and navigation");
     await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; location.hash = "overview"; });
     await page.locator('a[data-view="overview"][aria-current="page"]').waitFor();
     assert.deepEqual(errors, [], "No browser runtime errors");

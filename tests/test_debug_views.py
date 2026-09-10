@@ -195,4 +195,6 @@ async def test_background_state_is_dynamic_and_life_snapshot_has_readable_source
     assert "history_count" not in request["prompt"]
     assert "轻量状态" not in request["system_prompt"]
     assert any(row["title"] == "今日日程" for row in request["sources"])
-    assert request["prompt"] == request["template"] + request["injected_text"]
+    assert request["prompt"].startswith(request["template"] + "\n\n<living_world_context>")
+    assert request["base_system_prompt"] in request["system_prompt"]
+    assert "【角色补充资料】" not in request["prompt"]

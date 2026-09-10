@@ -56,7 +56,7 @@ async def test_group_prompt_is_last_after_late_parts_and_media_without_history_w
         source = next(row for row in view["sources"] if row["title"] == "本轮群聊回复要求")
         assert source["content"] == GROUP_REPLY_HEADING + "\n" + DEFAULT_GROUP_REPLY_PROMPT
         assert "user 消息最后" in source["placement"]
-        assert view["injected_text"] == final
+        assert view["injected_text"].endswith(final)
 
 
 async def test_group_prompt_edit_affects_next_turn_and_survives_restart(world, tmp_path):

@@ -9,6 +9,7 @@ import time
 import uuid
 
 from .debug_views import build_views, record_groups
+from .layout import task_label
 from .prompts import PROMPTS
 
 BOUNDARY = "任务输入快照；API 原文以实际捕获的 HTTP 正文为准"
@@ -259,6 +260,7 @@ class DebugService:
             "templates": [
                 {
                     "task": task,
+                    "label": task_label(task),
                     "default_template": self.get_default(task),
                     "template": self.runtime.store.get("prompt_templates", task, {}).get(
                         "template", self.get_default(task)

@@ -229,8 +229,11 @@ def record_text(row, now, *, memory=False):
     return f"{label}：{value}"
 
 
-def source_item(title, source, content, placement=PLACEMENT):
-    return {"title": title, "source": source, "content": content, "placement": placement}
+def source_item(title, source, content, placement=PLACEMENT, *, block_id=None):
+    row = {"title": title, "source": source, "content": content, "placement": placement}
+    if block_id:
+        row["block_id"] = block_id
+    return row
 
 
 def _text(value):
@@ -309,8 +312,19 @@ def context_from_data(data):
         tz = now.tzinfo or UTC
     now = now.replace(tzinfo=tz) if now.tzinfo is None else now.astimezone(tz)
 
-    def add(title, source, content):
-        sources.append(source_item(title, source, content))
+    identifiers = {
+        "当前时间": "time",
+        "生活状态": "state",
+        "当前活动": "activity",
+        "今日日程": "schedule",
+        "相关记忆与人物认知": "memories",
+        "近期经历": "experiences",
+    }
+
+    def add(title, source, content, identifier=None):
+        sources.append(
+            source_item(title, source, content, block_id=identifier or identifiers[title])
+        )
 
     add("当前时间", "角色设置中的时区与当前时钟", _text(data.get("current_time")))
     state = data.get("state")
@@ -347,8 +361,6 @@ def context_from_data(data):
         data.get("memories", []), now, memory=True, event_lookup=events.get, seen=seen
     )
     memory_lines = [f"- {record_text(row, now, memory=True)}" for row in memories]
-    if any(is_role_experience(row) or is_fiction_journal(row) for row in experiences + memories):
-        add("经历说明", "角色生活记录的类型", FICTION_NOTICE)
     add(
         "相关记忆与人物认知",
         "记忆库按当前场合与人物检索的结果",
@@ -357,14 +369,27 @@ def context_from_data(data):
     experience_lines = [f"- {record_text(row, now)}" for row in experiences]
     if experience_lines:
         add("近期经历", "生活记录中当前场合可见的经历", "\n".join(experience_lines))
+    for identifier, rows in (("memories", memories), ("experiences", experiences)):
+        if any(is_role_experience(row) or is_fiction_journal(row) for row in rows):
+            for item in sources:
+                if item["block_id"] == identifier:
+                    item["notice"] = FICTION_NOTICE
     for row in data.get("observations", []):
         add(
             "天气" if row.get("module") == "weather" else "近期见闻",
             "见闻记录及其中注明的实际来源",
             observation_text(row),
+            identifier=row.get("module")
+            if row.get("module") in {"weather", "news", "search", "bilibili", "daily_digest"}
+            else "task.other",
         )
     return {
-        "text": "\n\n".join(f"【{row['title']}】\n{row['content']}" for row in sources),
+        "text": "\n\n".join(
+            f"【{row['title']}】\n"
+            + (row["notice"] + "\n" if row.get("notice") else "")
+            + row["content"]
+            for row in sources
+        ),
         "sources": sources,
     }
 
@@ -381,19 +406,20 @@ def group_messages_text(messages):
     return "\n".join(lines) or "首次对话，暂无近期群消息。"
 
 
+def is_life_snapshot(value):
+    return (
+        isinstance(value, dict)
+        and {"current_time", "memories", "schedule", "observations"} <= value.keys()
+        and isinstance(value["memories"], list)
+        and isinstance(value["observations"], list)
+        and isinstance(value["schedule"], dict)
+        and value["schedule"].get("status") in {"disabled", "missing", "available"}
+    )
+
+
 def normalize_context(context):
     """Project only recognizable legacy life snapshots, preserving task JSON schemas."""
     sources = []
-
-    def is_life_snapshot(value):
-        return (
-            isinstance(value, dict)
-            and {"current_time", "memories", "schedule", "observations"} <= value.keys()
-            and isinstance(value["memories"], list)
-            and isinstance(value["observations"], list)
-            and isinstance(value["schedule"], dict)
-            and value["schedule"].get("status") in {"disabled", "missing", "available"}
-        )
 
     def visit(value, path):
         candidate = value
