@@ -9,7 +9,7 @@ import uuid
 import weakref
 
 from .context import group_messages_text, source_item
-from .debug import json_value, response_value
+from .debug import diagnostic_write, json_value, response_value
 from .instrumentation import ProviderAudit, pause_tools, resume_tools
 from .social import destination
 
@@ -212,7 +212,7 @@ class ChatService:
             stored = self.runtime.store.get("chat_context_status", key, {})
             attempt = {
                 "scope": trace["scope"],
-                "turn_id": trace["id"],
+                "turn_id": trace["id"] if trace.get("root") else "",
                 "status": status,
                 "reason": reason,
                 "at": time.time(),
@@ -255,6 +255,15 @@ class ChatService:
         module="reply",
         parent_id=None,
     ):
+        if trace and not trace.get("debug_started") and task in {"chat.route", "chat.history"}:
+            if self.runtime.enabled("debug"):
+                # Observation has at most one route and one history diagnostic.
+                trace["observations"][task] = {
+                    "request": json_value(request),
+                    "response": json_value(response),
+                    "status": status,
+                }
+            return None
         if not self.trace_exists(trace):
             return None
         entry = self.runtime.debug.begin(
@@ -271,11 +280,14 @@ class ChatService:
             self.runtime.debug.finish(entry, response, status=status)
         return entry
 
-    def ensure_trace(self, event):
+    def ensure_trace(self, event, *, start_debug=True):
         trace = event.get_extra("living_world_trace")
         if trace and trace.get("owner") is self:
+            if start_debug:
+                self._start_trace(trace)
             return trace
         scope = event.unified_msg_origin
+        message = getattr(event, "message_obj", None)
         trace = {
             "id": uuid.uuid4().hex,
             "received_at": time.time(),
@@ -284,47 +296,58 @@ class ChatService:
             "scope": scope,
             "managed": False,
             "root": None,
-            "sent": 0,
-            "failed_sends": 0,
-            "tools": {},
-            "restored": False,
-        }
-        event.set_extra("living_world_trace", trace)
-        message = getattr(event, "message_obj", None)
-        trace["root"] = self.runtime.debug.begin(
-            "chat.turn",
-            {
+            "debug_started": False,
+            "observations": {},
+            "received_message": {
                 "message_id": str(getattr(message, "message_id", "")),
                 "sender_id": event.get_sender_id(),
                 "message": json_value(getattr(message, "message", [])),
                 "text": getattr(event, "message_str", ""),
                 "scope": scope,
             },
-            module="reply",
-            scope=scope,
-            kind="turn",
-            turn_id=trace["id"],
-            boundary="收到的白名单消息与本轮处理过程",
-        )
-        self.runtime.debug.finish(
-            trace["root"],
-            {"reason": "尚未进入模型阶段；其他链路是否处理暂不确定"},
-            status="observed",
-        )
+            "sent": 0,
+            "failed_sends": 0,
+            "tools": {},
+            "restored": False,
+        }
+        event.set_extra("living_world_trace", trace)
         self.events = [ref for ref in self.events if ref() is not None]
         try:
             self.events.append(weakref.ref(event))
         except TypeError:
             self.events.append(lambda: event)
         self._wrap_send(event, trace)
+        if start_debug:
+            self._start_trace(trace)
         return trace
+
+    @diagnostic_write
+    def _start_trace(self, trace):
+        """Persist only when model preparation or a real send starts, once per event."""
+        if trace["debug_started"]:
+            return
+        # Cleared or disabled turns must never be recreated by later callbacks.
+        trace["debug_started"] = True
+        request = trace.pop("received_message")
+        observations = trace.pop("observations")
+        trace["root"] = self.runtime.debug.begin(
+            "chat.turn",
+            request,
+            module="reply",
+            scope=trace["scope"],
+            kind="turn",
+            turn_id=trace["id"],
+            boundary="进入模型处理或实际发送的聊天轮次",
+        )
+        for task, entry in observations.items():
+            self.record(trace, task, **entry)
 
     async def observe(self, event):
         scope = event.unified_msg_origin
         configured = self.configured(scope)
         if not configured or self.runtime.stopped or event.get_sender_id() == event.get_self_id():
             return False
-        trace = self.ensure_trace(event)
+        trace = self.ensure_trace(event, start_debug=False)
         self.runtime.note_scope(scope)
         try:
             route = await self.runtime.scope_status(scope)
@@ -719,6 +742,7 @@ class ChatService:
         previous = vars(event).get("send")
 
         async def send(message, *args, **kwargs):
+            self._start_trace(trace)
             try:
                 payload = json_value(message)
             except Exception:

@@ -81,6 +81,33 @@ def response_value(response):
     return value
 
 
+def _observation_only(rows):
+    """Recognize legacy observation turns without discarding attempted work."""
+    roots = [row for row in rows if row.get("task") == "chat.turn"]
+    if len(roots) != 1:
+        return False
+    root = roots[0]
+    if (
+        root.get("capture_version") != 2
+        or root.get("status") != "observed"
+        or root.get("response")
+        != {"reason": "尚未进入模型阶段；其他链路是否处理暂不确定"}
+    ):
+        return False
+    return all(
+        row.get("task") in {"chat.turn", "chat.route", "chat.history"}
+        and row.get("kind") in {"turn", "event"}
+        and not row.get("http_calls")
+        and "http_capture" not in row
+        and row.get("reply") is None
+        and (
+            row.get("response") is None
+            or (isinstance(row["response"], dict) and set(row["response"]) <= {"reason"})
+        )
+        for row in rows
+    )
+
+
 class DebugService:
     def __init__(self, runtime):
         self.runtime = runtime
@@ -146,12 +173,16 @@ class DebugService:
     def trim(self):
         limit = int(self.runtime.settings["debug"]["retain_per_category"])
         counts = {}
+        deletes = []
         groups = sorted(
             record_groups(self.runtime.store.list("debug_records")).values(),
             key=lambda rows: rows[0].get("created_at", 0),
             reverse=True,
         )
         for rows in groups:
+            if _observation_only(rows):
+                deletes.extend(("debug_records", row["id"]) for row in rows)
+                continue
             root = rows[0]
             category = (
                 "__chat_turn__"
@@ -160,8 +191,9 @@ class DebugService:
             )
             counts[category] = counts.get(category, 0) + 1
             if counts[category] > limit:
-                for row in rows:
-                    self.runtime.store.delete("debug_records", row["id"])
+                deletes.extend(("debug_records", row["id"]) for row in rows)
+        if deletes:
+            self.runtime.store.apply_batch([], deletes)
 
     def clear(self, category=None):
         count = 0

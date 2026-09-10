@@ -413,7 +413,7 @@ async def test_turn_retention_and_clear_keep_complete_groups(world):
     for _ in range(3):
         event = Event()
         await runtime.chat.observe(event)
-        trace = event.get_extra("living_world_trace")
+        trace = runtime.chat.ensure_trace(event)
         traces.append(trace)
         for _ in range(15):
             runtime.chat.record(trace, "reply.model", {}, status="success")
@@ -421,8 +421,88 @@ async def test_turn_retention_and_clear_keep_complete_groups(world):
     assert {r["turn_id"] for r in rows} == {traces[1]["id"], traces[2]["id"]}
     assert len([r for r in rows if r["task"] == "reply.model"]) == 30
     runtime.debug.clear("reply.model")
+    runtime.chat.ensure_trace(event)
     runtime.chat.record(traces[2], "reply.send", {}, status="sent")
     assert not runtime.store.list("debug_records")
+
+
+@pytest.mark.parametrize("scope", [GROUP, PRIVATE])
+@pytest.mark.parametrize("reply_enabled", [False, True])
+async def test_observations_do_not_record_or_evict_model_turns(world, scope, reply_enabled):
+    runtime, _, provider = world
+    runner = await runner_for(world, Event(GROUP, "请回复这条消息"))
+    await consume(runner)
+    await runtime.update_settings(
+        {
+            "debug": {"retain_per_category": 1},
+            "modules": {"reply": reply_enabled, "interjection": False},
+        }
+    )
+    before = runtime.store.list("debug_records")
+    for index in range(30):
+        event = Event(scope, f"普通消息 {index}")
+        await runtime.chat.observe(event)
+    assert runtime.store.list("debug_records") == before
+    assert len(provider.calls) == 1
+    trace = event.get_extra("living_world_trace")
+    assert trace["root"] is None and not trace["debug_started"]
+    status = (await runtime.chat.inspect(scope))["context_status"]["last_attempt"]
+    assert status["turn_id"] == ""
+    if scope == GROUP:
+        window = (await runtime.chat.history(scope))["messages"]
+        assert len(window) == 24 and window[-1]["text"] == "普通消息 29"
+
+
+async def test_observation_promotes_once_and_keeps_received_snapshot(world):
+    runtime, _, provider = world
+    event = Event(GROUP, "原始群友消息")
+    await runtime.chat.observe(event)
+    assert not runtime.debug.views()
+    trace = event.get_extra("living_world_trace")
+    event.message_str = "宿主修改后的输入"
+    runner = await runner_for(world, event)
+    await consume(runner)
+    runtime.chat.ensure_trace(event)
+    view = runtime.debug.views()[0]
+    assert view["id"] == trace["id"]
+    assert view["sources"][0]["content"] == "原始群友消息"
+    rows = runtime.store.list("debug_records")
+    assert sum(r["task"] == "chat.turn" for r in rows) == 1
+    assert sum(r["task"] == "chat.route" for r in rows) == 1
+    assert len(provider.calls) == 1
+    assert view["adopted"] and view["calls"]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+async def test_observed_event_real_send_is_retained_without_model(world, failure):
+    runtime, _, provider = world
+    event = Event(GROUP)
+    await runtime.chat.observe(event)
+    event.fail_send = failure
+    message = MessageChain([Plain("真实发送测试")])
+    if failure:
+        with pytest.raises(OSError, match="transport failure"):
+            await event.send(message)
+    else:
+        await event.send(message)
+    runtime.debug.trim()
+    view = runtime.debug.views()[0]
+    assert len(view["sends"]) == 1 and not view["calls"]
+    assert view["sends"][0]["status"] == ("unknown" if failure else "sent")
+    assert not provider.calls
+
+
+async def test_disabled_debug_start_is_not_recreated_after_enable(world):
+    runtime, _, _ = world
+    event = Event(GROUP)
+    await runtime.chat.observe(event)
+    await runtime.update_settings({"modules": {"debug": False}})
+    await runtime.chat.augment(event, ProviderRequest(prompt=event.message_str))
+    await runtime.update_settings({"modules": {"debug": True}})
+    runtime.chat.ensure_trace(event)
+    await event.send(MessageChain([Plain("调试关闭期间开始的回复")]))
+    assert not runtime.debug.views()
+    assert len(event.sent) == 1
 
 
 async def test_context_failure_restores_original_and_disabled_reply_does_not_inject(world):
@@ -472,9 +552,11 @@ async def test_group_observation_bounds_quotes_and_persona_isolation(world):
     assert sum(len(row["text"]) for row in window) <= 12000
     await runtime.update_settings({"persona_id": "another"})
     assert not (await runtime.chat.history(GROUP))["messages"]
-    await runtime.chat.observe(Event(GROUP, "人格不匹配的消息"))
-    routes = [r for r in runtime.store.list("debug_records") if r["task"] == "chat.route"]
-    assert routes[0]["status"] == "skipped"
+    event = Event(GROUP, "人格不匹配的消息")
+    await runtime.chat.observe(event)
+    status = (await runtime.chat.inspect(GROUP))["context_status"]["last_attempt"]
+    assert status["status"] == "skipped" and "人格不匹配" in status["reason"]
+    assert not runtime.store.list("debug_records")
     assert not (await runtime.chat.history(GROUP))["messages"]
 
 

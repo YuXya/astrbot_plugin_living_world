@@ -5,9 +5,107 @@ import json
 import pytest
 from test_debug import runtime as runtime_fixture
 
+from living_world.debug import DebugService
 from living_world.debug_views import build_views
 
 runtime = runtime_fixture
+
+
+def observation_rows(key, created_at=1):
+    root = {
+        "id": key,
+        "capture_version": 2,
+        "task": "chat.turn",
+        "category": "chat.turn",
+        "kind": "turn",
+        "scope": "qq:GroupMessage:100",
+        "turn_id": key,
+        "created_at": created_at,
+        "status": "observed",
+        "request": {"text": "普通群友消息"},
+        "response": {"reason": "尚未进入模型阶段；其他链路是否处理暂不确定"},
+    }
+    route = {
+        **root,
+        "id": key + "-route",
+        "parent_id": key,
+        "task": "chat.route",
+        "category": "chat.route",
+        "kind": "event",
+        "status": "success",
+        "request": {"allowed": True, "reason": "允许接入"},
+        "response": {"reason": "允许接入"},
+    }
+    return [root, route]
+
+
+async def test_old_observations_removed_before_retention_and_after_restore(runtime):
+    await runtime.update_settings({"debug": {"retain_per_category": 1}})
+    kept = runtime.debug.begin("chat.turn", {}, turn_id="attempt", kind="turn")
+    child = runtime.debug.begin(
+        "reply.model", {}, turn_id="attempt", parent_id=kept["id"], kind="model"
+    )
+    runtime.debug.finish(child, status="failed", error="connection failed before HTTP capture")
+    runtime.debug.finish(kept, status="failed")
+    baseline = runtime.store.list("debug_records")
+    formal = {
+        "group_context": {"messages": [{"text": "保留群观察"}]},
+        "chat_context_status": {"last_injected": {"turn_id": "attempt"}},
+        "memories": {"text": "保留记忆"},
+        "actions": {"status": "sent"},
+        "claims": {"status": "done"},
+    }
+    for namespace, value in formal.items():
+        runtime.store.put(namespace, "keep", value)
+    old_rows = [
+        row
+        for index in range(12)
+        for row in observation_rows(f"observed-{index}", kept["created_at"] + index + 1)
+    ]
+    runtime.store.put_many("debug_records", [(row["id"], row) for row in old_rows])
+    DebugService(runtime)
+    assert runtime.store.list("debug_records") == baseline
+    runtime.debug.trim()
+    assert runtime.store.list("debug_records") == baseline
+    for namespace, value in formal.items():
+        assert runtime.store.get(namespace, "keep") == value
+    await runtime.restore(
+        {
+            "format": "living-world",
+            "version": 1,
+            "settings": runtime.settings,
+            "records": [
+                {"namespace": "debug_records", "key": row["id"], "value": row}
+                for row in old_rows
+            ],
+        }
+    )
+    assert runtime.store.list("debug_records") == baseline
+    assert not runtime.enabled("debug")
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"task": "reply.model", "kind": "model", "status": "failed"},
+        {"task": "chat.context", "status": "failed"},
+        {"task": "chat.error", "status": "cancelled"},
+        {"task": "reply.send", "kind": "message", "status": "unknown"},
+        {"task": "reply.tool", "kind": "tool"},
+        {"http_capture": "unsupported"},
+        {"http_calls": [{"request_body": "{}", "response_body": None}]},
+        {"reply": {"completion_text": "旧回复"}},
+        {"response": {"completion_text": "保留的返回"}},
+        {"response": 42},
+        {"task": "unknown.future.event"},
+    ],
+)
+async def test_cleanup_keeps_attempts_and_unknown_records_without_complete_api(runtime, evidence):
+    rows = observation_rows("keep")
+    rows[1].update(evidence)
+    runtime.store.put_many("debug_records", [(row["id"], row) for row in rows])
+    runtime.debug.trim()
+    assert {row["id"] for row in runtime.store.list("debug_records")} == {"keep", "keep-route"}
 
 
 async def test_background_retention_keeps_complete_roots_and_clear_removes_children(
