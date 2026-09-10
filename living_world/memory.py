@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo
 
 from .prompts import PROMPTS
 from .context import brief_text, is_journal_memory, prepare_life_record, record_keys
+from .context_catalog import MEMORY_DEFAULTS, memory_category
+from .context_usage import usage_for
 
 logger = logging.getLogger(__name__)
 
@@ -265,39 +267,36 @@ class MemoryService:
         reinforce: bool = True,
         context_now: datetime | None = None,
         include_journals: bool = True,
+        usage: dict | None = None,
+        exclude_keys: set | None = None,
     ) -> list[dict]:
         """Return and reinforce relevant memories visible in this exact context."""
-        maximum = int(self._setting("context_limit", 10))
-        limit = maximum if limit is None else min(limit, maximum)
-        if not self.runtime.enabled("memory") or limit <= 0:
+        usage = copy.deepcopy(usage) if usage is not None else usage_for(self.runtime.settings)
+        if not self.runtime.enabled("memory") or (limit is not None and limit <= 0):
             return []
         now = _now()
         local_now = context_now or now.astimezone(
             ZoneInfo(self.runtime.settings.get("character", {}).get("timezone", "Asia/Shanghai"))
         )
-        journal_limit = int(self._setting("journal_limit", 2)) if include_journals else 0
         query = _normalize(query)
         query_terms = _terms(query)
         scored = []
         for record in self._visible(scope, person_id):
             journal = is_journal_memory(record)
-            if journal and not journal_limit:
+            category = memory_category(record)
+            if not category or not usage["limits"][category] or (journal and not include_journals):
                 continue
-            projected = (
-                prepare_life_record(
-                    record,
-                    local_now,
-                    memory=True,
-                    event_lookup=lambda key: self.runtime.store.get("events", key),
-                )
-                if context_now is not None or journal
-                else record
+            projected = prepare_life_record(
+                record,
+                local_now,
+                memory=True,
+                event_lookup=lambda key: self.runtime.store.get("events", key),
             )
             if projected is None:
                 continue
             if journal:
                 projected["text"] = brief_text(
-                    projected["text"], int(self._setting("brief_max_chars", 200))
+                    projected["text"], usage["brief_max_chars"][category]
                 )
             normalized = _normalize(projected["text"])
             overlap = query_terms & _terms(normalized)
@@ -310,24 +309,23 @@ class MemoryService:
             score += 0.15 if record.get("important") else 0
             scored.append((score, record["updated_at"], record, projected))
         scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        results, seen, journal_count = [], set(), 0
+        results, seen = [], set(exclude_keys or ())
+        counts = dict.fromkeys(MEMORY_DEFAULTS, 0)
         for _, _, record, projected in scored:
-            journal = is_journal_memory(record)
-            if journal and journal_count >= journal_limit:
+            category = memory_category(record)
+            if counts[category] >= usage["limits"][category]:
                 continue
-            if context_now is not None:
-                keys = record_keys(projected, context_now, memory=True)
-                if keys & seen:
-                    continue
-                seen.update(keys)
+            keys = record_keys(projected, local_now, memory=True)
+            if keys & seen:
+                continue
+            seen.update(keys)
             result = self._reinforce(record, now) if reinforce else copy.deepcopy(record)
-            if context_now is not None or journal:
-                for field in ("text", "occurred_at", "source_event_id", "source", "reading_basis"):
-                    if field in projected:
-                        result[field] = projected[field]
+            for field in ("text", "occurred_at", "source_event_id", "source", "reading_basis"):
+                if field in projected:
+                    result[field] = projected[field]
             results.append(result)
-            journal_count += int(journal)
-            if len(results) >= min(int(limit), 100):
+            counts[category] += 1
+            if limit is not None and len(results) >= int(limit):
                 break
         return results
 
@@ -518,12 +516,18 @@ class MemoryService:
         if not self.runtime.enabled("memory") or not isinstance(text, str) or not text.strip():
             return []
         original = text[:16000]
-        known = self.recall(scope=scope, person_id=person_id, reinforce=False)
+        usage = usage_for(self.runtime.settings)
+        now = _now().astimezone(
+            ZoneInfo(self.runtime.settings.get("character", {}).get("timezone", "Asia/Shanghai"))
+        )
+        known = self.recall(
+            scope=scope, person_id=person_id, reinforce=False, usage=usage, context_now=now
+        )
         template = PROMPTS["memory.reflect"]
         data = {
-            "known": [
-                {key: item.get(key) for key in ("id", "text", "kind", "profile")} for item in known
-            ],
+            "current_time": now.isoformat(),
+            "context_usage": usage,
+            "known": known,
             "material": original,
         }
         try:

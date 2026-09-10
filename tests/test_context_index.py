@@ -15,15 +15,17 @@ def test_index_covers_every_block_and_only_existing_templates():
 
 
 def test_catalog_is_detached_and_model_assembly_does_not_contain_index():
-    before = assemble(DEFAULT_LAYOUT, [block("news", "新闻", "资料原文", "实际来源")])
-    original = INDEX["news"]["purpose"]
+    before = assemble(DEFAULT_LAYOUT, [block("observations", "新闻", "资料原文", "实际来源")])
+    original = INDEX["observations"]["purpose"]
     index = catalog()
-    news = next(item for item in index["blocks"] if item["id"] == "news")
+    news = next(item for item in index["blocks"] if item["id"] == "observations")
     news["purpose"] = "ADMIN_ONLY"
-    news["targets"][0]["params"]["source"] = "changed"
-    assert INDEX["news"]["purpose"] == original
-    assert INDEX["news"]["targets"][0]["params"]["source"] == "news"
-    assert assemble(DEFAULT_LAYOUT, [block("news", "新闻", "资料原文", "实际来源")]) == before
+    news["targets"][1]["params"]["source"] = "changed"
+    assert INDEX["observations"]["purpose"] == original
+    assert INDEX["observations"]["targets"][1]["params"]["source"] == "news"
+    assert (
+        assemble(DEFAULT_LAYOUT, [block("observations", "新闻", "资料原文", "实际来源")]) == before
+    )
     encoded = json.dumps(before, ensure_ascii=False)
     assert original not in encoded
     assert not any(

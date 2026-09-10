@@ -223,6 +223,10 @@ class MemoryTests(unittest.TestCase):
             )
         )
         disabled.clear()
+        from living_world.context_usage import usage_for
+
+        self.runtime.settings["context_usage"] = usage_for(self.runtime.settings)
+        self.runtime.settings["context_usage"]["limits"]["memory.event"] = 10
         # Legacy journals remain archived until a brief is generated.
         self.assertEqual(len(self.memory.recall()), 5)
 

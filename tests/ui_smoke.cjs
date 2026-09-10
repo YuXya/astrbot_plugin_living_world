@@ -106,6 +106,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       Object.assign(window.fixture.session_status[0], { platform_name: "aiocqhttp", bound_persona: "student", persona_source: "host_default", reason_code: "allowed" });
       window.fixture.context_layout_catalog = bootstrap.context_layout_catalog;
       window.fixture.settings.context_layout = structuredClone(bootstrap.context_layout_defaults);
+      window.fixture.settings.context_usage = structuredClone(bootstrap.context_usage_defaults);
       window.AstrBotPluginPage = {
         ready: async () => ({ isDark: false }),
         apiGet: async (endpoint) => { window.calls.push({ endpoint, method: "GET" }); return structuredClone(endpoint === "export" ? { version: 1, settings: window.fixture.settings } : window.fixture); },

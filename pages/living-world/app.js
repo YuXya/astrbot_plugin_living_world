@@ -3,7 +3,7 @@ const bridge = window.AstrBotPluginPage;
 const $ = (selector) => document.querySelector(selector);
 const content = $("#content");
 const moduleNames = { daily_digest: "AI 日报", debug: "调试记录", life: "日程生活", state: "角色状态", drives: "内在状态", memory: "长期记忆", reply: "被动回复", interjection: "群聊插话", proactive: "主动社交", news: "新闻阅读", search: "主动搜索", weather: "天气", bilibili: "B 站见闻", journal: "生活日记", notes: "见闻笔记" };
-const kindNames = { knowledge: "知识", event: "事件", skill: "技能", emotional: "情感与体会", profile: "人物画像", journal: "日记", note: "笔记", notes: "笔记", news: "新闻", search: "搜索", weather: "天气", bilibili: "B 站搜索", bilibili_watch: "观看 B 站视频", bilibili_recent: "读取 B 站历史见闻", fiction: "角色日常", life: "生活", social: "社交", read: "已读取", searched: "已搜索", watched: "已观看" };
+const kindNames = { knowledge: "知识", event: "事件", skill: "技能", emotional: "情感与体会", profile: "人物认知", journal: "日记", note: "笔记", notes: "笔记", news: "新闻", search: "搜索", weather: "天气", bilibili: "B 站搜索", bilibili_watch: "观看 B 站视频", bilibili_recent: "读取 B 站历史见闻", fiction: "角色日常", life: "生活", social: "社交", read: "已读取", searched: "已搜索", watched: "已观看" };
 const statusNames = { enabled: "已开启", disabled: "已关闭", ready: "就绪", running: "运行中", paused: "已暂停", unavailable: "不可用", error: "异常", failed: "失败", planned: "已计划", pending: "待执行", reserved: "已预留", detailed: "已细化", completed: "已完成", done: "已完成", sent: "已发送", skipped: "已跳过", cancelled: "已取消", expired: "已过期", success: "成功", succeeded: "成功", ok: "正常" };
 let snapshot = null;
 let busy = false;
@@ -163,7 +163,7 @@ function compactRecords(key, records, options = {}) {
     const next = button("下一页", () => { state.page++; fill(); }, "secondary", true);
     prev.disabled = state.page === 0; next.disabled = state.page >= pages - 1;
     prev.dataset.disabled = String(prev.disabled); next.dataset.disabled = String(next.disabled);
-    pager.append(prev, el("span", "muted", `${state.page + 1} / ${pages} · ${filtered.length} 条`), next);
+    pager.append(prev, el("span", "muted", `${state.page + 1} / ${pages} · ${filtered.length} 条 · 列表每页 10 条`), next);
     for (const record of filtered.slice(state.page * 10, state.page * 10 + 10)) {
       const row = el("article", "compact-record-row"); row.dataset.recordId = record.id || "";
       const title = options.title?.(record) || recordTitle(record);
@@ -301,6 +301,7 @@ async function readState() {
   const next = await bridge.apiGet("state");
   if (!next || typeof next !== "object") throw new Error("插件返回了无效状态，请查看 AstrBot 日志。");
   snapshot = next;
+  if (snapshot.context_layout_catalog?.menus) Object.assign(PAGES, snapshot.context_layout_catalog.menus);
   $("#connection").textContent = "已连接 AstrBot";
   $("#version").textContent = `Living World ${snapshot.version || ""}`;
   $("#updated").textContent = `${new Date().toLocaleTimeString("zh-CN", { hour12: false })} 更新`;
@@ -406,14 +407,15 @@ function recordList(records, options = {}) {
     const title = el("div", "record-title", recordTitle(record));
     const meta = el("div", "record-meta");
     if (record.status) meta.append(badge(record.status));
-    if (record.kind || record.source || record.type) meta.append(badge(record.kind || record.source || record.type));
+    if (record.context_category) meta.append(badge(contextName(record.context_category)));
+    else if (record.kind || record.source || record.type) meta.append(badge(record.kind || record.source || record.type));
     if (record.scope) meta.append(el("span", "", scopeLabel(record.scope)));
     if (record.person_id) meta.append(el("span", "", `人物 ${record.person_id}`));
     const time = record.start_at || record.start || record.created_at || record.timestamp || record.date || record.day;
     if (time) meta.append(el("span", options.timeline ? "timeline-time" : "", options.timeline && record.end ? `${clockTime(time)} — ${clockTime(record.end)}` : stamp(time)));
     if (options.currentId === record.id) meta.append(badge("当前活动", "good"));
     if (record.important || record.pinned) meta.append(badge("重要保留", "good"));
-    if (record.profile) meta.append(badge("人物画像", "good"));
+    if (record.profile && !record.context_category) meta.append(badge(contextName("memory.profile"), "good"));
     append(item, append(el("div", "record-head"), title, options.head?.(record)), meta);
     const text = record.content || record.text || record.summary || record.description || record.error;
     if (text && text !== recordTitle(record)) item.append(el("p", "record-body", stringify(text)));
@@ -581,13 +583,13 @@ function sessionStatus(scope) {
 }
 function whitelistBase(original) {
   const [connection = "", type = "GroupMessage", number = ""] = (original.umo || "").split(":");
-  return { connection: connection || rows("platforms")[0]?.id || "", type, number: number.split("_").at(-1), weight: original.weight ?? 1, enabled: original.enabled !== false };
+  return { connection: connection || rows("platforms")[0]?.id || "", type, number: number.split("_").at(-1), weight: original.weight ?? 1, enabled: original.enabled !== false, display_name: original.display_name || "" };
 }
 function whitelistFields(value, original) {
   const known = [...new Set([...rows("platforms").map((item) => item.id), ...(snapshot.settings.sessions || []).map((item) => (typeof item === "string" ? item : item.umo || "").split(":")[0])].filter(Boolean))];
   const box = el("div", "stack whitelist-entry");
   const fields = append(el("div", "form-grid"), field("QQ 连接", "connection", value.connection, { options: known, required: true }), field("聊天类型", "type", value.type, { options: [{ value: "GroupMessage", label: "群聊" }, { value: "FriendMessage", label: "私聊" }] }),
-    field("群号 / QQ 号", "number", value.number, { required: true }), field("抽选权重", "weight", value.weight, { type: "number", min: 0, step: 0.1 }), checkField("启用此对象", "enabled", value.enabled));
+    field("群号 / QQ 号", "number", value.number, { required: true }), field("对话称呼（提供给 AI）", "display_name", value.display_name, { hint: "可选。这个称呼会明确提供给 AI；留空使用群号或 QQ 号。" }), field("抽选权重", "weight", value.weight, { type: "number", min: 0, step: 0.1 }), checkField("启用此对象", "enabled", value.enabled));
   const scope = () => serializeWhitelist(readFields(fields), original).umo;
   const status = el("div"), preview = el("p", "session-line");
   const update = () => { preview.textContent = `会话标识：${scope()}`; status.replaceChildren(sessionStatus(scope())); };
@@ -602,7 +604,7 @@ function whitelistFields(value, original) {
 function serializeWhitelist(value, original) {
   const old = whitelistBase(original);
   const same = ["connection", "type", "number"].every((key) => value[key] === old[key]);
-  return { ...original, umo: same && original.umo ? original.umo : `${value.connection}:${value.type}:${String(value.number).trim()}`, weight: value.weight, enabled: value.enabled };
+  return { ...original, umo: same && original.umo ? original.umo : `${value.connection}:${value.type}:${String(value.number).trim()}`, weight: value.weight, enabled: value.enabled, display_name: String(value.display_name || "").trim() };
 }
 
 function renderWhitelist(tab = "targets") {
@@ -620,7 +622,7 @@ function renderWhitelist(tab = "targets") {
   }
   if (tab === "limits") {
     const form = settingsForm("保存发送限制", "应用于实际日程主动聊天；保存不发送消息。");
-    form.append(append(el("div", "form-grid"), f("每次抽选对象数", "target_count", { type: "number", min: 1, max: 20 }, 1), f("同对象冷却（分钟）", "cooldown_minutes", { type: "number", min: 0, max: 10080 }, 60), f("每日发送上限", "daily_limit", { type: "number", min: 0, max: 1000 }, 5), f("免打扰开始", "quiet_start", { type: "time" }, "23:00"), f("免打扰结束", "quiet_end", { type: "time" }, "08:00")));
+    form.append(el("p", "hint", "每轮抽选 1 个目标：一个群或一个私聊对象。没有合格对象时不发送，已选对象失败后不另抽。"), append(el("div", "form-grid"), f("同对象冷却（分钟）", "cooldown_minutes", { type: "number", min: 0, max: 10080 }, 60), f("每日发送上限", "daily_limit", { type: "number", min: 0, max: 1000 }, 5), f("免打扰开始", "quiet_start", { type: "time" }, "23:00"), f("免打扰结束", "quiet_end", { type: "time" }, "08:00")));
     return finishForm(form, "chat.limits");
   }
   return arrayEditor("targets", (settings.sessions || []).map((row) => typeof row === "string" ? { umo: row } : row), {
@@ -883,8 +885,8 @@ function editMemory(record = {}) {
   const important = append(el("label", "inline-check"), el("input"), el("span", "", "重要记忆，长期保留"));
   important.firstChild.type = "checkbox"; important.firstChild.name = "important"; important.firstChild.checked = Boolean(record.important || record.pinned);
   openEditor(record.id ? "编辑记忆" : "添加记忆", [
-    field("内容", "content", record.content || record.text || "", { type: "textarea", required: true, readOnly: Boolean(record.profile && record.scope === "global"), hint: record.profile && record.scope === "global" ? "此人物画像由已核对的谈话证据形成，内容保持只读，可调整保留标记或删除。" : "" }),
-    field("分类", "kind", record.kind || "event", { options: ["knowledge", "event", "skill", "emotional"].map((kind) => ({ value: kind, label: kindNames[kind] })) }),
+    field("内容", "content", record.content || record.text || "", { type: "textarea", required: true, readOnly: Boolean(record.profile && record.scope === "global"), hint: record.profile && record.scope === "global" ? "此人物认知由已核对的谈话证据形成，内容保持只读，可调整保留标记或删除。" : "" }),
+    field("分类", "kind", record.kind || "event", { options: ["knowledge", "event", "skill", "emotional"].map((kind) => ({ value: kind, label: contextName("memory." + kind) })) }),
     record.id ? el("p", "hint", `所属场合：${scopeLabel(record.scope)}；人物：${record.person_id || "角色自身 / 未关联"}。编辑保留原有场合与人物；保存后可能调用 AI 核对未来日程，不发送 QQ 消息。`) : field("所属场合", "scope", "global", { options: scopeOptions(), hint: "私人谈话、经历与约定请选择对应会话。" }),
     record.id ? el("span") : field("人物标识", "person_id", "", { hint: "留空表示角色自身或不关联人物。" }), important,
   ], (patch) => {
@@ -893,28 +895,69 @@ function editMemory(record = {}) {
     return action("update_memory", { id: record.id, patch: { ...rest, text } });
   });
 }
+function contextName(id) { return snapshot?.context_layout_catalog?.blocks?.find((item) => item.id === id)?.label || id; }
+function categoryOf(row) {
+  if (row.context_category !== undefined) return row.context_category;
+  const source = String(row.source || "").split(":")[0];
+  if (["journal:brief", "notes:brief"].includes(row.source)) return "memory." + source;
+  return ["journal", "notes"].includes(source) || String(row.id || "").startsWith("journal:") ? null : row.profile ? "memory.profile" : "memory." + row.kind;
+}
+function sourceIndexButton(id) {
+  const item = button("来源", () => showSourceIndex(id), "secondary layout-source", true);
+  item.setAttribute("aria-label", contextName(id) + " · 来源"); return item;
+}
+function renderContextUsage() {
+  const catalog = snapshot.context_layout_catalog?.blocks || [];
+  const categories = catalog.filter((item) => item.usage);
+  if (!categories.length) return empty("请更新并重载插件以取得上下文用量目录");
+  const data = snapshot.settings.context_usage || { limits: {}, brief_max_chars: {} };
+  const form = settingsForm("保存上下文用量", "每类独立限量，不借用其他类别额度。0 表示该类不自动注入；保存不调用模型、不删除存档。"); form.id = "context-usage-settings";
+  const total = el("output", "context-usage-total"); total.setAttribute("aria-live", "polite");
+  form.append(total, el("p", "hint", "合计只读，由下面各项相加；实际注入受任务、模块、场合、日期和可用材料影响。不包含人格、日程、宿主聊天历史及任务明确要求的原文。来源每次读取数量、列表每页条数分别设置。"));
+  const list = el("div", "context-usage-list");
+  for (const item of categories) {
+    const row = el("div", "context-usage-row"); row.dataset.blockId = item.id;
+    const amount = field(item.label + " · 最多条数", "context_usage.limits." + item.id, data.limits[item.id] ?? item.usage.default, { type: "number", min: 0, max: item.usage.max, step: 1, required: true });
+    amount.querySelector("input").dataset.limitId = item.id;
+    row.append(amount, sourceIndexButton(item.id));
+    if (item.usage.brief) {
+      const chars = field(item.label + " · 最长字符", "context_usage.brief_max_chars." + item.id, data.brief_max_chars[item.id] ?? item.usage.brief.default, { type: "number", min: item.usage.brief.min, max: item.usage.brief.max, step: 1, required: true });
+      chars.querySelector("input").dataset.briefId = item.id; row.append(chars);
+    }
+    list.append(row);
+  }
+  form.append(list);
+  finishForm(form, "context.usage", () => saveSettings({ context_usage: {
+    version: 1,
+    limits: Object.fromEntries([...form.querySelectorAll("[data-limit-id]")].map((input) => [input.dataset.limitId, Number(input.value)])),
+    brief_max_chars: Object.fromEntries([...form.querySelectorAll("[data-brief-id]")].map((input) => [input.dataset.briefId, Number(input.value)])),
+  } }));
+  const updateTotal = () => { total.textContent = `配置合计最多注入 ${[...form.querySelectorAll("[data-limit-id]")].reduce((sum, input) => sum + (Number(input.value) || 0), 0)} 条`; };
+  form.querySelector(".section-toolbar").append(button("恢复初始用量", () => {
+    for (const input of form.querySelectorAll("[data-limit-id], [data-brief-id]")) {
+      const item = categories.find(item => item.id === (input.dataset.limitId || input.dataset.briefId));
+      input.value = input.dataset.limitId ? item.usage.default : item.usage.brief.default;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }, "secondary"));
+  form.addEventListener("input", updateTotal); updateTotal(); return form;
+}
 function renderMemory(tab = "records") {
   if (tab === "journals") return renderJournal();
-  if (tab === "usage") {
-    const form = settingsForm("保存上下文用量", "下一次组装时生效，不调用模型、不删除记忆。"); form.id = "memory-context-settings";
-    const data = snapshot.settings.memory || {};
-    form.append(append(el("div", "form-grid memory-context-fields"), field("相关记忆总条数", "memory.context_limit", data.context_limit ?? 10, { type: "number", min: 0, max: 50, required: true, hint: "默认 10；0 表示不召回记忆。" }),
-      field("其中日记／笔记最多条数", "memory.journal_limit", data.journal_limit ?? 2, { type: "number", min: 0, max: 50, required: true, hint: "默认 2，计入总条数；0 表示不召回日记／笔记简报。" }),
-      field("简报最长字符", "memory.brief_max_chars", data.brief_max_chars ?? 200, { type: "number", min: 50, max: 1000, required: true, hint: "默认 200，只限制简报，完整正文仍保留。" })));
-    return finishForm(form, "memory.usage");
-  }
+  if (tab === "usage") return renderContextUsage();
   const root = el("div", "stack");
   const merge = () => {
     const chosen = rows("memories").filter((row) => selectedMemories.has(row.id));
     if (chosen.length < 2) { notice("请先勾选至少两条记忆。", true); return; }
     if (new Set(chosen.map((row) => row.scope || "global")).size > 1) { notice("只能合并同一场合的记忆，避免把私人内容带到其他场合。", true); return; }
-    if (chosen.some((row) => row.profile && row.scope === "global")) { notice("全局人物画像来自可核对的谈话证据，不能用手工合并的内容替换。", true); return; }
+    if (chosen.some((row) => row.profile && row.scope === "global")) { notice("全局人物认知来自可核对的谈话证据，不能用手工合并的内容替换。", true); return; }
     openEditor("合并选中的记忆", [el("p", "hint", "可能调用 AI 核对未来日程，不发送消息；只合并同场合资料。"), field("合并内容", "content", chosen.map((row) => row.content || row.text || "").join("\n"), { type: "textarea", required: true })], async (values) => { const result = await action("merge_memories", { ids: chosen.map((row) => row.id), content: values.content }); if (result !== false) selectedMemories.clear(); return result; }, "合并记忆");
   };
   root.append(append(el("div", "actions"), button("添加记忆", () => editMemory(), "primary"), button("合并所选", merge, "secondary")));
-  const filters = append(el("div", "compact-filter"), recordScopeFilter("memories"), chooser("记忆分类", "memory.kind", [{ value: "", label: "全部分类" }, ...["knowledge", "event", "skill", "emotional", "profile"].map((value) => ({ value, label: kindNames[value] }))]));
+  const filters = append(el("div", "compact-filter"), recordScopeFilter("memories"), chooser("记忆分类", "memory.kind", [{ value: "", label: "全部分类" }, ...(snapshot.context_layout_catalog?.blocks || []).filter((item) => item.id.startsWith("memory.")).map((item) => ({ value: item.id, label: item.label }))]));
   const kind = selections.get("memory.kind");
-  const data = byRecordScope("memories", rows("memories")).filter((row) => !kind || (kind === "profile" ? row.profile : row.kind === kind));
+  const data = byRecordScope("memories", rows("memories")).filter((row) => !kind || categoryOf(row) === kind).map((row) => ({ ...row, context_category: categoryOf(row) }));
+  if (kind) filters.append(sourceIndexButton(kind));
   root.append(filters, compactRecords("memories", data, {
     head: (record) => { const check = el("input"); check.type = "checkbox"; check.checked = selectedMemories.has(record.id); check.setAttribute("aria-label", `选择记忆 ${recordTitle(record)}`); check.addEventListener("change", () => { if (check.checked) selectedMemories.add(record.id); else selectedMemories.delete(record.id); }); return check; },
     actions: (record) => append(el("div", "actions"), button("编辑", () => editMemory(record), "secondary", true), button("删除", () => confirmAction("删除这条记忆", "删除后不再召回，可能调用 AI 核对未来日程；不发送 QQ，不删除宿主历史。", () => action("delete_memory", { id: record.id }), true, "删除记忆"), "danger", true)),
@@ -933,7 +976,7 @@ function realSourceAction(source, label, queryLabel = "", placeholder = "") {
 function renderJournal() {
   const root = el("div", "stack");
   const generate = () => openEditor("生成日记或笔记", [el("p", "hint", "先生成正文，再调用模型提炼简报，不发送 QQ。简报失败保留正文。"), field("日期", "date", dayNow(), { type: "date", required: true }), field("类型", "kind", "journal", { options: [{ value: "journal", label: "生活日记" }, { value: "note", label: "见闻笔记" }] }), field("所属场合", "scope", "global", { options: scopeOptions() })], (values) => action("generate_journal", values), "调用 AI 并保存记录");
-  const kind = chooser("类型", "journals.kind", [{ value: "", label: "全部类型" }, { value: "journal", label: "日记" }, { value: "notes", label: "笔记" }]);
+  const kind = chooser("类型", "journals.kind", [{ value: "", label: "全部类型" }, { value: "journal", label: contextName("memory.journal") }, { value: "notes", label: contextName("memory.notes") }]);
   root.append(append(el("div", "actions"), button("生成日记或笔记", generate, "primary")), append(el("div", "compact-filter"), recordScopeFilter("journals"), kind));
   const records = byRecordScope("journals", rows("entries")).filter((row) => !selections.get("journals.kind") || row.kind === selections.get("journals.kind"));
   const body = (record) => append(el("div", "stack"), el("p", "hint", `所属场合：${scopeLabel(record.scope)}`),
@@ -948,7 +991,7 @@ const sourceNames = { news: "新闻", search: "搜索", weather: "天气", bilib
 function renderSources(tab = "settings") {
   const root = el("div", "stack"), settings = snapshot.settings || {};
   if (tab === "runs") return compactRecords("digest-runs", rows("daily_digest_runs"));
-  const options = Object.entries(sourceNames).map(([value, label]) => ({ value, label }));
+  const options = Object.entries(sourceNames).map(([value, label]) => ({ value, label: tab === "records" ? (value === "weather" ? contextName("weather") : `近期见闻：${label}`) : `来源设置：${label}` }));
   const type = chooser("来源类型", "source." + tab, tab === "records" ? [{ value: "", label: "全部来源" }, ...options] : options, tab === "records" ? "" : "news"); root.append(type);
   const source = selections.get("source." + tab);
   if (tab === "records") {
@@ -973,7 +1016,7 @@ function renderSources(tab = "settings") {
     root.append(arrayEditor(key, records, { selectLabel: news ? "选择新闻源" : "选择日报作者", saveLabel: news ? "保存新闻源设置" : "保存日报设置", fields,
       label: (row, index) => row.name || `新来源 ${index + 1}`, create: () => news ? ({ id: "custom-" + newDraftId(), name: "", url: "", enabled: true }) : ({ id: "custom-" + newDraftId(), name: "", uid: "", keywords: "日报", time: "12:00", enabled: true }),
       restore: news ? "restore_news_sources" : "restore_digest_sources",
-      extra: news ? () => f("每次候选新闻数量", "news.limit", { type: "number", min: 1, max: 30 }, 5) : null,
+      extra: news ? () => f("来源设置：新闻 · 每次读取候选数量", "news.limit", { type: "number", min: 1, max: 30, hint: "这是来源读取数量；注入上限在上下文用量设置。" }, 5) : null,
       payload: (sources, extra) => news ? { news: { limit: extra.news?.limit ?? settings.news?.limit ?? 5, sources } } : { daily_digest: { sources } },
     })); return root;
   }
@@ -984,7 +1027,7 @@ function renderSources(tab = "settings") {
     form.querySelector(".section-toolbar").append(button("测试天气连接", () => { if (formDrafts.has("source.weather")) { notice("请先保存天气设置，再测试连接。", true); return; } action("test_weather"); }, "secondary"));
   } else {
     const dependency = snapshot.bilibili_dependency || {};
-    form.append(el("p", "hint", dependency.text || "固定依赖 astrbot_plugin_bilibili_ai_bot 的公开记忆 API v3。"), f("近期公开视频记忆数量", "bilibili.recent_limit", { type: "number", min: 1, max: 30 }, 5));
+    form.append(el("p", "hint", dependency.text || "固定依赖 astrbot_plugin_bilibili_ai_bot 的公开记忆 API v3。"), f("来源设置：B站 · 每次读取公开视频记忆数量", "bilibili.recent_limit", { type: "number", min: 1, max: 30, hint: "这是来源读取数量；注入上限在上下文用量设置。" }, 5));
   }
   root.append(finishForm(form, "source." + source)); return root;
 }
@@ -1265,6 +1308,7 @@ function renderDebugView(view, records, initiallyOpen) {
         const item = el("details", "debug-source");
         item.dataset.sourceKey = key;
         const summary = append(el("summary", "debug-source-summary"), el("span", "debug-source-title", source.title || "上下文资料"), el("span", "debug-source-origin", `来源：${source.source || "未记录"}${source.placement ? ` · 放入：${source.placement}` : ""}`));
+        if (source.count !== undefined) summary.append(el("span", "debug-source-count", `本轮实际注入 ${source.count} 条${source.limit !== undefined ? ` · 采用上限 ${source.limit} 条` : ""}`));
         item.open = selected.sourceOpen.get(key) ?? true;
         item.addEventListener("toggle", () => { if (item.isConnected) selected.sourceOpen.set(key, item.open); });
         sources.append(append(item, summary, append(el("div", "debug-source-content"), readableValue(source.content))));
@@ -1460,7 +1504,7 @@ function showSourceIndex(id) {
     if (!PAGES[target.page]?.tabs[target.tab]) continue;
     const params = { ...target.params };
     if (params.current_task) { delete params.current_task; if (snapshot.debug?.templates?.some((row) => row.task === layoutTask)) params.task = layoutTask; }
-    links.append(button(target.label, () => { $("#source-index").close(); navigate(target.page, target.tab, params); }, "secondary"));
+    links.append(button(target.path || target.label, () => { $("#source-index").close(); navigate(target.page, target.tab, params); }, "secondary"));
   }
   if (links.childElementCount) body.append(el("h3", "", "管理入口"), links);
   const tasks = [...new Set([...(info.templates || []), ...(id === "anchor.user" && snapshot.debug?.templates?.some((row) => row.task === layoutTask) ? [layoutTask] : [])])];
@@ -1590,7 +1634,7 @@ function renderContextLayout() {
         pointer = { id: event.pointerId, block: id, x: event.clientX, y: event.clientY }; cancelLayoutDrag = clearDrag; root.setPointerCapture(event.pointerId);
       });
       const name = el("strong", "layout-name", info.label); name.title = info.label;
-      row.append(handle, name, button("来源", () => showSourceIndex(id), "secondary layout-source"));
+      row.append(handle, name, sourceIndexButton(id));
       if (!info.anchor) {
         const destination = field("注入角色", "layout_role", role, { options: ["system", "user"] });
         const select = destination.querySelector("select"); select.dataset.skip = "1"; select.disabled = !editable; select.setAttribute("aria-label", `${info.label}的注入角色`);
@@ -1695,6 +1739,8 @@ function applyRouteSelection() {
   const { page, tab, params } = currentRoute;
   rememberedTabs[page] = tab;
   if (params.source !== undefined && page === "sources") selections.set("source." + tab, params.source);
+  if (params.category !== undefined && page === "memory" && tab === "records") selections.set("memory.kind", params.category);
+  if (params.kind !== undefined && page === "memory" && tab === "journals") selections.set("journals.kind", params.kind);
   if (params.task && page === "context") {
     if (tab === "templates") { templateTask = params.task; selections.delete("template.version"); }
     else if (tab === "layout") layoutTask = params.task;
@@ -1716,16 +1762,17 @@ function render() {
   if (!snapshot) return;
   const tabs = el("div", "secondary-tabs"); tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", config.label + "功能");
   const ids = Object.keys(config.tabs);
+  tabs.style.setProperty("--tab-count", ids.length);
   for (const [id, label] of Object.entries(config.tabs)) {
     const item = button(label, () => navigate(page, id), "secondary");
     item.setAttribute("role", "tab"); item.setAttribute("aria-selected", String(id === tab)); item.setAttribute("aria-controls", "section-panel"); item.id = `section-${page}-${id}`; item.tabIndex = id === tab ? 0 : -1;
     item.addEventListener("keydown", (event) => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); const next = ids[event.key === "Home" ? 0 : event.key === "End" ? ids.length - 1 : (ids.indexOf(id) + (event.key === "ArrowRight" ? 1 : ids.length - 1)) % ids.length]; navigate(page, next, { focus_tab: "1" }); });
     tabs.append(item);
   }
-  const renderers = { overview: renderOverview, character: renderCharacter, schedule: renderSchedule, chat: renderWhitelist, sources: renderSources, memory: renderMemory, system: renderSystem, context: (part) => ({ layout: renderContextLayout, templates: renderTemplates, trial: renderDebugTrial, calls: renderDebugRecords }[part]()) };
+  const renderers = { overview: renderOverview, character: renderCharacter, schedule: renderSchedule, chat: renderWhitelist, sources: renderSources, memory: renderMemory, system: renderSystem, context: (part) => ({ layout: renderContextLayout, usage: renderContextUsage, templates: renderTemplates, trial: renderDebugTrial, calls: renderDebugRecords }[part]()) };
   const panel = renderers[page](tab); panel.id = "section-panel"; panel.classList.add("section-panel"); panel.dataset.page = page; panel.dataset.section = tab; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", `section-${page}-${tab}`);
   content.replaceChildren(tabs);
-  if (sourceReturn && !(page === "context" && tab === "layout")) content.append(button("返回上下文列表", () => {
+  if (sourceReturn && location.hash !== sourceReturn.hash) content.append(button(resolveRoute(sourceReturn.hash).tab === "usage" ? "返回上下文用量" : "返回上下文列表", () => {
     const back = sourceReturn; layoutTask = back.task; sourceReturn = null;
     const show = () => { requestAnimationFrame(() => { window.scrollTo(0, back.scroll); [...content.querySelectorAll("[data-block-id]")].find((node) => node.dataset.blockId === back.block)?.querySelector(".layout-source")?.focus({ preventScroll: true }); }); };
     if (location.hash === back.hash) { render(); show(); } else { window.addEventListener("hashchange", show, { once: true }); location.hash = back.hash; }

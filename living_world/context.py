@@ -7,6 +7,8 @@ import re
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .context_catalog import BLOCK_NAMES, MEMORY_DEFAULTS, SOURCE_NAMES, memory_category
+
 PLACEMENT = "本轮动态资料（不写入聊天历史）"
 STATUS = {
     "planned": "计划中，尚未发生",
@@ -172,29 +174,31 @@ def prepare_life_record(row, now, *, memory=False, event_lookup=None):
     return result
 
 
-def record_keys(row, now, *, memory=False):
-    """Deduplicate known lineage, or exact legacy copies at the same instant and scope."""
+def record_keys(row, now, *, memory=False, legacy=False):
+    """Deduplicate explicit lineage; preserve old exact-copy rules only for old snapshots."""
     scope, identity = row.get("scope", "global"), event_id(row, memory=memory)
     keys = {(scope, "event", identity)} if identity else set()
     moment = material_time(row.get("occurred_at"), now) or material_time(row.get("created_at"), now)
-    if moment and not identity:
+    if legacy and moment and not identity:
         keys.add((scope, "body", moment.isoformat(), clean_life_text(row.get("text"))))
+    elif not identity and row.get("id"):
+        keys.add((scope, "memory" if memory else "record", str(row["id"])))
     return keys
 
 
-def prepare_life_records(records, now, *, memory=False, event_lookup=None, seen=None):
+def prepare_life_records(records, now, *, memory=False, event_lookup=None, seen=None, legacy=False):
     seen = set() if seen is None else seen
     prepared = []
     for row in records:
         item = prepare_life_record(row, now, memory=memory, event_lookup=event_lookup)
         if item is None:
             continue
-        keys = record_keys(item, now, memory=memory)
+        keys = record_keys(item, now, memory=memory, legacy=legacy)
         if keys & seen:
             continue
         seen.update(keys)
         moment = material_time(item.get("occurred_at"), now)
-        if moment:
+        if legacy and moment:
             seen.add((item.get("scope", "global"), "body", moment.isoformat(), item["text"]))
         prepared.append(item)
     if not memory:
@@ -297,7 +301,48 @@ def observation_text(row):
     return "\n".join(lines)
 
 
-def context_from_data(data):
+def memory_blocks(records, now=None, usage=None, *, include_identifiers=False):
+    """Render already selected, typed memories without rereading storage."""
+    now = now or datetime.now(UTC)
+    grouped = {identifier: [] for identifier in MEMORY_DEFAULTS}
+    for row in records:
+        identifier = memory_category(row)
+        if identifier and (
+            not is_journal_memory(row) or row.get("source") in {"journal:brief", "notes:brief"}
+        ):
+            grouped[identifier].append(row)
+    blocks = []
+    for identifier, rows in grouped.items():
+        if not rows:
+            continue
+        content = "\n".join(f"- {record_text(row, now, memory=True)}" for row in rows)
+        if include_identifiers:
+            content = json.dumps(
+                {
+                    "known": [
+                        {key: row.get(key) for key in ("id", "text", "kind", "profile")}
+                        for row in rows
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        item = source_item(
+            BLOCK_NAMES[identifier],
+            "记忆库按结构化类型、人物与场合筛选的同次资料",
+            content,
+            block_id=identifier,
+        )
+        item["count"] = len(rows)
+        if usage:
+            item["limit"] = usage["limits"][identifier]
+        if any(is_role_experience(row) or is_fiction_journal(row) for row in rows):
+            item["notice"] = FICTION_NOTICE
+        blocks.append(item)
+    return blocks
+
+
+def context_from_data(data, *, legacy=False):
     """Create readable content and its source list without re-reading any business data."""
     if not isinstance(data, dict):
         raise TypeError("Living World context must be an object")
@@ -322,8 +367,11 @@ def context_from_data(data):
     }
 
     def add(title, source, content, identifier=None):
+        identifier = identifier or identifiers[title]
         sources.append(
-            source_item(title, source, content, block_id=identifier or identifiers[title])
+            source_item(
+                title if legacy else BLOCK_NAMES[identifier], source, content, block_id=identifier
+            )
         )
 
     add("当前时间", "角色设置中的时区与当前时钟", _text(data.get("current_time")))
@@ -356,33 +404,68 @@ def context_from_data(data):
     )
     seen = set()
     events = {str(row.get("id", "")): row for row in data.get("experiences", [])}
-    experiences = prepare_life_records(data.get("experiences", []), now, seen=seen)
+    experiences = prepare_life_records(data.get("experiences", []), now, seen=seen, legacy=legacy)
     memories = prepare_life_records(
-        data.get("memories", []), now, memory=True, event_lookup=events.get, seen=seen
+        data.get("memories", []),
+        now,
+        memory=True,
+        event_lookup=events.get,
+        seen=seen,
+        legacy=legacy,
     )
     memory_lines = [f"- {record_text(row, now, memory=True)}" for row in memories]
-    add(
-        "相关记忆与人物认知",
-        "记忆库按当前场合与人物检索的结果",
-        "\n".join(memory_lines) or "本轮没有可用的相关记忆。",
-    )
+    if legacy:
+        add(
+            "相关记忆与人物认知",
+            "记忆库按当前场合与人物检索的结果",
+            "\n".join(memory_lines) or "本轮没有可用的相关记忆。",
+        )
+    else:
+        sources.extend(memory_blocks(memories, now, data.get("context_usage")))
     experience_lines = [f"- {record_text(row, now)}" for row in experiences]
     if experience_lines:
         add("近期经历", "生活记录中当前场合可见的经历", "\n".join(experience_lines))
+        if not legacy:
+            sources[-1]["count"] = len(experiences)
     for identifier, rows in (("memories", memories), ("experiences", experiences)):
         if any(is_role_experience(row) or is_fiction_journal(row) for row in rows):
             for item in sources:
                 if item["block_id"] == identifier:
                     item["notice"] = FICTION_NOTICE
     for row in data.get("observations", []):
+        module = row.get("module")
+        identifier = (
+            module
+            if legacy and module in {"weather", *SOURCE_NAMES}
+            else "weather"
+            if module == "weather"
+            else "observations"
+            if module in SOURCE_NAMES
+            else "task.other"
+        )
+        text = observation_text(row)
+        if not legacy and module in SOURCE_NAMES:
+            text = f"近期见闻：{SOURCE_NAMES[module]}\n{text}"
         add(
             "天气" if row.get("module") == "weather" else "近期见闻",
             "见闻记录及其中注明的实际来源",
-            observation_text(row),
-            identifier=row.get("module")
-            if row.get("module") in {"weather", "news", "search", "bilibili", "daily_digest"}
-            else "task.other",
+            text,
+            identifier=identifier,
         )
+        if not legacy:
+            sources[-1]["count"] = 1
+    if not legacy:
+        merged = {}
+        for item in sources:
+            key = item["block_id"]
+            if key in merged:
+                merged[key]["content"] += "\n\n" + item["content"]
+                merged[key]["count"] = merged[key].get("count", 0) + item.get("count", 0)
+            else:
+                merged[key] = item
+            if key in data.get("context_usage", {}).get("limits", {}):
+                merged[key]["limit"] = data["context_usage"]["limits"][key]
+        sources = list(merged.values())
     return {
         "text": "\n\n".join(
             f"【{row['title']}】\n"
@@ -429,7 +512,7 @@ def normalize_context(context):
             except (ValueError, TypeError):
                 pass
         if is_life_snapshot(candidate):
-            bundle = context_from_data(candidate)
+            bundle = context_from_data(candidate, legacy=True)
             sources.extend(
                 {**row, "placement": f"本轮动态资料：{path}"} for row in bundle["sources"]
             )

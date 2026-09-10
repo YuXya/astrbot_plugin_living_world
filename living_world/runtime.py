@@ -23,8 +23,10 @@ from .context import (
     activity_material,
     clean_life_text,
     normalize_context,
+    material_time,
+    observation_text,
     prepare_life_records,
-    record_text,
+    record_keys,
     source_item,
 )
 from .debug import DebugService, json_value
@@ -32,6 +34,8 @@ from .drives import DriveService
 from .drives_migration import migrate_drives
 from .journal import JournalService
 from .layout import assemble, block, catalog as layout_catalog, collect_task_blocks, resolve_layout
+from .context_catalog import SOURCE_NAMES, memory_category
+from .context_usage import archive_conversion, usage_for
 from .life import LifeService
 from .life_migration import migrate_life
 from .memory import MemoryService
@@ -53,7 +57,8 @@ class Runtime:
     def __init__(self, path, host):
         self.store = Store(path)
         self.host = host
-        self.settings = settings_from(self.store.get("settings", "current", {}))
+        saved_settings = self.store.get("settings", "current", {})
+        self.settings = settings_from(saved_settings)
         self.stopped = False
         self.tasks = {}
         self.background = set()
@@ -71,6 +76,7 @@ class Runtime:
         self.memory = MemoryService(self)
         self.life = LifeService(self)
         with self.store.transaction():
+            archive_conversion(self.store, saved_settings)
             migrate_life(self.life)
             migrate_drives(self)
             self.drives = DriveService(self)
@@ -192,6 +198,16 @@ class Runtime:
     async def prepare_request(self, task, module, template, context, scope="global"):
         layout = resolve_layout(self.settings, task)
         character = copy.deepcopy(self.settings["character"])
+        if isinstance(context, dict):
+            context = copy.deepcopy(context)
+            material = context.get("context", {})
+            if isinstance(material, str):
+                try:
+                    material = json.loads(material)
+                except ValueError:
+                    material = {}
+            frozen_usage = material.get("context_usage") if isinstance(material, dict) else None
+            context.setdefault("context_usage", frozen_usage or usage_for(self.settings))
         if not await self.scope_allowed(scope):
             raise ValueError("人格未绑定或会话不在接入范围内")
         model_key = {
@@ -236,6 +252,8 @@ class Runtime:
             "base_system_prompt": system,
             "context_blocks": fixed_blocks,
             "context_layout": layout,
+            "context_layout_version": 2,
+            "context_usage": context.get("context_usage") if isinstance(context, dict) else None,
             "template": template,
             "dynamic_context": json_value(context),
             "sources": assembled["sources"],
@@ -495,6 +513,7 @@ class Runtime:
             latest = observations[0] if observations else {}
             context.update(context=available)
             if task == "memory.reflect":
+                context.pop("context", None)
                 context["known"] = self.memory.recall(scope=scope, reinforce=False)
             elif task == "life.revise":
                 now = self.life._now()
@@ -502,10 +521,7 @@ class Runtime:
                 context.update(
                     scope=scope,
                     reason="本次测试的调整理由",
-                    memories=[
-                        record_text(row, now, memory=True)
-                        for row in self.life._memories(scope, now=now)
-                    ],
+                    memories=self.life._memories(scope, now=now),
                     经历说明=FICTION_NOTICE,
                     editable=[
                         activity_material(self.life._view(a, scope))
@@ -526,6 +542,7 @@ class Runtime:
                 )
             elif module == "social":
                 context.update(
+                    recipient=self.social.recipient_context(scope),
                     reason="本次测试的聊天意图",
                     message="本次测试群消息",
                     interjection=task == "social.interject",
@@ -612,11 +629,15 @@ class Runtime:
                     or any(not isinstance(item, dict) for item in fixed)
                 ):
                     raise ValueError("试跑需要 base_system_prompt 字符串和 context_blocks 列表")
+                legacy = request.get("context_layout_version", 1) == 1 and any(
+                    "memories" in rows for rows in request["context_layout"].values()
+                )
                 assembled = assemble(
                     request["context_layout"],
-                    [*fixed, *collect_task_blocks(dynamic)],
+                    [*fixed, *collect_task_blocks(dynamic, legacy=legacy)],
                     base,
                     template,
+                    legacy=legacy,
                 )
                 clean.update(
                     {
@@ -714,16 +735,15 @@ class Runtime:
                 )
         return event
 
-    async def context_text(self, scope="global", person_id="", query="", *, reinforce=True):
+    async def context_text(
+        self, scope="global", person_id="", query="", *, reinforce=True, usage=None
+    ):
+        usage = copy.deepcopy(usage) if usage is not None else usage_for(self.settings)
         if not await self.scope_allowed(scope):
             return ""
         now = self.life._now()
-        records = self.memory.recall(
-            query, scope=scope, person_id=person_id, reinforce=reinforce, context_now=now
-        )
-        records = [r for r in records if self._source_enabled(r.get("source", ""))]
         data = {
-            "memories": records,
+            "context_usage": usage,
             "current_time": now.isoformat(),
             "timezone": self.settings["character"]["timezone"],
             "schedule": {
@@ -750,19 +770,51 @@ class Runtime:
                     and self._source_enabled(e.get("source", ""))
                 ],
                 now,
-            )[:10]
-        data["observations"] = [
+            )[: usage["limits"]["experiences"]]
+        seen = set()
+        for row in data.get("experiences", []):
+            seen.update(record_keys(row, now))
+        data["memories"] = self.memory.recall(
+            query,
+            scope=scope,
+            person_id=person_id,
+            reinforce=reinforce,
+            context_now=now,
+            usage=usage,
+            exclude_keys=seen,
+        )
+        observations = [
             o
             for o in self.store.list("observations")
-            if o.get("scope") in {"global", scope} and self.enabled(o.get("module", ""))
-        ][:5]
+            if o.get("scope") in {"global", scope}
+            and self.enabled(o.get("module", ""))
+            and observation_text(o).strip()
+        ]
+        observations.sort(
+            key=lambda row: (
+                material_time(row.get("created_at"), now)
+                or datetime.min.replace(tzinfo=now.tzinfo),
+                str(row.get("id", "")),
+            ),
+            reverse=True,
+        )
+        data["observations"] = [row for row in observations if row.get("module") in SOURCE_NAMES][
+            : usage["limits"]["observations"]
+        ]
+        data["observations"].extend(
+            [row for row in observations if row.get("module") == "weather"][
+                : usage["limits"]["weather"]
+            ]
+        )
         return json.dumps(data, ensure_ascii=False)
 
-    async def context_bundle(self, scope="global", person_id="", query="", *, reinforce=True):
+    async def context_bundle(
+        self, scope="global", person_id="", query="", *, reinforce=True, usage=None
+    ):
         """Build text and provenance from exactly one scoped material read."""
         from .context import context_from_data
 
-        raw = await self.context_text(scope, person_id, query, reinforce=reinforce)
+        raw = await self.context_text(scope, person_id, query, reinforce=reinforce, usage=usage)
         if not raw:
             raise ValueError("当前场合不在 Living World 接入范围内")
         return context_from_data(json.loads(raw))
@@ -929,7 +981,11 @@ class Runtime:
             "drives": proposed["drives"],
             "modules": {**old["modules"], "drives": proposed["modules"]["drives"]},
         } == proposed
-        only_layout = {**old, "context_layout": proposed["context_layout"]} == proposed
+        only_layout = {
+            **old,
+            "context_layout": proposed["context_layout"],
+            "context_usage": proposed["context_usage"],
+        } == proposed
         try:
             with self.store.transaction():
                 self.drives.settle()
@@ -1086,7 +1142,10 @@ class Runtime:
             "context_layout_catalog": layout_catalog(),
             "session_status": session_status,
             "provider_capture_available": self.chat.audit.available and self.chat.audit.active,
-            "memories": self.store.list("memories"),
+            "memories": [
+                {**row, "context_category": memory_category(row)}
+                for row in self.store.list("memories")
+            ],
             "observations": self.store.list("observations"),
             "entries": self.journal.list_entries(),
             "events": self.store.list("events")[:200],
@@ -1118,6 +1177,7 @@ class Runtime:
         try:
             with self.store.transaction():
                 self.store.restore(backup["records"])
+                archive_conversion(self.store, backup.get("settings", {}))
                 self.settings = restored
                 migrate_life(self.life)
                 migrate_drives(self, legacy_settings=backup.get("settings", {}))

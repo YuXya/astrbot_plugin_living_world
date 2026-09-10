@@ -10,6 +10,7 @@ from datetime import UTC, date, datetime
 
 from .life import character_timezone, scope_allowed
 from .context import brief_text
+from .context_usage import brief_limit, usage_for
 from .prompts import PROMPTS
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ class JournalService:
         return {
             "date": entry.get("day", ""),
             "kind": entry.get("kind", "journal"),
-            "max_chars": self.runtime.settings.get("memory", {}).get("brief_max_chars", 200),
+            "max_chars": brief_limit(self.runtime.settings, entry.get("kind", "journal")),
             "document": entry.get("text", ""),
             "sources": entry.get("sources", []),
         }
@@ -174,11 +175,21 @@ class JournalService:
                 return {"status": "skipped", "reason": "no_events"}
             events = events[:80]
             memories = []
+            usage = usage_for(self.runtime.settings)
+            now = datetime.now(character_timezone(self.runtime.settings))
             if self.runtime.enabled("memory"):
+                selected_usage = usage_for(self.runtime.settings)
+                for category in selected_usage["limits"]:
+                    if category not in {"memory.knowledge", "memory.emotional", "memory.profile"}:
+                        selected_usage["limits"][category] = 0
                 memories = [
                     entry
                     for entry in self.runtime.memory.recall(
-                        query="", scope=scope, include_journals=False
+                        query="",
+                        scope=scope,
+                        include_journals=False,
+                        usage=selected_usage,
+                        context_now=now,
                     )
                     if entry.get("scope", "global") in {"global", scope}
                     and (entry.get("profile") or entry.get("kind") in {"knowledge", "emotional"})
@@ -186,6 +197,8 @@ class JournalService:
                 ]
             data = {
                 "date": day,
+                "current_time": now.isoformat(),
+                "context_usage": usage,
                 "kind": kind,
                 "scope": scope,
                 "events": events,

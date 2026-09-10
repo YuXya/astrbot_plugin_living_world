@@ -1,5 +1,15 @@
 """Static administration links; these descriptions are never model input."""
 
+from .context_catalog import (
+    BLOCK_NAMES,
+    BRIEF_IDS,
+    DEFAULT_LIMITS,
+    MEMORY_DEFAULTS,
+    OWNERS,
+    SOURCE_NAMES,
+    navigation_path,
+)
+
 
 def target(label, page, tab, **params):
     return {"label": label, "page": page, "tab": tab, "params": params}
@@ -21,7 +31,7 @@ SCHEDULE = target("日程与执行", "schedule", "timeline")
 LIFE_SETTINGS = target("生成与细化设置", "schedule", "settings")
 MEMORY = target("记忆与人物", "memory", "records")
 JOURNALS = target("日记与笔记", "memory", "journals")
-USAGE = target("上下文用量", "memory", "usage")
+USAGE = target("上下文用量", "context", "usage")
 TRIAL = target("本次试跑材料", "context", "trial", current_task="1")
 INDEX = {
     "anchor.system": entry(
@@ -44,7 +54,7 @@ INDEX = {
     ),
     "speaker": entry(
         "告诉角色本轮在和谁交谈。",
-        "当前 QQ 消息的发送者称呼；缺失时采用通用称呼。",
+        "普通聊天来自当前会话与发送者；主动聊天来自抽中的唯一白名单目标。群聊面向整个群，私聊面向指定 QQ 对象。可选称呼明确提供给 AI。",
         target("聊天白名单", "chat", "targets"),
     ),
     "time": entry(
@@ -171,7 +181,7 @@ INDEX = {
     "task.evidence": entry(
         "提供本次来源整理所必需的原始证据。",
         "本次实际获得的网页、搜索、视频、链接或日记关联材料；结构内部不拆散。",
-        target("见闻记录", "sources", "records"),
+        target("近期见闻", "sources", "records"),
         TRIAL,
     ),
     "task.events": entry(
@@ -190,7 +200,7 @@ INDEX = {
     "task.brief_limit": entry(
         "要求模型生成指定长度的上下文简报。",
         "上下文用量中的简报最长字符设置，或本次显式试跑输入。",
-        target("简报最长字符", "memory", "usage", field="memory.brief_max_chars"),
+        USAGE,
         templates=("journal.brief", "notes.brief"),
     ),
     "task.material": entry(
@@ -217,3 +227,69 @@ for source, name, template in (
         target(f"{name}记录", "sources", "records", source=source),
         templates=(template,) if template else (),
     )
+
+
+for identifier in MEMORY_DEFAULTS:
+    page, tab, detail = OWNERS[identifier]
+    kind = identifier.split(".", 1)[1]
+    INDEX[identifier] = entry(
+        f"提供当前任务可用的{detail}。",
+        "按结构化类型、场合、人物、日期与模块筛选的资料；独立限量，不占用其他类别额度。日记和笔记只取已生成的简报，不回退全文。",
+        target(
+            BLOCK_NAMES[identifier],
+            page,
+            tab,
+            **(
+                {"kind": "journal" if kind == "journal" else "notes"}
+                if identifier in BRIEF_IDS.values()
+                else {"category": identifier}
+            ),
+        ),
+        templates=(
+            ("journal.brief",)
+            if kind == "journal"
+            else ("notes.brief",)
+            if kind == "notes"
+            else ("memory.reflect",)
+        ),
+    )
+INDEX["observations"] = entry(
+    "提供新闻、搜索、B站和AI日报的近期来源记录。",
+    "四类已保存见闻按当前场合和模块过滤后合计取最新记录；天气独立处理。每次读取数量与上下文最多条数分别设置。",
+    target(BLOCK_NAMES["observations"], "sources", "records"),
+    *(
+        item
+        for source, name in SOURCE_NAMES.items()
+        for item in (
+            target(f"近期见闻：{name}", "sources", "records", source=source),
+            target(f"来源设置：{name}", "sources", "settings", source=source),
+        )
+    ),
+    templates=("news.reflect", "search.reflect", "bilibili.reflect", "daily_digest.reflect"),
+)
+INDEX = {identifier: INDEX[identifier] for identifier in BLOCK_NAMES}
+for identifier, metadata in INDEX.items():
+    if identifier in DEFAULT_LIMITS:
+        metadata["targets"].append(
+            target(
+                BLOCK_NAMES[identifier] + " · 最多条数",
+                "context",
+                "usage",
+                field="context_usage.limits." + identifier,
+            )
+        )
+    if identifier in BRIEF_IDS.values():
+        metadata["targets"].append(
+            target(
+                BLOCK_NAMES[identifier] + " · 最长字符",
+                "context",
+                "usage",
+                field="context_usage.brief_max_chars." + identifier,
+            )
+        )
+    for link in metadata["targets"]:
+        menu_path = navigation_path(link["page"], link["tab"])
+        detail = link["label"].removeprefix(menu_path.split(" → ")[-1] + "：")
+        link["path"] = (
+            menu_path if detail == menu_path.split(" → ")[-1] else menu_path + " → " + detail
+        )

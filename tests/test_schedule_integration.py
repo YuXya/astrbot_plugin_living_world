@@ -384,9 +384,7 @@ async def prepare_first_detail(runtime, host, clock, kinds):
 
 
 @pytest.mark.parametrize("fail_social", [False, True])
-async def test_one_chat_round_with_two_targets_consumes_one_attempt_even_on_failure(
-    tmp_path, fail_social
-):
+async def test_one_selected_target_consumes_one_attempt_even_on_failure(tmp_path, fail_social):
     host, clock = ActionHost(), [DAY.replace(hour=6)]
     host.fail_social = fail_social
     runtime = await configured_runtime(tmp_path / "world.sqlite", host, clock)
@@ -403,15 +401,15 @@ async def test_one_chat_round_with_two_targets_consumes_one_attempt_even_on_fail
         await prepare_first_detail(runtime, host, clock, ("social",))
         await runtime.life.tick()
         await drain(runtime)
-        assert len([r for r in host.requests if r["task"] == "social.message"]) == 2
-        assert len(host.sent) == (0 if fail_social else 2)
+        assert len([r for r in host.requests if r["task"] == "social.message"]) == 1
+        assert len(host.sent) == (0 if fail_social else 1)
         assert action_counts(runtime.life)["social"]["started"] == 1
         assert action_counts(runtime.life)["social"]["pending"] == 0
         assert len(runtime.store.list("life_action_usage")) == 1
         assert runtime.drives.snapshot()["meters"]["loneliness"]["value"] == 40
         assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 70
         await runtime.life.tick()
-        assert len([r for r in host.requests if r["task"] == "social.message"]) == 2
+        assert len([r for r in host.requests if r["task"] == "social.message"]) == 1
     finally:
         await runtime.stop()
 

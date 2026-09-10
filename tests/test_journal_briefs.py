@@ -97,7 +97,9 @@ async def test_legacy_full_memories_excluded_before_limit_without_mutation(world
 
 
 async def test_total_and_journal_limits_apply_before_reinforcing_and_after_restart(world, tmp_path):
-    await world.update_settings({"memory": {"context_limit": 3, "journal_limit": 1}})
+    await world.update_settings(
+        {"context_usage": {"limits": {"memory.knowledge": 2, "memory.journal": 1}}}
+    )
     for i in range(4):
         world.memory.remember(f"普通知识{i}", kind="knowledge")
         brief(world, str(i), f"日记概要{i}")
@@ -107,11 +109,11 @@ async def test_total_and_journal_limits_apply_before_reinforcing_and_after_resta
     assert len(world.life._memories("global")) == 3
     other = Runtime(tmp_path / "brief.sqlite", FakeHost())
     try:
-        assert other.settings["memory"]["context_limit"] == 3
+        assert other.settings["context_usage"]["limits"]["memory.knowledge"] == 2
         assert len(other.memory.recall()) == 3
-        await other.update_settings({"memory": {"journal_limit": 0}})
+        await other.update_settings({"context_usage": {"limits": {"memory.journal": 0}}})
         assert not any(is_journal_memory(r) for r in other.memory.recall())
-        await other.update_settings({"memory": {"context_limit": 0}})
+        await other.update_settings({"context_usage": {"limits": {"memory.knowledge": 0}}})
         assert other.memory.recall() == other.life._memories("global") == []
     finally:
         await other.stop()
@@ -119,7 +121,7 @@ async def test_total_and_journal_limits_apply_before_reinforcing_and_after_resta
 
 async def test_brief_length_changes_existing_projection_but_not_archive(world):
     row = brief(world, "long", "精炼事实。" * 100)
-    await world.update_settings({"memory": {"brief_max_chars": 50}})
+    await world.update_settings({"context_usage": {"brief_max_chars": {"memory.journal": 50}}})
     projected = world.memory.recall(reinforce=False)[0]
     assert len(projected["text"]) <= 50 and projected["text"].endswith("…")
     assert world.store.get("memories", row["id"])["text"] == row["text"]
@@ -130,6 +132,7 @@ async def test_brief_length_changes_existing_projection_but_not_archive(world):
 
 @pytest.mark.parametrize("scope", ["global", GROUP, PRIVATE])
 async def test_private_briefs_and_raw_tasks_stay_in_scope(world, scope):
+    await world.update_settings({"context_usage": {"limits": {"memory.journal": 2}}})
     public = archive(world, "public", text="公开日记")
     private = archive(world, "private", PRIVATE, text="私人秘密正文")
     world.host.answers = ["私人秘密简报"]

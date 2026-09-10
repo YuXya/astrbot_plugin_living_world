@@ -137,8 +137,8 @@ class SocialTests(unittest.IsolatedAsyncioTestCase):
         result = await self.social.send("数学课无聊，找群聊天", action_id="class")
         targets = [destination(scope) for scope, _ in self.runtime.host.sent]
         self.assertEqual(result["status"], "success")
-        self.assertEqual(set(targets), {GROUP, FRIEND})
-        self.assertEqual(len(targets), 2)
+        self.assertTrue(set(targets) <= {GROUP, FRIEND})
+        self.assertEqual(len(targets), 1)
         self.assertTrue(
             all(
                 scope in {row["umo"] for row in self.runtime.settings["sessions"]}
@@ -177,7 +177,7 @@ class SocialTests(unittest.IsolatedAsyncioTestCase):
     async def test_each_target_gets_its_own_context_and_global_result_omits_messages(self):
         self.runtime.settings["social"]["target_count"] = 2
         result = await self.social.send("share today's class", action_id="share")
-        self.assertEqual(len(self.runtime.model_calls), 2)
+        self.assertEqual(len(self.runtime.model_calls), 1)
         for _, prompt, scope in self.runtime.model_calls:
             self.assertIn(f"只属于 {scope}", prompt)
             other = GROUP if scope == FRIEND else FRIEND
@@ -304,6 +304,19 @@ class SocialTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.host.sent, [])
         await self.service().send(target_scope=GROUP, action_id="model-error")
         self.assertEqual(len(self.runtime.model_calls), 1)
+
+    async def test_selected_failure_never_redraws_another_eligible_target(self):
+        self.runtime.settings["social"]["target_count"] = 20
+        self.runtime.generate_error = RuntimeError("model down")
+        result = await self.social.send(action_id="single-target-failure")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(len(self.runtime.settings["sessions"]), 2)
+        self.assertEqual(len(self.runtime.model_calls), 1)
+        self.assertEqual(len(self.runtime.store.list("deliveries")), 1)
+        self.assertEqual(len(self.runtime.store.list("social_actions")[0]["targets"]), 1)
+        await self.service().send(action_id="single-target-failure")
+        self.assertEqual(len(self.runtime.model_calls), 1)
+        self.assertEqual(self.runtime.host.sent, [])
 
     async def test_concurrent_contacts_share_one_budget(self):
         self.runtime.settings["social"]["daily_limit"] = 1

@@ -75,8 +75,7 @@ async def test_old_observations_removed_before_retention_and_after_restore(runti
             "version": 1,
             "settings": runtime.settings,
             "records": [
-                {"namespace": "debug_records", "key": row["id"], "value": row}
-                for row in old_rows
+                {"namespace": "debug_records", "key": row["id"], "value": row} for row in old_rows
             ],
         }
     )
@@ -191,10 +190,10 @@ async def test_background_state_is_dynamic_and_life_snapshot_has_readable_source
     request = await runtime.prepare_request(
         "search.topic", "search", "选择选题", {"available_context": context}
     )
-    assert "【今日日程】" in request["prompt"]
+    assert "【日程与执行：今日日程】" in request["prompt"]
     assert "history_count" not in request["prompt"]
     assert "轻量状态" not in request["system_prompt"]
-    assert any(row["title"] == "今日日程" for row in request["sources"])
+    assert any(row.get("block_id") == "schedule" for row in request["sources"])
     assert request["prompt"].startswith(request["template"] + "\n\n<living_world_context>")
     assert request["base_system_prompt"] in request["system_prompt"]
     assert "【角色补充资料】" not in request["prompt"]

@@ -53,7 +53,7 @@ async def test_group_prompt_is_last_after_late_parts_and_media_without_history_w
     assert event.message_str in saved and late.text in saved and "reference.png" in saved
     if debug:
         view = runtime.debug.views()[0]
-        source = next(row for row in view["sources"] if row["title"] == "本轮群聊回复要求")
+        source = next(row for row in view["sources"] if row.get("block_id") == "group_reply")
         assert source["content"] == GROUP_REPLY_HEADING + "\n" + DEFAULT_GROUP_REPLY_PROMPT
         assert "user 消息最后" in source["placement"]
         assert view["injected_text"].endswith(final)

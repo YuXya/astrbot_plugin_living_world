@@ -11,6 +11,7 @@ const path = require("node:path");
   }
   assert.equal(resolveRoute("#context", { context: "templates" }).tab, "templates");
   assert.deepEqual(resolveRoute("#debug?turn=legacy"), { page: "context", tab: "calls", params: { turn: "legacy" } });
+  assert.deepEqual(resolveRoute("#memory?tab=usage&field=context_usage.limits.memory.knowledge"), { page: "context", tab: "usage", params: { field: "context_usage.limits.memory.knowledge" } });
   for (const hash of ["#constructor", "#toString", "#__proto__", "#missing"]) assert.equal(resolveRoute(hash).page, "overview");
   const layout = { system: ["anchor.system", "profile"], user: ["anchor.user", "time", "news", "memories"] };
   for (const args of [["time", "user", "time"], ["time", "user", "news"], ["memories", "user"], ["news", "assistant"], ["missing", "user"], ["anchor.user", "system"], ["news", "system", "invalid"]]) assert.equal(reorderedLayout(layout, ...args), layout, "No-op returns the original object, without marking a draft");

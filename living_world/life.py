@@ -14,6 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .prompts import PROMPTS
+from .context_usage import usage_for
 from .life_actions import ActionLedger
 from .context import (
     FICTION_NOTICE,
@@ -282,14 +283,12 @@ class LifeService(ActionLedger):
         if not self.runtime.enabled("memory"):
             return []
         now = self._now(now)
-        limit = int(self.runtime.settings.get("memory", {}).get("context_limit", 10))
         records = prepare_life_records(
             [
                 e
                 for e in self.runtime.memory.recall(
                     query="",
                     scope=scope,
-                    limit=limit,
                     reinforce=reinforce,
                     context_now=now,
                 )
@@ -303,7 +302,7 @@ class LifeService(ActionLedger):
             records = [e for e in records if e.get("scope") == scope] + [
                 e for e in records if e.get("scope", "global") == "global"
             ]
-        return records[:limit]
+        return records
 
     def _day_activities(self, day: date) -> list[dict]:
         return [
@@ -341,12 +340,10 @@ class LifeService(ActionLedger):
         marker = self.runtime.store.get("life_days", f"{now.date()}:global", {}) or {}
         context = {
             "date": str(now.date()),
+            "context_usage": usage_for(self.runtime.settings),
             "now": now.isoformat(),
             "parameters": (marker.get("parameters") if formal else None) or self.parameters(),
-            "memories": [
-                record_text(row, now, memory=True)
-                for row in self._memories("global", reinforce=False, now=now)
-            ],
+            "memories": self._memories("global", reinforce=False, now=now),
             "经历说明": FICTION_NOTICE,
         }
         if self.runtime.enabled("state"):
@@ -687,11 +684,10 @@ class LifeService(ActionLedger):
                 return result
             context = {
                 "reason": reason,
+                "context_usage": usage_for(self.runtime.settings),
                 "now": now.isoformat(),
                 "scope": scope,
-                "memories": [
-                    record_text(row, now, memory=True) for row in self._memories(scope, now=now)
-                ],
+                "memories": self._memories(scope, now=now),
                 "经历说明": FICTION_NOTICE,
                 "editable": [activity_material(self._view(a, scope)) for a in editable.values()],
                 "parameters": (
@@ -778,7 +774,6 @@ class LifeService(ActionLedger):
         memory_rows = prepare_life_records(
             self._memories(scope, now=now), now, memory=True, seen=seen
         )
-        memories = [record_text(row, now, memory=True) for row in memory_rows]
         events = [record_text(row, now) for row in event_rows]
         outcome_names = {"news": "新闻", "search": "搜索", "social": "主动聊天"}
         for result in self.runtime.store.list("actions"):
@@ -794,10 +789,11 @@ class LifeService(ActionLedger):
         social = self.runtime.settings.get("social", {})
         context = {
             "当前时间": now.isoformat(),
+            "context_usage": usage_for(self.runtime.settings),
             "待细化活动": activity_text(self._view(activity, scope)),
             "活动时间范围": f"{activity['start']} 至 {activity['end']}，结束时间不包含在执行范围内。",
             "当天其他安排": "\n".join(schedule) or "没有其他安排。",
-            "相关记忆": "\n".join(memories) or "没有相关记忆。",
+            "相关记忆": memory_rows,
             "近期实际行动": "\n".join(events) or "没有可见的实际行动结果，不代表已执行计划。",
             "能力与限制": "；".join(
                 f"{names[k]}{'已启用' if self.runtime.enabled('proactive' if k == 'social' else k) else '已关闭，不得安排'}"

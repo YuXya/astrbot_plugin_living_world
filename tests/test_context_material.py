@@ -98,9 +98,15 @@ def test_legacy_exact_copy_and_distinct_occurrences():
     distinct = event("life:second", at=NOW.replace(hour=17))
     simultaneous = event("life:third")
     unlinked = {**first, "id": "old-memory", "source_event_id": ""}
-    bundle = context_from_data(material([first, distinct, simultaneous], [unlinked]))
+    bundle = context_from_data(material([first, distinct, simultaneous], [unlinked]), legacy=True)
     assert bundle["text"].count("自由活动与准备休息。") == 3
     assert bundle["text"].index("18：00") < bundle["text"].index("17：00")
+    assert (
+        context_from_data(material([first, distinct, simultaneous], [unlinked]))["text"].count(
+            "自由活动与准备休息。"
+        )
+        == 4
+    )
     private_copy = {**unlinked, "scope": PRIVATE}
     assert (
         context_from_data(material([first], [private_copy]))["text"].count("自由活动与准备休息。")
@@ -275,7 +281,9 @@ async def test_detail_plan_preview_and_source_evidence_use_correct_material(worl
     }
     world.store.put("activities", activity["id"], activity)
     detail = world.life.detail_request(activity)
-    payload = json.dumps(detail["context"], ensure_ascii=False)
+    payload = (
+        await world.prepare_request("life.detail", "life", detail["template"], detail["context"])
+    )["prompt"]
     assert payload.count("中文摘要") == 1
     assert "今天散步" in payload and "角色经历（19：00）" in payload
     assert "昨天散步" not in payload and URL not in payload and "search_results" not in payload

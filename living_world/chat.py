@@ -12,11 +12,13 @@ from .context import group_messages_text, source_item
 from .debug import diagnostic_write, json_value, response_value
 from .instrumentation import ProviderAudit, pause_tools, resume_tools
 from .layout import assemble, block, resolve_layout
+from .context_catalog import BLOCK_NAMES
+from .context_usage import usage_for
 from .social import destination
 
 logger = logging.getLogger(__name__)
 DYNAMIC_MARKER = "<living_world_context>"
-GROUP_REPLY_HEADING = "【本轮群聊回复要求】"
+GROUP_REPLY_HEADING = f"【{BLOCK_NAMES['group_reply']}】"
 
 
 def _text(parts):
@@ -430,6 +432,8 @@ class ChatService:
             self.runtime.settings, "chat.group" if event.get_group_id() else "chat.private"
         )
         character = copy.deepcopy(self.runtime.settings["character"])
+        usage = usage_for(self.runtime.settings)
+        recipient = self.runtime.social.recipient_context(event.unified_msg_origin)
         group_prompt = self.runtime.settings["reply"]["group_prompt"].strip()
         original = {
             key: copy.deepcopy(getattr(req, key, None))
@@ -438,13 +442,21 @@ class ChatService:
         try:
             history = await self.history(event.unified_msg_origin, initialize=True)
             context = await self.runtime.context_bundle(
-                event.unified_msg_origin, "qq:" + event.get_sender_id(), event.message_str
+                event.unified_msg_origin,
+                "qq:" + event.get_sender_id(),
+                event.message_str,
+                usage=usage,
             )
             speaker = event.get_sender_name() or "当前聊天对象"
             blocks = [
                 block("profile", "角色补充资料", character["profile"], "Living World 角色设置"),
                 block("world", "世界设定", character["world"], "Living World 世界设置"),
-                block("speaker", "当前交谈对象", speaker, "本轮 QQ 消息的发送者称呼"),
+                block(
+                    "speaker",
+                    "当前交谈对象",
+                    recipient + "\n本轮消息发送者：" + speaker,
+                    "本轮 QQ 会话与发送者称呼",
+                ),
                 *context["sources"],
             ]
             if event.get_group_id():
@@ -471,7 +483,7 @@ class ChatService:
                             "group_reply",
                             "本轮群聊回复要求",
                             GROUP_REPLY_HEADING + "\n" + group_prompt,
-                            "02 角色、模型与模块 → 群聊回复（本轮开始时的已保存文案）",
+                            "05 聊天与对象 → 回复与插话（本轮开始时的已保存文案）",
                             instruction=True,
                         )
                     )
@@ -520,6 +532,8 @@ class ChatService:
                     "sources": sources,
                     "injected_text": assembled["injected_text"],
                     "context_layout": layout,
+                    "context_layout_version": 2,
+                    "context_usage": usage,
                     "injection_segments": assembled["segments"],
                     "group_history_replaced": bool(event.get_group_id()),
                     "placement": "按本轮布局快照注入 system／user（不写入聊天历史）",

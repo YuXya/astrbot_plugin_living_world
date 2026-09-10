@@ -6,6 +6,7 @@ import re
 from zoneinfo import ZoneInfo
 
 from .drives import DRIVE_DEFAULTS, validate_drive
+from .context_usage import DEFAULT_USAGE, integer, legacy_usage, validate_usage
 from .layout import (
     DEFAULT_SETTINGS as LAYOUT_DEFAULTS,
     validate_settings as validate_layout_settings,
@@ -84,6 +85,7 @@ DEFAULTS = {
     },
     "reply": {"group_prompt": DEFAULT_GROUP_REPLY_PROMPT},
     "context_layout": copy.deepcopy(LAYOUT_DEFAULTS),
+    "context_usage": copy.deepcopy(DEFAULT_USAGE),
     "life": {
         "tick_seconds": 60,
         "detail_minutes": 10,
@@ -136,7 +138,6 @@ def settings_from(patch=None):
     if patch is not None and not isinstance(patch, dict):
         raise ValueError("配置必须是对象")
     result = merge(DEFAULTS, patch or {})
-    result["context_layout"] = validate_layout_settings(result["context_layout"])
     for section in (
         "modules",
         "drives",
@@ -156,6 +157,14 @@ def settings_from(patch=None):
     ):
         if not isinstance(result[section], dict):
             raise TypeError(f"{section} 必须是对象")
+    if "context_usage" not in (patch or {}):
+        result["context_usage"] = legacy_usage(patch or {})
+    result["context_usage"] = validate_usage(result["context_usage"])
+    result["context_layout"] = validate_layout_settings(result["context_layout"])
+    integer(result["social"]["target_count"], 1, 20, "每轮抽选目标数")
+    result["social"]["target_count"] = 1
+    for key in ("context_limit", "journal_limit", "brief_max_chars"):
+        result["memory"].pop(key, None)
     # Old backup keys remain readable for migration, but never become live controls.
     result["character"].pop("energy", None)
     for key in ("news_count", "search_count", "social_count"):
@@ -191,6 +200,10 @@ def settings_from(patch=None):
             raise ValueError("会话白名单不能重复")
         seen.add(umo)
         session["enabled"] = bool(session.get("enabled", True))
+        name = session.get("display_name", "")
+        if not isinstance(name, str) or len(name) > 120 or "\n" in name or "\r" in name:
+            raise ValueError("对话称呼必须是最多 120 字符的单行文本")
+        session["display_name"] = name.strip()
         weight = float(session.get("weight", 1))
         if not math.isfinite(weight) or weight < 0:
             raise ValueError("白名单权重必须为有限非负数")
@@ -222,9 +235,6 @@ def settings_from(patch=None):
         ("journal", "hour"): (0, 23),
         ("debug", "retain_per_category"): (1, 1000),
         ("bilibili", "recent_limit"): (1, 50),
-        ("memory", "context_limit"): (0, 50),
-        ("memory", "journal_limit"): (0, 50),
-        ("memory", "brief_max_chars"): (50, 1000),
     }
     for (section, key), (low, high) in bounds.items():
         if section == "memory" and isinstance(result[section][key], bool):

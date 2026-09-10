@@ -79,8 +79,38 @@ class SocialService:
             except (KeyError, TypeError, ValueError, AttributeError):
                 continue
             if weight > 0 and math.isfinite(weight):
-                result.append({"scope": scope, "destination": target, "weight": weight})
+                result.append(
+                    {
+                        "scope": scope,
+                        "destination": target,
+                        "weight": weight,
+                        "display_name": item.get("display_name", ""),
+                    }
+                )
         return result
+
+    def recipient_context(self, scope, display_name=None):
+        """Describe the actual destination without exposing transport identifiers."""
+        if scope == "global":
+            return "尚未选择聊天对象。请在模型试跑中选择具体群聊或私聊场合。"
+        target = destination(scope)
+        if display_name is None:
+            display_name = next(
+                (
+                    item.get("display_name", "")
+                    for item in self.runtime.settings.get("sessions", [])
+                    if destination(item.get("umo", "")) == target
+                ),
+                "",
+            )
+        number = target.split(":", 2)[2]
+        if ":GroupMessage:" in target:
+            text = f"会话类型：QQ群聊\n目标群号：{number}\n接收范围：整个群。这条消息发到群里，不是发给最近发言成员的私聊。"
+        else:
+            text = f"会话类型：一对一私聊\n目标QQ号：{number}\n接收范围：这位私聊对象。"
+        if display_name:
+            text += "\n对话称呼：" + str(display_name)
+        return text
 
     def _quiet(self, now: datetime) -> bool:
         config = self.runtime.settings.get("social", {})
@@ -203,6 +233,7 @@ class SocialService:
         before_start=None,
     ) -> dict:
         scope = target["scope"]
+        recipient = self.recipient_context(scope, target.get("display_name", ""))
         key = _digest(f"{action_id}\0{target['destination']}")
         previous = self.runtime.store.get("deliveries", key)
         if previous:
@@ -244,6 +275,7 @@ class SocialService:
                 return record
             template = PROMPTS["social.message"]
             data = {
+                "recipient": recipient,
                 "reason": reason[:4000],
                 "recent_messages": str(history)[-12000:],
                 "context": context,
@@ -352,9 +384,7 @@ class SocialService:
             return self._result(
                 reason=blocked_reasons[0] if blocked_reasons else "no_eligible_targets"
             )
-        selected = self._draw(
-            candidates, 1 if target_scope else min(20, int(self._number("target_count", 1, 1)))
-        )
+        selected = self._draw(candidates, 1)
         started = False
 
         def start_once():
@@ -460,6 +490,7 @@ class SocialService:
                     return self._result(reason=blocked)
                 template = PROMPTS["social.interject"]
                 data = {
+                    "recipient": self.recipient_context(scope),
                     "message": str(message)[-4000:],
                     "recent_messages": str(history)[-12000:],
                     "context": context,

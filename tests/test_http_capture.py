@@ -22,6 +22,7 @@ from test_layout import content_text, moved
 
 from living_world.chat import GROUP_REPLY_HEADING
 from living_world.config import DEFAULT_GROUP_REPLY_PROMPT
+from living_world.context_catalog import BLOCK_NAMES
 from living_world.layout import DEFAULT_LAYOUT
 
 pytest_plugins = ("test_chat",)
@@ -439,11 +440,17 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
         await runtime.update_settings(
             {"context_layout": {"default": layout}, "character": {"profile": "FROZEN_PROFILE"}}
         )
+        runtime.memory.remember("数学 FROZEN_MEMORY", scope=scope)
 
     class Executor:
         async def execute(self, **kwargs):
             if custom_layout:
-                await runtime.update_settings({"context_layout": {"default": DEFAULT_LAYOUT}})
+                await runtime.update_settings(
+                    {
+                        "context_layout": {"default": DEFAULT_LAYOUT},
+                        "context_usage": {"limits": {"memory.event": 0}},
+                    }
+                )
             await provider.text_chat(prompt="第三方工具内部秘密", request_max_retries=1)
             yield CallToolResult(content=[TextContent(type="text", text="数学工具的真实结果")])
 
@@ -454,7 +461,7 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
     )
     runner = await runner_for(
         real_world,
-        Event(scope),
+        Event(scope, "查数学"),
         ProviderRequest(prompt="查数学", system_prompt="Student", func_tool=ToolSet([tool])),
         Executor(),
     )
@@ -479,6 +486,8 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
                 next(message["content"] for message in messages if message["role"] == "system")
             )
             assert user.index("FROZEN_PROFILE") < user.index("查数学")
+            assert call["request_body"].count("FROZEN_MEMORY") == 1
+            assert user.count("【" + BLOCK_NAMES["memory.event"] + "】") == 1
             assert "FROZEN_PROFILE" not in system
             assert GROUP_REPLY_HEADING not in user
             assert (GROUP_REPLY_HEADING in system) == (scope == GROUP)
@@ -501,8 +510,8 @@ async def test_ordered_layout_matches_actual_http_and_excludes_saved_history(
 ):
     real_world = real_providers(responses=responses)
     runtime, _, _ = real_world
-    layout = moved(DEFAULT_LAYOUT, "experiences", "user", "memories")
-    layout = moved(layout, "news", "system", "anchor.system")
+    layout = moved(DEFAULT_LAYOUT, "experiences", "user", "memory.event")
+    layout = moved(layout, "observations", "system", "anchor.system")
     layout = moved(layout, "group_reply", "system")
     await runtime.update_settings(
         {"context_layout": {"default": layout}, "modules": {"news": True}}
@@ -563,6 +572,67 @@ async def test_ordered_layout_matches_actual_http_and_excludes_saved_history(
         for text in ("NEWS_SENTINEL", "MEMORY_SENTINEL", "EXPERIENCE_SENTINEL", GROUP_REPLY_HEADING)
     )
     assert req.system_prompt == "SYSTEM_ANCHOR"
+
+
+@pytest.mark.parametrize("responses", [False, True])
+@pytest.mark.parametrize("scope", [PRIVATE, GROUP])
+async def test_independent_usage_and_selected_target_match_actual_http(
+    real_providers, wire_server, responses, scope
+):
+    real_world = real_providers(responses=responses)
+    runtime, _, _ = real_world
+    layout = moved(DEFAULT_LAYOUT, "speaker", "system", "anchor.system")
+    await runtime.update_settings(
+        {
+            "sessions": [{"umo": scope, "display_name": "本次目标称呼"}],
+            "modules": {"news": True, "search": True, "bilibili": True, "daily_digest": True},
+            "context_layout": {"default": layout},
+            "context_usage": {"limits": {"memory.knowledge": 2, "observations": 3}},
+        }
+    )
+    for i in range(4):
+        runtime.memory.remember(f"INDEPENDENT_KNOWLEDGE_{i}", kind="knowledge", scope=scope)
+    for i, module in enumerate(("news", "search", "bilibili", "daily_digest")):
+        runtime.store.put(
+            "observations",
+            str(i),
+            {
+                "id": str(i),
+                "module": module,
+                "scope": scope,
+                "created_at": 1800000000 + i,
+                "text": f"LATEST_SOURCE_{i}",
+            },
+        )
+    before = runtime.store.export()
+    request = await runtime.build_test_request("social.message", scope)
+    assert runtime.store.export() == before
+    assert runtime.host.context.send_message.await_count == 0
+    sources = {row["block_id"]: row for row in request["sources"]}
+    for identifier, count in (("memory.knowledge", 2), ("observations", 3)):
+        assert sources[identifier]["count"] == sources[identifier]["limit"] == count
+    await runtime.update_settings(
+        {"context_usage": {"limits": {"memory.knowledge": 0, "observations": 0}}}
+    )
+    trial = await runtime.prepare_trial_request(request)
+    await call_background(real_world, prompt=trial["prompt"], system_prompt=trial["system_prompt"])
+    raw = wire_server.records[0]["request_body"]
+    assert raw.count("INDEPENDENT_KNOWLEDGE_") == 2
+    assert raw.count("LATEST_SOURCE_") == 3
+    assert "LATEST_SOURCE_0" not in raw
+    assert (
+        raw.index("LATEST_SOURCE_3") < raw.index("LATEST_SOURCE_2") < raw.index("LATEST_SOURCE_1")
+    )
+    assert "本次目标称呼" in raw
+    assert ("目标群号：" if scope == GROUP else "目标QQ号：") in raw
+    assert ("整个群" if scope == GROUP else "一对一私聊") in raw
+    assert scope not in raw
+    for identifier in ("speaker", "memory.knowledge", "observations"):
+        assert raw.count("【" + BLOCK_NAMES[identifier] + "】") == 1
+    assert BLOCK_NAMES["speaker"] in trial["system_prompt"]
+    assert BLOCK_NAMES["speaker"] not in trial["prompt"]
+    assert "→" not in raw
+    assert runtime.host.context.send_message.await_count == 0
 
 
 @pytest.mark.parametrize("responses", [False, True])

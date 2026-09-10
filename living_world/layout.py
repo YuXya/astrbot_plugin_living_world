@@ -2,8 +2,11 @@
 
 import copy
 import json
+from datetime import datetime
 
 from .context_index import INDEX
+from .context_catalog import BLOCK_NAMES, DEFAULT_LIMITS, MEMORY_DEFAULTS, OWNERS, menu_catalog
+from .context_usage import DEFAULT_USAGE
 
 TASK_NAMES = {
     "chat.group": "普通群聊回复",
@@ -25,7 +28,7 @@ TASK_NAMES = {
     "social.interject": "群聊插话判断",
     "social.message": "生成主动聊天消息",
 }
-BLOCK_NAMES = {
+LEGACY_BLOCK_NAMES = {
     "anchor.system": "原有系统提示词／人格",
     "profile": "角色补充资料",
     "world": "世界设定",
@@ -63,11 +66,26 @@ BLOCK_NAMES = {
     "task.other": "其他任务资料",
     "group_reply": "本轮群聊回复要求",
 }
-DEFAULT_LAYOUT = {
+LEGACY_LAYOUT = {
     "system": ["anchor.system", "profile", "world"],
-    "user": [key for key in BLOCK_NAMES if key not in {"anchor.system", "profile", "world"}],
+    "user": [key for key in LEGACY_BLOCK_NAMES if key not in {"anchor.system", "profile", "world"}],
 }
-DEFAULT_SETTINGS = {"version": 1, "default": DEFAULT_LAYOUT, "tasks": {}}
+
+
+def expanded(rows):
+    result = []
+    for key in rows:
+        if key == "memories":
+            result.extend(MEMORY_DEFAULTS)
+        elif key == "news":
+            result.append("observations")
+        elif key not in {"search", "bilibili", "daily_digest"}:
+            result.append(key)
+    return result
+
+
+DEFAULT_LAYOUT = {role: expanded(rows) for role, rows in LEGACY_LAYOUT.items()}
+DEFAULT_SETTINGS = {"version": 2, "default": DEFAULT_LAYOUT, "tasks": {}}
 COMMON = {"profile", "world", "anchor.system", "anchor.user", "time", "state"}
 LIFE_BLOCKS = {
     "activity",
@@ -119,8 +137,12 @@ TASK_BLOCKS = {
 }
 for _task in ("news.reflect", "search.reflect", "bilibili.reflect", "daily_digest.reflect"):
     TASK_BLOCKS[_task] = LIFE_BLOCKS | {"task.evidence", "task.reason"}
+TASK_BLOCKS = {task: set(expanded(rows)) for task, rows in TASK_BLOCKS.items()}
+for _task in ("social.message", "social.interject"):
+    TASK_BLOCKS[_task].add("speaker")
 
 FIELD_BLOCKS = {
+    "recipient": "speaker",
     "current_time": "time",
     "now": "time",
     "当前时间": "time",
@@ -166,7 +188,8 @@ def task_label(task):
     return f"{task}（{TASK_NAMES[task]}）" if task in TASK_NAMES else task
 
 
-def validate_layout(value):
+def validate_layout(value, *, legacy=False):
+    names = LEGACY_BLOCK_NAMES if legacy else BLOCK_NAMES
     if not isinstance(value, dict) or set(value) != {"system", "user"}:
         raise ValueError("上下文列表只允许 system 和 user 两组")
     seen = set()
@@ -174,14 +197,14 @@ def validate_layout(value):
         if not isinstance(rows, list):
             raise ValueError("上下文顺序必须是资料块列表")
         for identifier in rows:
-            if not isinstance(identifier, str) or identifier not in BLOCK_NAMES:
+            if not isinstance(identifier, str) or identifier not in names:
                 raise ValueError("上下文列表包含未知资料块")
             if identifier in seen:
                 raise ValueError("每个上下文资料块只能出现一次")
             if identifier.startswith("anchor.") and identifier != "anchor." + role:
                 raise ValueError("原始消息定位行不能更换角色")
             seen.add(identifier)
-    if seen != set(BLOCK_NAMES):
+    if seen != set(names):
         raise ValueError("上下文列表缺少资料块；启停请使用各模块设置")
     return copy.deepcopy(value)
 
@@ -190,16 +213,26 @@ def validate_settings(value):
     if (
         not isinstance(value, dict)
         or set(value) != {"version", "default", "tasks"}
-        or value["version"] != 1
+        or type(value["version"]) is not int
+        or value["version"] not in {1, 2}
         or not isinstance(value["tasks"], dict)
     ):
         raise ValueError("上下文布局配置格式无效")
+
+    def convert(layout):
+        checked = validate_layout(layout, legacy=value["version"] == 1)
+        return (
+            {role: expanded(rows) for role, rows in checked.items()}
+            if value["version"] == 1
+            else checked
+        )
+
     tasks = {}
     for task, layout in value["tasks"].items():
         if task not in TASK_NAMES:
             raise ValueError("上下文布局包含未知任务")
-        tasks[task] = None if layout is None else validate_layout(layout)
-    return {"version": 1, "default": validate_layout(value["default"]), "tasks": tasks}
+        tasks[task] = None if layout is None else convert(layout)
+    return {"version": 2, "default": convert(value["default"]), "tasks": tasks}
 
 
 def resolve_layout(settings, task):
@@ -209,12 +242,28 @@ def resolve_layout(settings, task):
 
 def catalog():
     return {
+        "version": 2,
+        "menus": menu_catalog(),
         "default": copy.deepcopy(DEFAULT_LAYOUT),
         "blocks": [
             {
                 "id": key,
                 "label": label,
                 "anchor": key.startswith("anchor."),
+                "owner": list(OWNERS[key]) if key in OWNERS else None,
+                "usage": {
+                    "default": DEFAULT_LIMITS[key],
+                    "max": 1 if key == "weather" else 50,
+                    "brief": {
+                        "default": DEFAULT_USAGE["brief_max_chars"][key],
+                        "min": 50,
+                        "max": 1000,
+                    }
+                    if key in DEFAULT_USAGE["brief_max_chars"]
+                    else None,
+                }
+                if key in DEFAULT_LIMITS
+                else None,
                 **copy.deepcopy(INDEX[key]),
             }
             for key, label in BLOCK_NAMES.items()
@@ -246,9 +295,9 @@ def text_value(value):
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
 
 
-def collect_task_blocks(context):
+def collect_task_blocks(context, *, legacy=False):
     """Extract structured life snapshots without parsing rendered prompt headings."""
-    from .context import context_from_data, is_life_snapshot
+    from .context import context_from_data, is_life_snapshot, memory_blocks
 
     blocks = []
 
@@ -260,16 +309,36 @@ def collect_task_blocks(context):
             except ValueError:
                 pass
         if key in {"context", "available_context"} and is_life_snapshot(candidate):
-            blocks.extend(context_from_data(candidate)["sources"])
+            blocks.extend(context_from_data(candidate, legacy=legacy)["sources"])
         elif key in {"context", "available_context"} and isinstance(value, dict):
             for name, item in value.items():
                 visit(item, name)
         elif value is not None:
             identifier = FIELD_BLOCKS.get(key, "task.other")
-            if key == "经历说明":
+            if key in {"经历说明", "context_usage"}:
                 # Attach the provenance explanation to every relevant material block below.
                 return
-            blocks.append(block(identifier, key, text_value(value)))
+            if identifier == "memories" and not legacy:
+                if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
+                    raise ValueError("记忆资料必须保留结构化类别；不能用正文猜测记忆类型")
+                moment = (
+                    context.get("current_time") or context.get("当前时间") or context.get("now")
+                )
+                try:
+                    moment = datetime.fromisoformat(moment)
+                except (TypeError, ValueError):
+                    moment = None
+                blocks.extend(
+                    memory_blocks(
+                        value,
+                        now=moment,
+                        usage=context.get("context_usage"),
+                        include_identifiers=key == "known",
+                    )
+                )
+                return
+            content = {key: value} if not legacy and identifier.startswith("task.") else value
+            blocks.append(block(identifier, key, text_value(content)))
 
     if isinstance(context, dict):
         for key, value in context.items():
@@ -277,26 +346,45 @@ def collect_task_blocks(context):
         notice = context.get("经历说明")
         if notice:
             for item in blocks:
-                if item["block_id"] in {"memories", "task.events", "task.activity"}:
+                if item["block_id"] in {
+                    "memories",
+                    "task.events",
+                    "task.activity",
+                    *MEMORY_DEFAULTS,
+                }:
                     item["notice"] = notice
     elif context is not None:
         visit(context)
     return blocks
 
 
-def assemble(layout, blocks, system="", user=""):
+def assemble(layout, blocks, system="", user="", *, legacy=False):
     """Return ordered sources and four insertion segments around untouched anchors."""
-    layout = validate_layout(layout)
+    layout = validate_layout(layout, legacy=legacy)
+    names = LEGACY_BLOCK_NAMES if legacy else BLOCK_NAMES
     grouped = {}
     for item in blocks:
         identifier = item.get("block_id", "task.other")
-        if identifier not in BLOCK_NAMES or identifier.startswith("anchor."):
+        if identifier not in names or identifier.startswith("anchor."):
             raise ValueError("请求包含无效上下文资料块")
         if item.get("content") is None or (
             isinstance(item["content"], str) and not item["content"].strip()
         ):
             continue
         grouped.setdefault(identifier, []).append(copy.deepcopy(item))
+    if not legacy:
+        for identifier, items in grouped.items():
+            merged = {**items[0], "title": names[identifier]}
+            if len(items) > 1:
+                merged["content"] = "\n\n".join(text_value(item["content"]) for item in items)
+                merged["count"] = sum(item.get("count", 0) for item in items)
+                merged["source"] = "；".join(
+                    dict.fromkeys(item.get("source", "") for item in items)
+                )
+                merged["notice"] = "\n".join(
+                    dict.fromkeys(item["notice"] for item in items if item.get("notice"))
+                )
+            grouped[identifier] = [merged]
     sources, segments = [], {}
 
     def render(items):
@@ -332,7 +420,7 @@ def assemble(layout, blocks, system="", user=""):
             if identifier == anchor:
                 sources.append(
                     {
-                        **block(anchor, BLOCK_NAMES[anchor], original, "宿主原有内容"),
+                        **block(anchor, names[anchor], original, "宿主原有内容"),
                         "role": role,
                         "placement": f"{role} 原始内容定位行",
                     }

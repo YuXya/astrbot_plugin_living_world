@@ -29,6 +29,7 @@ views = load_module("ui_debug_views", "debug_views.py")
 wire = load_module("ui_wire", "wire.py")
 sys.path.insert(0, str(ROOT))
 from living_world import layout  # noqa: E402
+from living_world.context_usage import DEFAULT_USAGE  # noqa: E402
 
 
 def call(identifier, response, request=None):
@@ -267,6 +268,7 @@ print(
             "group_reply_default": GROUP_REPLY_DEFAULT,
             "context_layout_catalog": layout.catalog(),
             "context_layout_defaults": layout.DEFAULT_SETTINGS,
+            "context_usage_defaults": DEFAULT_USAGE,
         },
         ensure_ascii=False,
     )
