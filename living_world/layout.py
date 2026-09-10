@@ -3,6 +3,8 @@
 import copy
 import json
 
+from .context_index import INDEX
+
 TASK_NAMES = {
     "chat.group": "普通群聊回复",
     "chat.private": "普通私聊回复",
@@ -209,7 +211,12 @@ def catalog():
     return {
         "default": copy.deepcopy(DEFAULT_LAYOUT),
         "blocks": [
-            {"id": key, "label": label, "anchor": key.startswith("anchor.")}
+            {
+                "id": key,
+                "label": label,
+                "anchor": key.startswith("anchor."),
+                **copy.deepcopy(INDEX[key]),
+            }
             for key, label in BLOCK_NAMES.items()
         ],
         "tasks": [

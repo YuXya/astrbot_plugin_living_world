@@ -3,6 +3,7 @@
 import ast
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +27,8 @@ def load_module(name, file):
 
 views = load_module("ui_debug_views", "debug_views.py")
 wire = load_module("ui_wire", "wire.py")
-layout = load_module("ui_layout", "layout.py")
+sys.path.insert(0, str(ROOT))
+from living_world import layout  # noqa: E402
 
 
 def call(identifier, response, request=None):

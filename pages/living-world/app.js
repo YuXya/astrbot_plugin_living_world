@@ -1,41 +1,197 @@
+import { PAGES, resolveRoute, routeHash, reorderedLayout } from "./navigation.js";
 const bridge = window.AstrBotPluginPage;
 const $ = (selector) => document.querySelector(selector);
 const content = $("#content");
-const titles = { whitelist: "聊天对象与白名单", sources: "内容来源", debug: "调试与调用记录", overview: "今日生活", settings: "角色、模型与模块", drives: "内在状态", schedule: "日程与行动", memory: "记忆与人物", journal: "见闻与日记", social: "社交与调用", data: "数据管理" };
 const moduleNames = { daily_digest: "AI 日报", debug: "调试记录", life: "日程生活", state: "角色状态", drives: "内在状态", memory: "长期记忆", reply: "被动回复", interjection: "群聊插话", proactive: "主动社交", news: "新闻阅读", search: "主动搜索", weather: "天气", bilibili: "B 站见闻", journal: "生活日记", notes: "见闻笔记" };
 const kindNames = { knowledge: "知识", event: "事件", skill: "技能", emotional: "情感与体会", profile: "人物画像", journal: "日记", note: "笔记", notes: "笔记", news: "新闻", search: "搜索", weather: "天气", bilibili: "B 站搜索", bilibili_watch: "观看 B 站视频", bilibili_recent: "读取 B 站历史见闻", fiction: "角色日常", life: "生活", social: "社交", read: "已读取", searched: "已搜索", watched: "已观看" };
 const statusNames = { enabled: "已开启", disabled: "已关闭", ready: "就绪", running: "运行中", paused: "已暂停", unavailable: "不可用", error: "异常", failed: "失败", planned: "已计划", pending: "待执行", reserved: "已预留", detailed: "已细化", completed: "已完成", done: "已完成", sent: "已发送", skipped: "已跳过", cancelled: "已取消", expired: "已过期", success: "成功", succeeded: "成功", ok: "正常" };
 let snapshot = null;
 let busy = false;
-let dirty = false;
 let lastResult = null;
 let dialogHandler = null;
-let memorySearch = "";
-let memoryKind = "";
-let memoryScope = "";
+let modalDraft = false;
 let scheduleDate = "";
-let recordSearch = "";
 let selectedMemories = new Set();
 let debugCategory = "";
 let testRequest = "";
 let debugTask = "life.plan";
-let debugSection = "records";
 let debugScope = "global";
 let debugMode = "structured";
 let retentionDraft = null;
 let layoutDraft = null;
 let layoutTask = "";
-let layoutDragged = null;
 const templateDrafts = new Map();
-const templateOpen = new Map();
 const trialDrafts = new Map();
+const formDrafts = new Map();
+const arrayDrafts = new Map();
+const selections = new Map();
+const listStates = new Map();
+const rememberedTabs = {};
+const scrollPositions = new Map();
+let currentRoute = resolveRoute(location.hash);
+let sourceReturn = null;
+let templateTask = "life.plan";
+let debugRound = "";
+let pendingBackup = null;
+let cancelLayoutDrag = null;
+let draftSequence = 0;
+function newDraftId() { return globalThis.crypto?.randomUUID?.() || `draft-${Date.now()}-${++draftSequence}`; }
+
+function hasDrafts() {
+  return modalDraft || Boolean(pendingBackup) || hasDebugDrafts() || hasDriveDrafts() || formDrafts.size > 0 || [...arrayDrafts.values()].some((item) => item.changed);
+}
+function captureFields(form) {
+  const values = {};
+  form.querySelectorAll("input[name],select[name],textarea[name]").forEach((input) => {
+    if (input.dataset.skip || input.readOnly) return;
+    values[input.name] = { value: input.type === "checkbox" ? input.checked : input.value, number: input.dataset.number === "true", lines: Boolean(input.dataset.lines) };
+  });
+  return values;
+}
+function draftedValue(base, key) {
+  const value = clone(base);
+  for (const [name, item] of Object.entries(formDrafts.get(key) || {})) {
+    setAt(value, name, item.number ? Number(item.value) : item.lines ? item.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) : item.value);
+  }
+  return value;
+}
+function bindDraft(form, key) {
+  form.dataset.draftKey = key;
+  for (const input of form.querySelectorAll("input[name],select[name],textarea[name]")) {
+    const item = formDrafts.get(key)?.[input.name];
+    if (item) { if (input.type === "checkbox") input.checked = item.value; else input.value = item.value; }
+  }
+  const capture = (event) => {
+    if (event.target.dataset.skip || !event.target.name) return;
+    formDrafts.set(key, captureFields(form));
+  };
+  form.addEventListener("input", capture); form.addEventListener("change", capture);
+  return form;
+}
+function finishForm(form, key, save = (values) => saveSettings(values)) {
+  bindDraft(form, key);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submitted = JSON.stringify(formDrafts.get(key));
+    const values = readFields(form);
+    const result = await save(values);
+    if (result !== false) { if (JSON.stringify(formDrafts.get(key)) === submitted) formDrafts.delete(key); render(); }
+  });
+  return form;
+}
+function chooser(label, key, options, fallback = "", change = null) {
+  let value = selections.get(key) ?? fallback;
+  if (options.length && !options.some((item) => String(item.value ?? item) === String(value))) value = options[0].value ?? options[0];
+  selections.set(key, value);
+  const wrapper = field(label, key, value, { options });
+  const select = wrapper.querySelector("select"); select.dataset.skip = "1";
+  select.addEventListener("change", () => { selections.set(key, select.value); if (change) change(select.value); else render(); });
+  return wrapper;
+}
+function arraySignature(key) {
+  const state = arrayDrafts.get(key);
+  return JSON.stringify({ changed: state?.changed, keys: state?.items.map((item) => item.key), forms: [...formDrafts].filter(([name]) => name.startsWith(key + ":")) });
+}
+function clearArray(key) {
+  arrayDrafts.delete(key);
+  for (const name of formDrafts.keys()) if (name.startsWith(key + ":")) formDrafts.delete(name);
+}
+function arrayEditor(key, records, options) {
+  let state = arrayDrafts.get(key);
+  if (!state) { state = { changed: false, items: records.map((value, index) => ({ key: String(value.id || value.umo || index), value: clone(value) })) }; arrayDrafts.set(key, state); }
+  else if (!state.changed && ![...formDrafts.keys()].some((name) => name.startsWith(key + ":"))) {
+    const fresh = records.map((value, index) => ({ key: String(value.id || value.umo || index), value: clone(value) }));
+    state.items = fresh;
+  }
+  const base = (item) => options.base ? options.base(item.value) : item.value;
+  const valueOf = (item) => draftedValue(base(item), key + ":" + item.key);
+  const serialize = (item) => options.serialize ? options.serialize(valueOf(item), item.value) : { ...item.value, ...valueOf(item) };
+  const form = settingsForm(options.saveLabel || "保存列表设置", options.description || "保存本面板的列表及设置，不调用模型或发送消息。");
+  const choices = state.items.map((item, index) => ({ value: item.key, label: options.label(valueOf(item), index) }));
+  const select = chooser(options.selectLabel, key + ".selection", choices);
+  const selected = () => state.items.find((item) => item.key === selections.get(key + ".selection"));
+  const actions = form.querySelector(".section-toolbar");
+  if (options.create) actions.append(button("新增", () => {
+    const value = options.create(); const item = { key: newDraftId(), value };
+    state.items.push(item); state.changed = true; selections.set(key + ".selection", item.key); render();
+  }, "secondary"));
+  const remove = button("删除所选", () => { const item = selected(); if (!item) return; state.items = state.items.filter((entry) => entry !== item); formDrafts.delete(key + ":" + item.key); state.changed = true; render(); }, "danger");
+  remove.dataset.disabled = String(!choices.length); actions.append(remove);
+  if (options.restore) actions.append(button("恢复默认", () => confirmAction("恢复默认列表", "将恢复本来源的默认列表，已有见闻保留，不发起来源读取。", async () => {
+    const result = await action(options.restore); if (result !== false) { clearArray(key); render(); } return result;
+  }, false, "恢复默认"), "secondary"));
+  form.append(select);
+  if (options.extra) form.append(finishInlineFields(options.extra(), key + ":extra"));
+  const item = selected();
+  if (item) {
+    const fields = options.fields(base(item), item.value); bindDraft(fields, key + ":" + item.key); fields.refresh?.(); form.append(fields);
+  } else form.append(empty("没有配置对象", options.create ? "点击上方新增按钮添加。" : "可恢复默认列表。"));
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const values = state.items.map(serialize);
+      if (options.validate) options.validate(values);
+      const submitted = arraySignature(key);
+      const selectedIndex = state.items.indexOf(selected());
+      const result = await saveSettings(options.payload(values, draftedValue({}, key + ":extra")));
+      if (result !== false) {
+        if (arraySignature(key) === submitted) {
+          const saved = values[selectedIndex]; clearArray(key);
+          if (saved) selections.set(key + ".selection", String(saved.id || saved.umo || selectedIndex));
+        }
+        render();
+      }
+    } catch (error) { notice(error.message, true); }
+  });
+  return form;
+}
+function finishInlineFields(node, key) { return bindDraft(node, key); }
+function openRecord(title, body) { openEditor(title, body, () => true, "关闭"); }
+function compactRecords(key, records, options = {}) {
+  const root = el("div", "stack compact-records");
+  const state = listStates.get(key) || { query: "", page: 0 }; listStates.set(key, state);
+  const search = field("搜索记录", key + ".search", state.query, { placeholder: "搜索标题或正文" });
+  const controls = append(el("div", "compact-filter"), search);
+  if (options.filter) controls.append(options.filter);
+  root.append(controls);
+  const list = el("div", "compact-record-list"); const pager = el("div", "pagination"); root.append(pager, list);
+  const fill = () => {
+    const filtered = records.filter((record) => stringify(record).toLocaleLowerCase().includes(state.query.toLocaleLowerCase()));
+    const pages = Math.max(1, Math.ceil(filtered.length / 10)); state.page = Math.min(state.page, pages - 1);
+    list.replaceChildren(); pager.replaceChildren();
+    const prev = button("上一页", () => { state.page--; fill(); }, "secondary", true);
+    const next = button("下一页", () => { state.page++; fill(); }, "secondary", true);
+    prev.disabled = state.page === 0; next.disabled = state.page >= pages - 1;
+    prev.dataset.disabled = String(prev.disabled); next.dataset.disabled = String(next.disabled);
+    pager.append(prev, el("span", "muted", `${state.page + 1} / ${pages} · ${filtered.length} 条`), next);
+    for (const record of filtered.slice(state.page * 10, state.page * 10 + 10)) {
+      const row = el("article", "compact-record-row"); row.dataset.recordId = record.id || "";
+      const title = options.title?.(record) || recordTitle(record);
+      const view = button(title, () => openRecord(title, options.body ? options.body(record) : recordList([record])), "record-open"); view.title = title;
+      row.append(options.head?.(record) || el("span", "record-dot", "·"), view,
+        el("span", "record-date", stamp(record.created_at || record.occurred_at || record.day || record.date)),
+        options.actions?.(record) || el("span"));
+      list.append(row);
+    }
+    if (!filtered.length) list.append(empty("没有符合条件的记录"));
+  };
+  search.querySelector("input").addEventListener("input", (event) => { state.query = event.target.value; state.page = 0; fill(); });
+  fill(); return root;
+}
 function taskDisplay(task) {
   return snapshot?.context_layout_catalog?.tasks?.find((item) => item.id === task)?.label
     || snapshot?.debug?.templates?.find((item) => item.task === task)?.label
     || (debugTaskNames[task] ? `${task}（${debugTaskNames[task]}）` : task);
 }
-function hasDebugDrafts() { return Boolean(layoutDraft || templateDrafts.size || retentionDraft !== null || testRequest.trim() || trialDrafts.size); }
+function hasDebugDrafts() { return Boolean(layoutDraft || templateDrafts.size || retentionDraft !== null || testRequest.trim() || [...trialDrafts.values()].some((draft) => draft.request.trim())); }
 function rememberTrial() { trialDrafts.set(debugTask, { request: testRequest, scope: debugScope, mode: debugMode }); }
+function acceptTrial(task, previous, next) {
+  const latest = task === debugTask ? { request: testRequest, scope: debugScope, mode: debugMode } : trialDrafts.get(task) || { request: "", scope: "global", mode: "structured" };
+  if (JSON.stringify(latest) !== JSON.stringify(previous)) { notice("输入已改变，保留当前草稿；请重新建立或预览请求。", true); return false; }
+  trialDrafts.set(task, next);
+  if (task === debugTask) { testRequest = next.request; debugScope = next.scope; debugMode = next.mode; }
+  render(); return true;
+}
 
 const debugSelections = new Map();
 let debugBodySequence = 0;
@@ -150,14 +306,14 @@ async function readState() {
   $("#updated").textContent = `${new Date().toLocaleTimeString("zh-CN", { hour12: false })} 更新`;
 }
 async function refresh() {
-  return request(async () => { await readState(); dirty = false; render(); }, location.hash === "#drives" ? "数值已刷新，未保存的修改继续保留" : "数据已刷新");
+  return request(async () => { await readState(); render(); }, currentRoute.page === "character" && currentRoute.tab === "drives" ? "数值已刷新，未保存的修改继续保留" : "数据已刷新");
 }
 async function action(name, payload = {}) {
   return request(async () => {
     const result = await bridge.apiPost("action", { action: name, ...payload });
     lastResult = { action: name, result, time: new Date().toLocaleTimeString("zh-CN", { hour12: false }) };
     await readState();
-    if (name === "debug_test" && result?.status === "success") debugSection = "records";
+    if (name === "debug_test" && result?.status === "success") navigate("context", "calls");
     render();
     return result ?? true;
   }, (result) => result?.reason === "brief_failed" ? "简报生成失败，已保留正文和已有简报；可点击生成简报重试。" : result?.status === "skipped" ? `本次未执行：${result.text || result.reason || "请查看操作结果"}` : result?.status === "failed" ? `本次执行失败：${result.text || result.error || result.reason || "请查看操作结果"}` : "操作已完成，请查看执行结果");
@@ -165,7 +321,7 @@ async function action(name, payload = {}) {
 async function saveSettings(settings) {
   return request(async () => {
     await bridge.apiPost("settings", settings);
-    dirty = false;
+
     await readState();
     render();
   }, "设置已保存并应用，已有记录继续保留");
@@ -188,7 +344,6 @@ function field(label, name, value, options = {}) {
   for (const key of ["min", "max", "step", "placeholder", "required", "rows", "readOnly"]) if (options[key] !== undefined) control[key] = options[key];
   if (options.type === "number") control.dataset.number = "true";
   if (options.lines) control.dataset.lines = "true";
-  control.addEventListener("input", () => { if (control.closest("form[data-settings]")) dirty = true; });
   append(wrapper, control, options.hint ? el("span", "field-hint", options.hint) : null);
   return wrapper;
 }
@@ -203,31 +358,20 @@ function readFields(container) {
   });
   return values;
 }
-function applyFields(target, container) {
-  const values = readFields(container);
-  function merge(destination, source) {
-    for (const [key, value] of Object.entries(source)) {
-      if (["__proto__", "constructor", "prototype"].includes(key)) continue;
-      if (value && typeof value === "object" && !Array.isArray(value)) {
-        if (!destination[key] || typeof destination[key] !== "object" || Array.isArray(destination[key])) destination[key] = {};
-        merge(destination[key], value);
-      } else destination[key] = value;
-    }
-  }
-  merge(target, values);
-  return target;
-}
 function openEditor(title, body, handler, submitLabel = "保存", danger = false) {
   $("#editor-title").textContent = title;
   $("#editor-body").replaceChildren(...(Array.isArray(body) ? body : [body]));
   $("#editor-submit").textContent = submitLabel;
   $("#editor-submit").className = `button ${danger ? "danger" : "primary"}`;
-  dialogHandler = handler;
+  dialogHandler = handler; modalDraft = false;
   $("#editor").showModal();
 }
 function confirmAction(title, text, handler, danger = false, submitLabel = "确认") {
   openEditor(title, el("p", danger ? "danger-copy" : "muted", text), handler, submitLabel, danger);
 }
+$("#editor-body").addEventListener("input", (event) => { if (event.target.name && !event.target.readOnly) modalDraft = true; });
+$("#editor-body").addEventListener("change", (event) => { if (event.target.name && !event.target.readOnly) modalDraft = true; });
+$("#editor").addEventListener("close", () => { modalDraft = false; });
 $("#editor-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (busy || !dialogHandler) return;
@@ -303,7 +447,6 @@ function modulePanel(editable = false) {
       control.type = "checkbox";
       control.name = `modules.${id}`;
       control.checked = enabled;
-      control.addEventListener("change", () => { dirty = true; });
       label.append(control);
     } else label.append(badge(enabled ? module.status || "enabled" : "disabled"));
     append(wrapper, label, el("div", "muted", editable ? (statusNames[module.status] || module.status || (enabled ? "开启后参与生活" : "关闭后保留已有记录")) : id));
@@ -318,13 +461,11 @@ function linkButton(label, view) {
 }
 function checkField(label, name, enabled) {
   const control = el("input"); control.type = "checkbox"; control.name = name; control.checked = Boolean(enabled);
-  control.addEventListener("change", () => { if (control.closest("form[data-settings]")) dirty = true; });
   return append(el("label", "inline-check"), control, el("span", "", label));
 }
 function settingsForm(label, description) {
   const form = el("form", "stack"); form.dataset.settings = "true";
   form.append(append(el("div", "section-toolbar"), el("p", "muted", description), button(label, () => form.requestSubmit(), "primary")));
-  form.addEventListener("input", () => { dirty = true; });
   return form;
 }
 function orderedActivities(day = dayNow()) {
@@ -375,7 +516,8 @@ function observationList(records, limit) {
   return box;
 }
 function observationKind(item, kind) { return item.module === kind || item.source === kind || item.kind === kind; }
-function renderOverview() {
+function renderOverview(tab = "current") {
+  if (tab === "recent") return compactRecords("overview-recent", rows("observations"), { body: (row) => observationList([row]) });
   const root = el("div", "stack");
   const state = snapshot.state || {};
   const current = currentActivity();
@@ -383,7 +525,7 @@ function renderOverview() {
   const persona = rows("personas").find((row) => row.id === snapshot.settings?.persona_id);
   const weather = rows("observations").find((item) => observationKind(item, "weather"));
   const next = today.flatMap((item) => item.actions?.social?.enabled ? [{ activity: item, action: item.actions.social }] : []).filter((item) => (!item.action.execution?.status || item.action.execution.status === "pending") && new Date(item.action.at || item.activity.start).getTime() >= Date.now()).sort((a, b) => String(a.action.at || a.activity.start).localeCompare(String(b.action.at || b.activity.start)))[0];
-  root.append(append(el("div", "section-toolbar"), el("p", "muted", `${dayNow()} · ${persona?.name || snapshot.settings?.persona_id || "尚未绑定人格"} · 管理员视图`), append(el("div", "actions"), linkButton("聊天对象与白名单", "whitelist"), linkButton("日程生成参数", "schedule"))));
+  root.append(append(el("div", "section-toolbar"), el("p", "muted", `${dayNow()} · ${persona?.name || snapshot.settings?.persona_id || "尚未绑定人格"} · 管理员视图`), append(el("div", "actions"), linkButton("聊天对象与白名单", "whitelist"), linkButton("日程生成参数", "schedule?tab=settings"))));
   const stateGrid = el("div", "state-grid");
   const sleep = current?.sleep_state || state.sleep_state || "未知";
   const sleepLabels = { awake: "清醒", asleep: "睡眠中", sleeping: "睡眠中", unknown: "未知" };
@@ -392,124 +534,101 @@ function renderOverview() {
   const nextBody = append(el("div", "stack"), el("div", "next-social-time", next ? clockTime(next.action.at || next.activity.start) : "暂无待执行联系"), el("p", "record-body", next ? next.action.intent || next.activity.title : "临近活动细化时，再决定是否主动聊天。"), el("p", "hint", "活动细化决定是否主动聊天；对象按白名单权重抽选，并检查冷却、免打扰与发送上限。"), linkButton("查看聊天对象与白名单", "whitelist"));
   const timeline = recordList(today, { timeline: true, currentId: current?.id, emptyTitle: "今天还没有正式日程" });
   timeline.classList.add("home-timeline");
-  append(root, append(el("div", "overview-grid"), append(el("div", "stack"), card("此刻的角色", "状态来自设定与日程，没有依据时显示未知。", stateGrid), card("现在在做什么", "角色日常与真实行动分别记录。", currentBody)), card("今日时间线", "新闻 → 搜索 → 聊天；同一活动可以安排多种行动。", timeline, linkButton("完整日程", "schedule")), card("下一次主动联系", "内容到执行时结合聊天场合生成。", nextBody)));
-  append(root, append(el("div", "grid"), card("新闻阅读与感想", "真实内容、角色感想与阅读依据分别保留。", observationList(rows("observations").filter((item) => observationKind(item, "news") || observationKind(item, "daily_digest")), 3), linkButton("阅读历史", "journal")), card("搜索发现", "从活动和记忆出发，保留查询与来源。", observationList(rows("observations").filter((item) => observationKind(item, "search")), 3), linkButton("搜索历史", "journal"))));
-  const diagnostics = append(el("details", "card"), el("summary", "", "运行能力与诊断"), modulePanel(), recordList(rows("diagnostics").map((row) => typeof row === "string" ? { title: row } : row), { emptyTitle: "没有待处理诊断" }));
-  root.append(diagnostics);
+  append(root, append(el("div", "overview-grid"), append(el("div", "stack"), card("此刻的角色", "状态来自设定与日程，没有依据时显示未知。", stateGrid), card("现在在做什么", "角色日常与真实行动分别记录。", currentBody)), card("今日时间线", "新闻 → 搜索 → 聊天；同一活动可以安排多种行动。", timeline, linkButton("完整日程", "schedule?tab=timeline")), card("下一次主动联系", "内容到执行时结合聊天场合生成。", nextBody)));
   return root;
 }
-function renderSettings() {
-  const form = settingsForm("保存全部设置", "保存会更新角色、模型和模块开关；不会发起模型调用或发送 QQ 消息。"); form.id = "settings-form";
+function renderCharacter(tab) {
   const settings = snapshot.settings || {};
-  const f = (label, path, options = {}, fallback = "") => field(label, path, valueAt(settings, path, fallback), options);
+  const f = (label, name, options = {}, fallback = "") => field(label, name, valueAt(settings, name, fallback), options);
+  if (tab === "drives") return renderDrives();
+  if (tab === "events") return compactRecords("events", byRecordScope("events", rows("events")), { filter: recordScopeFilter("events") });
+  if (tab === "state") {
+    const form = settingsForm("保存生活状态", "心情与作息是当前生活数据；地点、睡眠由活动及角色默认设置提供。");
+    form.append(append(el("div", "form-grid"), field("当前心情", "mood", snapshot.state?.mood || "平静"), field("当前作息", "routine", snapshot.state?.routine || "", { type: "textarea", rows: 3 })));
+    form.append(details(snapshot.state || {}, "查看当前状态"));
+    return finishForm(form, "character.state", (patch) => action("update_state", { patch }));
+  }
+  const form = settingsForm("保存角色与世界", "补充人格和生活设定；核心人格正文仍在 AstrBot 人格管理中编辑。");
   const personas = [{ value: "", label: "请选择绑定人格" }, ...rows("personas").map((row) => ({ value: row.id, label: row.name || row.id }))];
-  const providers = [{ value: "", label: "沿用默认模型" }, ...rows("providers").map((row) => ({ value: row.id, label: row.name || row.id }))];
-  form.append(card("角色与世界", "使用指定 AstrBot 人格，补充角色资料与生活背景。精力与寂寞值在「内在状态」管理。", append(el("div", "form-grid"), f("绑定人格", "persona_id", { options: personas, required: true }), f("时区", "character.timezone", {}, "Asia/Shanghai"), f("角色补充资料", "character.profile", { type: "textarea" }), f("世界设定", "character.world", { type: "textarea" }), f("初始情绪", "character.mood", {}, "平静"), f("初始地点", "character.location", { hint: "没有当前日程地点时采用此设置，留空显示未知。" }), f("初始睡眠状态", "character.sleep_state", { options: ["未知", "清醒", "睡眠"] }, "未知"))));
-  form.append(card("业务能力", "关闭停止该项行为并保留已有数据；开启后按日程和模块规则运行。", modulePanel(true)));
-  const groupReply = f("本轮群聊回复要求", "reply.group_prompt", { type: "textarea", rows: 5, hint: "默认按极短模式接话。文案可改；保存后从下一轮群聊生效。留空则不附加要求，最多 8000 字符。" }, snapshot.reply_defaults?.group_prompt || "");
-  groupReply.querySelector("textarea").maxLength = 8000;
-  const groupReplyBox = card("群聊回复", "默认在本轮 user 消息最后，生活资料块之外；可在「调试与调用记录 → 上下文注入位置」调整。只用于已接入的普通群聊回复，不写入聊天历史。", append(el("div", "stack"), groupReply, button("恢复极短默认文案", () => { groupReply.querySelector("textarea").value = snapshot.reply_defaults?.group_prompt || ""; dirty = true; notice("已填入默认文案，点击「保存全部设置」后生效"); }, "secondary", true)));
-  groupReplyBox.id = "group-reply-settings";
-  form.append(groupReplyBox);
-  const models = el("div", "form-grid");
-  [["默认模型", "default"], ["生活与日程", "life"], ["记忆提炼", "memory"], ["主动社交", "social"], ["外部见闻", "exploration"], ["日记与笔记", "journal"]].forEach(([label, key]) => models.append(f(label, `models.${key}`, { options: providers })));
-  form.append(card("模型分配", "模块留空继承默认模型；默认模型留空沿用宿主配置。", models));
-  form.append(card("其他设置入口", "日程大纲、行动上限、聊天白名单和内容来源在各自页面管理。", append(el("div", "actions"), linkButton("日程生成参数", "schedule"), linkButton("聊天对象与白名单", "whitelist"), linkButton("内容来源", "sources"))));
-  form.addEventListener("submit", (event) => { event.preventDefault(); saveSettings(applyFields(clone(settings), form)); });
-  return form;
+  form.append(append(el("div", "form-grid"), f("绑定人格", "persona_id", { options: personas, required: true }), f("时区", "character.timezone", {}, "Asia/Shanghai"),
+    f("角色补充资料", "character.profile", { type: "textarea", rows: 4 }), f("世界设定", "character.world", { type: "textarea", rows: 4 }),
+    f("初始情绪", "character.mood", {}, "平静"), f("默认地点", "character.location"), f("默认睡眠状态", "character.sleep_state", { options: ["未知", "清醒", "睡眠"] }, "未知")));
+  return finishForm(form, "character.profile");
 }
-function renderWhitelist() {
+function recordScopeFilter(key) {
+  return chooser("场合", key + ".scope", [{ value: "", label: "全部场合" }, ...scopeOptions()]);
+}
+function byRecordScope(key, records) {
+  const scope = selections.get(key + ".scope");
+  return scope ? records.filter((row) => (row.scope || row.umo || "global") === scope) : records;
+}
+function sessionStatus(scope) {
+  const value = rows("session_status").find((row) => row.umo === scope);
+  const box = el("div", "session-status");
+  if (!value) return append(box, el("p", "muted", "尚未检查。没有历史也可以接入；检查只读，不调用模型或发送消息。"));
+  const history = value.history_status === "found" ? `已找到历史：${value.history_count} 条` : value.history_status === "error" ? "历史读取失败" : "首次对话／暂无历史";
+  box.append(append(el("div", "actions"), badge(history, value.history_status === "error" ? "bad" : ""), badge(value.allowed ? "配置允许接入" : "配置未通过", value.allowed ? "good" : "bad")),
+    el("p", "session-line", `实际人格：${value.persona_id || "未解析"} · 绑定：${value.bound_persona || snapshot.settings.persona_id || "未设置"} · 来源：${{ host_default: "AstrBot 默认设置", conversation: "当前对话指定", session_rule: "宿主会话规则" }[value.persona_source] || value.persona_source || "未知"}`));
+  if (value.reason) box.append(el("p", value.allowed ? "session-line" : "danger-copy", value.reason));
+  if (value.history_error) box.append(el("p", "danger-copy", value.history_error));
+  const attempt = value.context_status?.last_attempt, injected = value.context_status?.last_injected;
+  box.append(el("p", "session-line", injected ? `最近实际注入：${stamp(injected.at)} · ${injected.reason}` : "尚未观察到实际注入；检查通过不代表已经注入。"));
+  if (attempt && attempt.at !== injected?.at) box.append(el("p", "session-line", `最近处理：${attempt.reason}`));
+  box.append(details(value, "会话与检查详情"));
+  const turn = attempt?.turn_id || injected?.turn_id;
+  if (turn && rows("debug_records").some((row) => row.turn_id === turn)) box.append(linkButton("查看这轮接入记录", `debug?turn=${encodeURIComponent(turn)}`));
+  return box;
+}
+function whitelistBase(original) {
+  const [connection = "", type = "GroupMessage", number = ""] = (original.umo || "").split(":");
+  return { connection: connection || rows("platforms")[0]?.id || "", type, number: number.split("_").at(-1), weight: original.weight ?? 1, enabled: original.enabled !== false };
+}
+function whitelistFields(value, original) {
+  const known = [...new Set([...rows("platforms").map((item) => item.id), ...(snapshot.settings.sessions || []).map((item) => (typeof item === "string" ? item : item.umo || "").split(":")[0])].filter(Boolean))];
+  const box = el("div", "stack whitelist-entry");
+  const fields = append(el("div", "form-grid"), field("QQ 连接", "connection", value.connection, { options: known, required: true }), field("聊天类型", "type", value.type, { options: [{ value: "GroupMessage", label: "群聊" }, { value: "FriendMessage", label: "私聊" }] }),
+    field("群号 / QQ 号", "number", value.number, { required: true }), field("抽选权重", "weight", value.weight, { type: "number", min: 0, step: 0.1 }), checkField("启用此对象", "enabled", value.enabled));
+  const scope = () => serializeWhitelist(readFields(fields), original).umo;
+  const status = el("div"), preview = el("p", "session-line");
+  const update = () => { preview.textContent = `会话标识：${scope()}`; status.replaceChildren(sessionStatus(scope())); };
+  const inspect = button("检查会话与历史", async () => {
+    const result = await request(() => bridge.apiPost("action", { action: "inspect_session", scope: scope() }), "会话检查完成；没有调用模型或发送消息");
+    if (result !== false) { snapshot.session_status = [...rows("session_status").filter((row) => row.umo !== result.umo), clone(result)]; update(); }
+  }, "secondary");
+  box.append(inspect, fields, preview, status); fields.addEventListener("input", update); fields.addEventListener("change", update); box.refresh = update;
+  if ((original.umo || "").includes("_")) box.append(el("p", "hint", "不改目标时保留已有群成员会话标识；人格和历史仍按真实场合判断。"));
+  return box;
+}
+function serializeWhitelist(value, original) {
+  const old = whitelistBase(original);
+  const same = ["connection", "type", "number"].every((key) => value[key] === old[key]);
+  return { ...original, umo: same && original.umo ? original.umo : `${value.connection}:${value.type}:${String(value.number).trim()}`, weight: value.weight, enabled: value.enabled };
+}
+
+function renderWhitelist(tab = "targets") {
   const settings = snapshot.settings || {};
-  const form = settingsForm("保存聊天对象与限制", "这是填写白名单的位置。保存只改变配置；日程执行时才可能发送消息。");
-  const holder = el("div", "stack"); const entries = [];
-  const platforms = rows("platforms").length ? rows("platforms") : snapshot.catalogs?.platforms || [];
-  const knownIds = [...new Set([...platforms.map((item) => item.id), ...(settings.sessions || []).map((item) => (typeof item === "string" ? item : item.umo || "").split(":")[0])].filter(Boolean))];
-  const add = (original = {}) => {
-    const originalUMO = typeof original === "string" ? original : original.umo || "";
-    original = typeof original === "string" ? { umo: original } : clone(original);
-    const [connection = "", type = "GroupMessage", number = ""] = originalUMO.split(":");
-    const box = el("div", "whitelist-entry"); const numberValue = number.split("_").at(-1);
-    const connectionField = field("QQ 连接", "connection", connection || knownIds[0] || "", { options: [{ value: "", label: "选择 QQ 连接" }, ...knownIds.map((id) => ({ value: id, label: platforms.find((item) => item.id === id)?.name || id }))], required: true });
-    const typeField = field("聊天类型", "type", type, { options: [{ value: "GroupMessage", label: "群聊" }, { value: "FriendMessage", label: "私聊" }] });
-    const numberField = field("群号 / QQ 号", "number", numberValue, { required: true, placeholder: "只填写数字" });
-    const weightField = field("抽选权重", "weight", original.weight ?? 1, { type: "number", min: 0, step: 0.1 });
-    const enabledField = checkField("启用此对象", "enabled", original.enabled !== false);
-    const preview = el("p", "session-line");
-    const sessionInfo = el("div", "session-status");
-    const debugLink = el("span", "actions");
-    const showStatus = (value) => {
-      const expanded = sessionInfo.querySelector("details")?.open || false;
-      const detailBody = append(el("div", "session-details-body"), preview);
-      const details = append(el("details", "session-details"), el("summary", "", "会话与检查详情"), detailBody);
-      details.open = expanded;
-      debugLink.replaceChildren();
-      if (!value) {
-        sessionInfo.replaceChildren(el("p", "session-line", "尚未检查会话。没有历史也可以接入；检查只读，不调用模型或发送消息。"), details);
-        return;
-      }
-      const historyLabel = value.history_status === "found" ? `已找到历史：${value.history_count} 条` : value.history_status === "error" ? "历史读取失败" : "首次对话／暂无历史";
-      const source = { host_default: "AstrBot 默认设置", conversation: "当前对话指定", session_rule: "宿主会话规则", unresolved: "尚未解析" }[value.persona_source] || value.persona_source || "未知";
-      const contextStatus = value.context_status || {};
-      const attempt = contextStatus.last_attempt;
-      const injected = contextStatus.last_injected;
-      sessionInfo.replaceChildren(append(el("div", "actions"), badge(historyLabel, value.history_status === "error" ? "bad" : ""), badge(value.allowed ? "配置允许接入" : "配置未通过", value.allowed ? "good" : "bad")),
-        el("p", "session-line", `实际人格：${value.persona_id || "未解析"} · 插件绑定：${value.bound_persona || settings.persona_id || "未设置"} · 人格来源：${source}`));
-      detailBody.append(
-        el("p", "session-line", `真实会话：${value.actual_scope || "未知"} · 连接类型：${value.platform_name || "未知"}`),
-        el("p", "session-line", `历史来源：${value.history_source || "未知"} · 对话：${value.conversation_id || "暂无"} · ${stamp(value.checked_at)}`));
-      const reason = `${value.reason || ""}${value.reason_code ? `（${value.reason_code}）` : ""}`;
-      if (reason) (value.allowed ? detailBody : sessionInfo).append(el("p", value.allowed ? "session-line" : "session-line danger-copy", reason));
-      if (value.history_error) sessionInfo.append(el("p", "session-line danger-copy", value.history_error));
-      if (attempt) {
-        const sameInjection = injected && attempt.at === injected.at && attempt.turn_id === injected.turn_id && attempt.reason === injected.reason;
-        (sameInjection ? detailBody : sessionInfo).append(el("p", "session-line", `最近处理：${stamp(attempt.at)} · ${attempt.reason}`));
-      } else if (!injected) sessionInfo.append(el("p", "session-line", "尚未观察到实际聊天接入；配置检查通过不代表已经注入上下文。"));
-      if (injected) sessionInfo.append(el("p", "session-line", `最近实际注入：${stamp(injected.at)} · ${injected.reason}`));
-      const turn = attempt?.turn_id || injected?.turn_id;
-      if (turn) {
-        detailBody.append(el("p", "session-line", `对应聊天轮次：${turn}`));
-        if (rows("debug_records").some((row) => row.turn_id === turn)) {
-          const link = linkButton("查看这轮接入记录", `debug?turn=${encodeURIComponent(turn)}`);
-          link.addEventListener("click", () => { debugCategory = ""; });
-          debugLink.append(link);
-        }
-        else detailBody.append(el("p", "session-line", "该轮调试记录已清理、超出保留数量或当时未开启调试；接入状态仍保留。"));
-      }
-      sessionInfo.append(details);
-    };
-    const controls = append(el("div", "form-grid whitelist-fields"), connectionField, typeField, numberField, weightField);
-    const entry = { original, originalUMO, connection, type, numberValue, box, controls, enabledField }; entries.push(entry);
-    const currentScope = () => { const v = readFields(controls); return v.connection === connection && v.type === type && v.number === numberValue && originalUMO ? originalUMO : `${v.connection}:${v.type}:${v.number.trim()}`; };
-    const update = () => { preview.textContent = `会话标识：${currentScope()} · 自动填写，无需手工拼接`; showStatus(rows("session_status").find((row) => row.umo === currentScope())); };
-    controls.addEventListener("input", update); update();
-    append(box, controls, append(el("div", "section-toolbar"), enabledField, button("移除这个对象", () => { entries.splice(entries.indexOf(entry), 1); box.remove(); dirty = true; }, "danger", true)));
-    box.append(sessionInfo, append(el("div", "actions session-status-actions"), button("检查会话与历史", async () => {
-      const result = await request(() => bridge.apiPost("action", { action: "inspect_session", scope: currentScope() }), "会话检查完成；没有调用模型或发送消息");
-      if (result !== false) {
-        snapshot.session_status = [...rows("session_status").filter((row) => row.umo !== result.umo), clone(result)];
-        showStatus(result);
-      }
-    }, "secondary", true), debugLink));
-    if (number.includes("_")) box.append(el("p", "session-line", "已有配置包含群成员会话标识；不改目标时保留该标识。聊天记录和人格判断仍使用真实场合。"));
-    holder.append(box);
-  };
-  (settings.sessions || []).forEach(add);
-  form.append(card("聊天对象白名单", "每次按权重随机抽取不同对象；权重越大越容易抽中。人格不匹配的场合不会接入。", append(el("div", "stack"), holder, button("添加聊天对象", () => { add(); dirty = true; }, "secondary"))));
   const f = (label, key, options, fallback) => field(label, `social.${key}`, valueAt(settings, `social.${key}`, fallback), options);
-  form.append(card("发送限制与群聊插话", "计划聊天共用发送限制。群聊插话另受宿主配置与插话间隔约束。", append(el("div", "form-grid"), f("每次抽选对象数", "target_count", { type: "number", min: 1, max: 20 }, 1), f("同对象冷却（分钟）", "cooldown_minutes", { type: "number", min: 0, max: 10080 }, 60), f("每日发送上限", "daily_limit", { type: "number", min: 0, max: 1000 }, 5), f("群聊插话间隔（分钟）", "interjection_interval_minutes", { type: "number", min: 1, max: 1440 }, 30), f("免打扰开始", "quiet_start", { type: "time" }, "23:00"), f("免打扰结束", "quiet_end", { type: "time" }, "08:00"))));
-  form.addEventListener("submit", (event) => {
-    event.preventDefault(); const next = clone(settings);
-    next.social = { ...next.social, ...readFields(form).social };
-    next.sessions = entries.map((entry) => {
-      const v = readFields(entry.controls); const unchanged = v.connection === entry.connection && v.type === entry.type && v.number === entry.numberValue;
-      return { ...entry.original, umo: unchanged && entry.originalUMO ? entry.originalUMO : `${v.connection}:${v.type}:${v.number.trim()}`, enabled: entry.enabledField.querySelector("input").checked, weight: v.weight };
-    });
-    if (entries.some((entry) => !/^\d+$/.test(readFields(entry.controls).number))) { notice("群号 / QQ 号只填写数字。", true); return; }
-    if (new Set(next.sessions.map((row) => row.umo)).size !== next.sessions.length) { notice("聊天对象重复，请合并重复白名单。", true); return; }
-    saveSettings(next);
+  if (tab === "deliveries") return compactRecords("deliveries", byRecordScope("deliveries", rows("deliveries")), { filter: recordScopeFilter("deliveries"), title: (row) => `${scopeLabel(row.umo || row.target || row.scope)} · ${recordTitle(row)}` });
+  if (tab === "reply") {
+    const form = settingsForm("保存回复与插话设置", "群聊回复要求只用于普通群聊；模块开关统一在系统与数据管理。");
+    const group = field("本轮群聊回复要求", "reply.group_prompt", settings.reply?.group_prompt ?? snapshot.reply_defaults?.group_prompt ?? "", { type: "textarea", rows: 5 }); group.querySelector("textarea").maxLength = 8000;
+    const reset = button("恢复极短默认文案", () => { const input = group.querySelector("textarea"); input.value = snapshot.reply_defaults?.group_prompt || ""; input.dispatchEvent(new Event("input", { bubbles: true })); notice("已填入默认文案，保存后生效"); }, "secondary");
+    form.querySelector(".section-toolbar").append(reset);
+    form.append(group, f("群聊插话间隔（分钟）", "interjection_interval_minutes", { type: "number", min: 1, max: 1440 }, 30),
+      el("p", "hint", "默认在本轮 user 最后，作为独立指令；位置可调整，留空不注入。"), linkButton("调整上下文位置", "context?tab=layout"), linkButton("回复／插话模块开关", "system?tab=modules"));
+    form.id = "group-reply-settings"; return finishForm(form, "chat.reply");
+  }
+  if (tab === "limits") {
+    const form = settingsForm("保存发送限制", "应用于实际日程主动聊天；保存不发送消息。");
+    form.append(append(el("div", "form-grid"), f("每次抽选对象数", "target_count", { type: "number", min: 1, max: 20 }, 1), f("同对象冷却（分钟）", "cooldown_minutes", { type: "number", min: 0, max: 10080 }, 60), f("每日发送上限", "daily_limit", { type: "number", min: 0, max: 1000 }, 5), f("免打扰开始", "quiet_start", { type: "time" }, "23:00"), f("免打扰结束", "quiet_end", { type: "time" }, "08:00")));
+    return finishForm(form, "chat.limits");
+  }
+  return arrayEditor("targets", (settings.sessions || []).map((row) => typeof row === "string" ? { umo: row } : row), {
+    selectLabel: "选择聊天对象", saveLabel: "保存聊天白名单", base: whitelistBase, fields: whitelistFields, serialize: serializeWhitelist,
+    label: (row, index) => `${index + 1} · ${row.type === "GroupMessage" ? "群聊" : "私聊"} ${row.number || "待填写"}`,
+    create: () => ({ umo: "", enabled: true, weight: 1 }), payload: (sessions) => ({ sessions }),
+    validate: (sessions) => { if (sessions.some((row) => !/^[^:]+:(GroupMessage|FriendMessage):(?:\d+_)?\d+$/.test(row.umo))) throw new Error("群号 / QQ 号只填写数字，并选择有效的 QQ 连接。"); if (new Set(sessions.map((row) => row.umo)).size !== sessions.length) throw new Error("聊天对象重复，请合并重复白名单。"); },
   });
-  form.append(card("实际主动消息", "只读历史；发送成功不代表对方已经回应。", recordList(rows("deliveries").map((item) => ({ ...item, title: scopeLabel(item.umo || item.target || item.scope) })))));
-  return form;
 }
 
 function editActivity(record) {
@@ -524,7 +643,7 @@ function editActivity(record) {
   ], (patch) => action("update_activity", { id: record.id, patch }), "保存活动调整");
 }
 function detailActivity(record) {
-  if (dirty) { notice("请先保存日程设置，再细化活动。", true); return; }
+  if (formDrafts.has("schedule.settings")) { notice("请先保存日程设置，再细化活动。", true); return; }
   const regenerate = Boolean(record.detailed);
   openEditor(regenerate ? "重新细化活动" : "细化活动", [
     el("p", "hint", "将真实调用模型，结合活动、相关记忆、今日安排、当前想法和发送限制，决定细节与是否安排新闻、搜索、主动聊天。可以全部不安排。本次调用不执行来源或发送消息；采用的未来行动将照常执行。"),
@@ -591,33 +710,31 @@ function scheduleSummary(date) {
   }
   return box;
 }
-function renderSchedule() {
+function renderSchedule(tab = "timeline") {
   const root = el("div", "stack"); const settings = snapshot.settings || {};
   const form = settingsForm("保存日程设置", "每天自动生成活动大纲，临近活动时再细化并决定行动。保存设置不会调用模型。");
   const f = (label, key, options, fallback) => field(label, `life.${key}`, valueAt(settings, `life.${key}`, fallback), options);
   const numberOptions = { type: "number", min: 0, max: 48, step: 1 };
   form.append(card("大纲生成参数", "生成时间和活动数修改默认次日生效；保存后可用「重新生成日程」立即用于今天。大纲只安排活动，不分配行动数量。", append(el("div", "form-grid"), f("每日生成时间", "daily_plan_time", { type: "time", required: true }, "06:00"), f("每天活动数", "activity_count", { ...numberOptions, min: 1 }, 10), f("提前细化活动（分钟）", "detail_minutes", { type: "number", min: 0, max: 120 }, 10))));
   form.append(append(el("div", "actions"), linkButton("内在状态", "drives"), linkButton("聊天对象与白名单", "whitelist")), el("p", "hint", "每个活动每类最多一次，可以多类同时存在或全部不安排。细化只收到内在状态对应的当前想法；日程行动实际开始后扣值，失败不退还。一轮主动聊天可抽选多个不同对象，各对象仍受白名单、冷却、免打扰和发送上限约束。"));
-  form.addEventListener("submit", (event) => {
-    event.preventDefault(); const next = applyFields(clone(settings), form);
-    saveSettings(next);
-  });
-  root.append(form);
+  if (tab === "settings") return finishForm(form, "schedule.settings");
   const date = el("input"); date.type = "date"; date.value = scheduleDate || dayNow(); date.setAttribute("aria-label", "日程日期"); date.style.width = "auto";
   date.addEventListener("change", () => { scheduleDate = date.value; render(); });
   const activities = orderedActivities(date.value);
   const editable = snapshot.day_regenerating ? [] : activities.filter((item) => item.status === "planned" && new Date(item.start).getTime() > Date.now());
   const batch = () => openEditor("批量调整未来活动", [el("p", "hint", "仅修改列出的未开始活动大纲，活动总数保持。大纲改变后，旧细化归档并作废，取消尚未执行的行动决定。保存不调用模型、不发送消息。"), field("活动调整 JSON", "json", stringify({ updates: editable.map((item) => ({ id: item.id, changes: { title: item.title, start: item.start, end: item.end, content: item.content || item.description || "", location: item.location || "", sleep_state: item.sleep_state || "unknown" } })) }), { type: "textarea", rows: 18 })], (values) => { try { return action("update_activities", JSON.parse(values.json)); } catch (error) { notice(`JSON 格式错误：${error.message}`, true); return false; } }, "保存未来活动调整");
   const regenerate = button("重新生成日程", () => {
-    if (dirty) { notice("请先保存日程设置，再重新生成日程。", true); return; }
+    if (formDrafts.has("schedule.settings")) { notice("请先保存日程设置，再重新生成日程。", true); return; }
     confirmAction("重新生成今天的日程", "将真实调用模型，使用最新已保存参数和当前模板替换今天整份活动大纲。旧日程、细化和执行记录归档保留，失败时保留原日程。新活动在细化后决定未来行动；内在状态、白名单、发送次数和冷却限制不重置，过期行动不补做。", () => action("regenerate_day", { date: date.value }), false, "调用模型并重新生成");
   }, "primary");
   regenerate.dataset.disabled = String(date.value !== dayNow() || Boolean(snapshot.day_regenerating));
   const batchButton = button("批量调整未来活动", batch, "secondary");
   batchButton.dataset.disabled = String(Boolean(snapshot.day_regenerating) || !editable.length);
   const toolbar = append(el("div", "section-toolbar"), date, append(el("div", "actions"), regenerate, batchButton));
-  const list = recordList(activities, { timeline: true, emptyTitle: "这一天还没有安排", emptyDescription: "到生成时间自动生成；也可手动重新生成今天的日程。", body: activityDetail, actions: (record) => editable.includes(record) ? append(el("div", "actions"), button("编辑", () => editActivity(record), "secondary", true), button(record.detailed ? "重新细化" : "细化活动", () => detailActivity(record), "secondary", true)) : null });
+  const list = recordList(activities, { timeline: true, emptyTitle: "这一天还没有安排", emptyDescription: "到生成时间自动生成；也可手动重新生成今天的日程。", body: (record) => append(el("details"), el("summary", "", "细化与执行详情"), activityDetail(record)), actions: (record) => editable.includes(record) ? append(el("div", "actions"), button("编辑", () => editActivity(record), "secondary", true), button(record.detailed ? "重新细化" : "细化活动", () => detailActivity(record), "secondary", true)) : null });
   root.append(card("日程与实际行动", "先生成大纲，再细化活动；细化决定是否安排新闻、搜索、主动聊天。按新闻 → 搜索 → 聊天执行，每项行动只执行一次。", append(el("div", "stack"), toolbar, snapshot.day_regenerating ? el("p", "hint", "正在重新生成日程：等待已有执行结束并生成新计划，期间暂停日程推进和活动编辑。完成后刷新查看结果。") : el("p", "muted", "重新生成日程保留内在状态。统计包含所选日期内被替换的旧版本实际行动；实际发送继续遵守白名单与发送限制。"), scheduleSummary(date.value), list)));
+  if (tab === "timeline") return root;
+  root.replaceChildren(date);
   const day = rows("life_days").find((item) => (item.date || item.day || item.id?.slice(0, 10)) === date.value && (!item.scope || item.scope === "global"));
   const original = day ? append(el("div", "stack"), details(day.parameters || day.params || {}, "当日采用的生成参数"), details(day.full_request || day.request || {}, "生成输入快照（非 API 原文）"), details(day.raw_json ?? day.raw_response ?? "升级前日程未记录模型生成文本", "模型生成的日程文本"), details(day.adopted_activities || day.adopted || activities, "校验后采用的日程"), jsonButtons(day, `living-world-schedule-${date.value}.json`)) : empty("尚无正式生成记录", "生成参数、输入快照和模型生成文本会随正式日程长期保存，不受调试保留次数限制。");
   const debugId = day?.full_request?._debug_record_id;
@@ -637,7 +754,6 @@ function renderSchedule() {
     archives.append(entry);
   }
   root.append(card("正式日程生成档案", "保存当前日程和已归档历史版本。实际 API 请求与返回请到调试记录查看；调试记录过期后原文可能已清理。", append(el("div", "stack"), original, archives), archiveLink));
-  root.append(card("当前生活状态", "调整状态只保存生活数据，不触发模型调用或真实消息。精力与寂寞值请到「内在状态」调整。", details(snapshot.state || {}, "查看状态数据"), button("调整当前状态", () => openEditor("调整当前状态", [field("心情", "mood", snapshot.state?.mood || "平静"), field("当前作息", "routine", snapshot.state?.routine || "", { type: "textarea" })], (patch) => action("update_state", { patch })), "secondary", true)));
   return root;
 }
 
@@ -682,25 +798,17 @@ function renderDrives() {
   const root = el("div", "stack drives-page");
   if (!snapshot.drives?.meters) return append(root, empty("内在状态暂不可用", "请确认插件已更新并刷新页面。"));
   root.append(driveStatusCards());
-  const toolbar = append(el("div", "section-toolbar"), el("p", "muted", "两项数值由程序管理；AI 只在细化时看到阶段文案，不会收到数值和计算规则。"), linkButton("模块启停设置", "settings"));
+  const toolbar = append(el("div", "section-toolbar"), el("p", "muted", "两项数值由程序管理；AI 只在细化时看到阶段文案，不会收到数值和计算规则。"), linkButton("模块启停设置", "system?tab=modules"));
   root.append(toolbar);
-  const tabs = el("div", "debug-tabs drive-tabs"); tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "内在状态设置");
-  for (const [id, name] of Object.entries(driveNames)) {
-    const tab = button(name, () => { selectedDrive = id; render(); $("#drive-tab-" + id)?.focus(); });
-    tab.id = `drive-tab-${id}`; tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(id === selectedDrive)); tab.setAttribute("aria-controls", "drive-editor"); tab.tabIndex = id === selectedDrive ? 0 : -1;
-    tab.addEventListener("keydown", (event) => {
-      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-      event.preventDefault(); selectedDrive = event.key === "Home" ? "loneliness" : event.key === "End" ? "energy" : id === "loneliness" ? "energy" : "loneliness"; render(); $("#drive-tab-" + selectedDrive)?.focus();
-    }); tabs.append(tab);
-  }
-  root.append(tabs);
+  selections.set("drive_meter", selectedDrive);
+  root.append(chooser("选择内在状态", "drive_meter", Object.entries(driveNames).map(([value, label]) => ({ value, label })), selectedDrive, (value) => { selectedDrive = value; render(); }));
   const id = selectedDrive; const draft = driveDraft(id);
-  const panel = el("div", "stack drive-editor"); panel.id = "drive-editor"; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", `drive-tab-${id}`);
-  const markDraft = () => { draft.configDirty = true; dirty = true; };
+  const panel = el("div", "stack drive-editor"); panel.id = "drive-editor"; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-label", driveNames[id]);
+  const markDraft = () => { draft.configDirty = true; };
   const currentForm = el("form", "drive-current-form");
   const current = field(`${driveNames[id]}当前值`, "drive.value", draft.value, { type: "number", min: 0, max: 100, step: "any", required: true });
   const currentInput = current.querySelector("input");
-  currentInput.addEventListener("input", () => { draft.value = currentInput.value; draft.valueDirty = true; dirty = true; });
+  currentInput.addEventListener("input", () => { draft.value = currentInput.value; draft.valueDirty = true; });
   const apply = button("应用当前值", () => {}, "primary"); apply.type = "submit";
   currentForm.addEventListener("submit", (event) => {
     event.preventDefault(); const submitted = currentInput.value;
@@ -759,7 +867,7 @@ function renderDrives() {
   renderStages();
   configForm.append(heading("阶段与想法", "修改结束值会联动下一段，最后一段固定到 100。＋ 拆分；删除并入低一档，最低档并入下一档。“必须聊天”仅为倾向，AI 自行判断。"), stages);
   const save = button("保存设置", () => {}, "primary"); save.type = "submit";
-  configForm.append(append(el("div", "form-actions"), save));
+  configForm.prepend(append(el("div", "form-actions"), save));
   configForm.addEventListener("submit", (event) => {
     event.preventDefault(); const before = stringify(draft.config); const config = clone(draft.config);
     config.growth_per_hour = Number(config.growth_per_hour); for (const key of Object.keys(config.costs)) config.costs[key] = Number(config.costs[key]);
@@ -767,7 +875,7 @@ function renderDrives() {
   });
   const configCard = card("增长、消耗与阶段", "参数单独保存，切换和刷新保留草稿。", configForm);
   configCard.classList.add("drive-config-card"); panel.append(configCard);
-  root.append(panel); dirty = hasDriveDrafts();
+  root.append(panel);
   return root;
 }
 
@@ -785,49 +893,32 @@ function editMemory(record = {}) {
     return action("update_memory", { id: record.id, patch: { ...rest, text } });
   });
 }
-function renderMemory() {
-  const root = el("div", "stack");
-  const limits = settingsForm("保存上下文用量", "从下一次组装上下文生效，不调用模型、不删除记忆。已发出的请求和历史调试保持原样。");
-  limits.id = "memory-context-settings";
-  limits.addEventListener("submit", (event) => { event.preventDefault(); saveSettings(applyFields(clone(snapshot.settings), limits)); });
-  const memorySettings = snapshot.settings?.memory || {};
-  limits.append(card("上下文用量", "用于聊天、日程生成、调整、细化及自动试跑资料中的相关记忆。日记／笔记占总条数，不额外叠加；实际命中可能更少。", append(el("div", "form-grid memory-context-fields"),
-    field("相关记忆总条数", "memory.context_limit", memorySettings.context_limit ?? 10, { type: "number", min: 0, max: 50, step: 1, hint: "默认 10，范围 0—50；0 表示不注入相关记忆和人物认知。" }),
-    field("其中日记／笔记最多", "memory.journal_limit", memorySettings.journal_limit ?? 2, { type: "number", min: 0, max: 50, step: 1, hint: "默认 2，范围 0—50；0 表示不注入日记／笔记简报。" }),
-    field("每份简报最多字符", "memory.brief_max_chars", memorySettings.brief_max_chars ?? 200, { type: "number", min: 50, max: 1000, step: 1, hint: "默认 200，范围 50—1000；含标点。降低后立即限制旧简报的注入长度。" })
-  )));
-  root.append(limits, el("p", "hint", "这里限制相关记忆区；日程、近期经历、见闻和宿主聊天历史是其他资料区，不计入这些条数。日记／笔记全文仍可在「新闻、搜索与日记」查看；旧记录没有简报时不注入，可在那里点击「生成简报」。含虚构日常的日记简报仅在对应角色日期召回。"));
-  const search = el("input"); search.type = "search"; search.placeholder = "搜索内容、人物或场合"; search.value = memorySearch; search.setAttribute("aria-label", "搜索记忆");
-  const kindSelect = field("分类", "filter-kind", memoryKind, { options: [{ value: "", label: "全部分类" }, ...Object.entries(kindNames).filter(([key]) => ["knowledge", "event", "skill", "emotional", "profile"].includes(key)).map(([value, label]) => ({ value, label }))] }).querySelector("select"); kindSelect.setAttribute("aria-label", "筛选记忆分类");
-  const scopeSelect = field("场合", "filter-scope", memoryScope, { options: [{ value: "", label: "全部场合" }, ...scopeOptions()] }).querySelector("select"); scopeSelect.setAttribute("aria-label", "筛选记忆场合");
-  const listContainer = el("div");
-  function fill() {
-    const filtered = rows("memories").filter((row) => (!memoryKind || (memoryKind === "profile" ? row.profile : row.kind === memoryKind)) && (!memoryScope || (row.scope || "global") === memoryScope) && stringify(row).toLocaleLowerCase().includes(memorySearch.toLocaleLowerCase()));
-    listContainer.replaceChildren(recordList(filtered, {
-      head: (record) => {
-        const check = el("input"); check.type = "checkbox"; check.checked = selectedMemories.has(record.id); check.setAttribute("aria-label", `选择记忆 ${recordTitle(record)}`);
-        check.addEventListener("change", () => { if (check.checked) selectedMemories.add(record.id); else selectedMemories.delete(record.id); }); return check;
-      },
-      actions: (record) => append(el("div", "actions"), button("编辑", () => editMemory(record), "secondary", true), button("删除", () => confirmAction("删除这条记忆", "删除后将不再参与检索，可能调用 AI 核对未来日程；不发送 QQ 消息，不删除其他记忆或 AstrBot 原始聊天。", () => action("delete_memory", { id: record.id }), true, "删除记忆"), "danger", true)),
-    }));
+function renderMemory(tab = "records") {
+  if (tab === "journals") return renderJournal();
+  if (tab === "usage") {
+    const form = settingsForm("保存上下文用量", "下一次组装时生效，不调用模型、不删除记忆。"); form.id = "memory-context-settings";
+    const data = snapshot.settings.memory || {};
+    form.append(append(el("div", "form-grid memory-context-fields"), field("相关记忆总条数", "memory.context_limit", data.context_limit ?? 10, { type: "number", min: 0, max: 50, required: true, hint: "默认 10；0 表示不召回记忆。" }),
+      field("其中日记／笔记最多条数", "memory.journal_limit", data.journal_limit ?? 2, { type: "number", min: 0, max: 50, required: true, hint: "默认 2，计入总条数；0 表示不召回日记／笔记简报。" }),
+      field("简报最长字符", "memory.brief_max_chars", data.brief_max_chars ?? 200, { type: "number", min: 50, max: 1000, required: true, hint: "默认 200，只限制简报，完整正文仍保留。" })));
+    return finishForm(form, "memory.usage");
   }
-  search.addEventListener("input", () => { memorySearch = search.value; fill(); });
-  kindSelect.addEventListener("change", () => { memoryKind = kindSelect.value; fill(); });
-  scopeSelect.addEventListener("change", () => { memoryScope = scopeSelect.value; fill(); });
+  const root = el("div", "stack");
   const merge = () => {
     const chosen = rows("memories").filter((row) => selectedMemories.has(row.id));
     if (chosen.length < 2) { notice("请先勾选至少两条记忆。", true); return; }
     if (new Set(chosen.map((row) => row.scope || "global")).size > 1) { notice("只能合并同一场合的记忆，避免把私人内容带到其他场合。", true); return; }
     if (chosen.some((row) => row.profile && row.scope === "global")) { notice("全局人物画像来自可核对的谈话证据，不能用手工合并的内容替换。", true); return; }
-    openEditor("合并选中的记忆", [el("p", "muted", `将 ${chosen.length} 条同场合记忆合并，可能调用 AI 核对未来日程，不发送 QQ 消息；请检查合并后的内容。`), field("合并内容", "content", chosen.map((row) => row.content || row.text || "").join("\n"), { type: "textarea", required: true })], async (values) => {
-      const result = await action("merge_memories", { ids: chosen.map((row) => row.id), content: values.content });
-      if (result !== false) selectedMemories.clear(); return result;
-    }, "合并记忆");
+    openEditor("合并选中的记忆", [el("p", "hint", "可能调用 AI 核对未来日程，不发送消息；只合并同场合资料。"), field("合并内容", "content", chosen.map((row) => row.content || row.text || "").join("\n"), { type: "textarea", required: true })], async (values) => { const result = await action("merge_memories", { ids: chosen.map((row) => row.id), content: values.content }); if (result !== false) selectedMemories.clear(); return result; }, "合并记忆");
   };
-  fill();
-  const actions = append(el("div", "actions"), button("合并所选", merge, "secondary", true), button("添加记忆", () => editMemory(), "primary", true));
-  root.append(card("记忆与人物认知", "认识同一个人，谈话分场合。画像、共同回忆与自身体会可按分类查看。", append(el("div", "stack"), append(el("div", "filterbar"), search, kindSelect, scopeSelect), listContainer), actions));
-  root.append(el("p", "hint", "此页供管理员查看全部场合。角色实际检索仍按当前会话过滤；私人记忆衍生的日程、日记与笔记继续保留来源场合。"));
+  root.append(append(el("div", "actions"), button("添加记忆", () => editMemory(), "primary"), button("合并所选", merge, "secondary")));
+  const filters = append(el("div", "compact-filter"), recordScopeFilter("memories"), chooser("记忆分类", "memory.kind", [{ value: "", label: "全部分类" }, ...["knowledge", "event", "skill", "emotional", "profile"].map((value) => ({ value, label: kindNames[value] }))]));
+  const kind = selections.get("memory.kind");
+  const data = byRecordScope("memories", rows("memories")).filter((row) => !kind || (kind === "profile" ? row.profile : row.kind === kind));
+  root.append(filters, compactRecords("memories", data, {
+    head: (record) => { const check = el("input"); check.type = "checkbox"; check.checked = selectedMemories.has(record.id); check.setAttribute("aria-label", `选择记忆 ${recordTitle(record)}`); check.addEventListener("change", () => { if (check.checked) selectedMemories.add(record.id); else selectedMemories.delete(record.id); }); return check; },
+    actions: (record) => append(el("div", "actions"), button("编辑", () => editMemory(record), "secondary", true), button("删除", () => confirmAction("删除这条记忆", "删除后不再召回，可能调用 AI 核对未来日程；不发送 QQ，不删除宿主历史。", () => action("delete_memory", { id: record.id }), true, "删除记忆"), "danger", true)),
+  }));
   return root;
 }
 
@@ -841,57 +932,63 @@ function realSourceAction(source, label, queryLabel = "", placeholder = "") {
 }
 function renderJournal() {
   const root = el("div", "stack");
-  append(root, append(el("div", "grid"), card("新闻阅读", "候选内容 → 按兴趣选择 → 阅读 → 感想。", observationList(rows("observations").filter((item) => observationKind(item, "news") || observationKind(item, "daily_digest")))), card("主动搜索记录", "活动和记忆中的兴趣成为查询，结果形成见闻笔记。", observationList(rows("observations").filter((item) => observationKind(item, "search"))))));
-  const generate = () => openEditor("生成日记或笔记", [el("p", "hint", "先调用模型生成并保存正文，再调用一次模型提炼上下文简报，不发送消息。简报失败保留正文，可单独重试。"), field("日期", "date", dayNow(), { type: "date", required: true }), field("类型", "kind", "journal", { options: [{ value: "journal", label: "生活日记" }, { value: "note", label: "见闻笔记" }] }), field("所属场合", "scope", "global", { options: scopeOptions(), hint: "只使用该场合允许回顾的内容。" })], (values) => action("generate_journal", values), "调用 AI 并保存记录");
-  const entries = el("div", "stack"); entries.id = "journal-entries";
-  for (const record of rows("entries")) {
-    const preview = record.summary ? el("p", "record-body", record.summary) : el("p", "hint", record.summary_status === "failed" ? "简报生成失败，正文已保留；当前不注入这篇全文，可点击生成简报重试。" : "尚无简报，当前不注入这篇全文。点击生成简报后可参与召回。");
-    const actions = append(el("div", "actions"), button(record.summary ? "重新生成简报" : "生成简报", () => confirmAction("生成上下文简报", "调用一次模型提炼这篇原文并保存简报，不改正文、不发送消息。失败保留已有简报；适用记忆开关、用量和场合限制。", () => action("summarize_journal", { id: record.id, regenerate: Boolean(record.summary) }), false, "调用 AI 生成简报"), "secondary", true), button("删除记录", () => confirmAction("删除这篇记录", "删除选中的日记或笔记及其派生记忆，不删除原始见闻，不调用模型。", () => action("delete_entry", { id: record.id }), true, "删除记录"), "danger", true));
-    entries.append(append(el("article", "record"), append(el("div", "record-head"), append(el("div"), el("h3", "record-title", `${record.day || ""} ${kindNames[record.kind] || "日记"}`), el("p", "hint", `所属场合：${scopeLabel(record.scope)}`)), actions), preview, append(el("details"), el("summary", "", "查看完整正文"), el("div", "record-body", record.text || ""))));
+  const generate = () => openEditor("生成日记或笔记", [el("p", "hint", "先生成正文，再调用模型提炼简报，不发送 QQ。简报失败保留正文。"), field("日期", "date", dayNow(), { type: "date", required: true }), field("类型", "kind", "journal", { options: [{ value: "journal", label: "生活日记" }, { value: "note", label: "见闻笔记" }] }), field("所属场合", "scope", "global", { options: scopeOptions() })], (values) => action("generate_journal", values), "调用 AI 并保存记录");
+  const kind = chooser("类型", "journals.kind", [{ value: "", label: "全部类型" }, { value: "journal", label: "日记" }, { value: "notes", label: "笔记" }]);
+  root.append(append(el("div", "actions"), button("生成日记或笔记", generate, "primary")), append(el("div", "compact-filter"), recordScopeFilter("journals"), kind));
+  const records = byRecordScope("journals", rows("entries")).filter((row) => !selections.get("journals.kind") || row.kind === selections.get("journals.kind"));
+  const body = (record) => append(el("div", "stack"), el("p", "hint", `所属场合：${scopeLabel(record.scope)}`),
+    el("p", record.summary ? "record-body" : "hint", record.summary || (record.summary_status === "failed" ? "简报生成失败，正文已保留；当前不注入全文。" : "尚无简报，当前不注入全文。")),
+    append(el("details"), el("summary", "", "查看完整正文"), el("div", "record-body", record.text || "")));
+  root.append(compactRecords("journals", records, { title: (row) => `${row.day || "未记录日期"} · ${kindNames[row.kind] || "日记"} · ${row.summary ? "已有简报" : "尚无简报"}`, body,
+    actions: (record) => append(el("div", "actions"), button(record.summary ? "重新生成简报" : "生成简报", () => confirmAction("生成上下文简报", "调用一次模型提炼原文并保存简报，不改正文、不发送消息；失败保留已有简报。", () => action("summarize_journal", { id: record.id, regenerate: Boolean(record.summary) }), false, "调用 AI 生成简报"), "secondary", true), button("删除", () => confirmAction("删除这篇记录", "删除日记或笔记及派生记忆，不删除原始见闻，不调用模型。", () => action("delete_entry", { id: record.id }), true, "删除记录"), "danger", true)),
+  })); root.id = "journal-entries"; return root;
+}
+
+const sourceNames = { news: "新闻", search: "搜索", weather: "天气", bilibili: "B站", daily_digest: "AI日报" };
+function renderSources(tab = "settings") {
+  const root = el("div", "stack"), settings = snapshot.settings || {};
+  if (tab === "runs") return compactRecords("digest-runs", rows("daily_digest_runs"));
+  const options = Object.entries(sourceNames).map(([value, label]) => ({ value, label }));
+  const type = chooser("来源类型", "source." + tab, tab === "records" ? [{ value: "", label: "全部来源" }, ...options] : options, tab === "records" ? "" : "news"); root.append(type);
+  const source = selections.get("source." + tab);
+  if (tab === "records") {
+    root.append(recordScopeFilter("observations"), compactRecords("observations", byRecordScope("observations", rows("observations")).filter((row) => !source || observationKind(row, source)), { body: (row) => observationList([row]) })); return root;
   }
-  if (!rows("entries").length) entries.append(empty());
-  append(root, append(el("div", "grid"), card("日记与见闻笔记", "正文与简报分别保存；注入条数和简报长度在「记忆与人物 → 上下文用量」设置。", entries, button("生成日记或笔记", generate, "secondary", true)), card("天气与 B 站见闻", "搜索、已观看与历史记忆分别标明。", observationList(rows("observations").filter((item) => !observationKind(item, "news") && !observationKind(item, "search") && !observationKind(item, "daily_digest"))))));
-  const manual = append(el("details", "card"), el("summary", "", "手动读取来源（真实调用并保存见闻）"), append(el("div", "grid manual-sources"), card("新闻", "立即阅读一次，与日程执行记录分开。", realSourceAction("news", "读取新闻并写感想")), card("网页搜索", "沿用 AstrBot 网页搜索设置。", realSourceAction("search", "搜索并保存见闻", "搜索内容", "留空由 AI 根据活动选择主题")), card("和风天气", "读取已配置地点的天气。", realSourceAction("weather", "读取天气并保存")), card("B 站搜索", "搜索结果不会记成已经观看。", realSourceAction("bilibili", "搜索 B 站视频", "视频关键词")), card("观看视频", "调用 Bilibili AI Bot 的指定视频观看能力。", realSourceAction("bilibili_watch", "观看指定视频并保存", "视频 BV 号", "BV…")), card("公开视频记忆", "读取历史见闻，不记成今天新看过。", realSourceAction("bilibili_recent", "读取公开视频记忆"))));
-  root.append(manual);
-  return root;
+  if (tab === "manual") {
+    if (source === "daily_digest") return append(root, el("p", "hint", "AI日报按各自定时点自动读取，每路每天一次。"), linkButton("查看日报执行", "sources?tab=runs"));
+    let operation = source;
+    if (source === "bilibili") {
+      root.append(chooser("读取操作", "bilibili.operation", [{ value: "bilibili", label: "搜索视频" }, { value: "bilibili_watch", label: "观看指定视频" }, { value: "bilibili_recent", label: "读取公开视频记忆" }])); operation = selections.get("bilibili.operation");
+    }
+    const labels = { news: ["读取新闻并写感想"], search: ["搜索并保存见闻", "搜索内容", "留空由 AI 根据活动选择主题"], weather: ["读取天气并保存"], bilibili: ["搜索 B 站视频", "视频关键词"], bilibili_watch: ["观看指定视频并保存", "视频 BV 号", "BV…"], bilibili_recent: ["读取公开视频记忆"] };
+    root.append(bindDraft(realSourceAction(operation, ...labels[operation]), "manual." + operation)); return root;
+  }
+  const f = (label, name, options = {}, fallback = "") => field(label, name, valueAt(settings, name, fallback), options);
+  if (source === "news" || source === "daily_digest") {
+    const news = source === "news", key = "source-array." + source;
+    const records = news ? settings.news?.sources || [] : settings.daily_digest?.sources || [];
+    const fields = (row) => append(el("div", "form-grid"), field(news ? "来源名称" : "日报名称", "name", row.name, { required: true }),
+      ...(news ? [field("RSS / Atom 地址", "url", row.url, { type: "url", required: true })] : [field("B 站作者 UID", "uid", row.uid, { required: true }), field("每日读取时间", "time", row.time || "12:00", { type: "time", required: true }), field("检索关键词", "keywords", Array.isArray(row.keywords) ? row.keywords.join(" ") : row.keywords || "", { type: "textarea", rows: 2 })]),
+      checkField(news ? "启用这个新闻源" : "启用这个日报", "enabled", row.enabled !== false));
+    root.append(arrayEditor(key, records, { selectLabel: news ? "选择新闻源" : "选择日报作者", saveLabel: news ? "保存新闻源设置" : "保存日报设置", fields,
+      label: (row, index) => row.name || `新来源 ${index + 1}`, create: () => news ? ({ id: "custom-" + newDraftId(), name: "", url: "", enabled: true }) : ({ id: "custom-" + newDraftId(), name: "", uid: "", keywords: "日报", time: "12:00", enabled: true }),
+      restore: news ? "restore_news_sources" : "restore_digest_sources",
+      extra: news ? () => f("每次候选新闻数量", "news.limit", { type: "number", min: 1, max: 30 }, 5) : null,
+      payload: (sources, extra) => news ? { news: { limit: extra.news?.limit ?? settings.news?.limit ?? 5, sources } } : { daily_digest: { sources } },
+    })); return root;
+  }
+  if (source === "search") return append(root, el("p", "hint", "自动沿用 AstrBot 的网页搜索服务与凭据。请到 AstrBot 网页搜索设置中配置。"));
+  const form = settingsForm("保存来源设置", "只保存当前来源设置，不执行阅读。");
+  if (source === "weather") {
+    form.append(append(el("div", "form-grid"), f("地点 / 和风 Location ID", "weather.location"), f("和风 API Host", "weather.api_host", { placeholder: "xxx.re.qweatherapi.com" }), f("认证方式", "weather.auth_mode", { options: [{ value: "api_key", label: "API Key" }, { value: "jwt", label: "JWT" }] }, "api_key"), f("认证凭据", "weather.credential", { type: "password" })));
+    form.querySelector(".section-toolbar").append(button("测试天气连接", () => { if (formDrafts.has("source.weather")) { notice("请先保存天气设置，再测试连接。", true); return; } action("test_weather"); }, "secondary"));
+  } else {
+    const dependency = snapshot.bilibili_dependency || {};
+    form.append(el("p", "hint", dependency.text || "固定依赖 astrbot_plugin_bilibili_ai_bot 的公开记忆 API v3。"), f("近期公开视频记忆数量", "bilibili.recent_limit", { type: "number", min: 1, max: 30 }, 5));
+  }
+  root.append(finishForm(form, "source." + source)); return root;
 }
-function renderSources() {
-  const settings = snapshot.settings || {};
-  const form = settingsForm("保存来源设置", "保存只修改来源配置，不执行阅读。天气连接测试会真实访问和风天气，使用下方已保存的设置。");
-  const f = (label, path, options = {}, fallback = "") => field(label, path, valueAt(settings, path, fallback), options);
-  const weather = append(el("div", "form-grid"), f("地点 / 和风 Location ID", "weather.location", { placeholder: "北京 / 101010100" }), f("和风 API Host", "weather.api_host", { placeholder: "xxx.re.qweatherapi.com", hint: "填写和风控制台提供的 API Host。" }), f("认证方式", "weather.auth_mode", { options: [{ value: "api_key", label: "API Key" }, { value: "jwt", label: "JWT" }] }, "api_key"), f("认证凭据", "weather.credential", { type: "password", hint: "API Key 或生成后的 JWT；用于和风请求，不写入模型提示词。" }));
-  form.append(card("和风天气", "固定使用和风天气。连接测试不生成角色感想、不发送消息。", weather, button("测试天气连接", () => {
-    if (dirty) { notice("请先保存来源设置，再测试天气连接。", true); return; }
-    action("test_weather");
-  }, "secondary", true)));
-  const biliStatus = rows("modules").find((item) => item.id === "bilibili");
-  const dependency = snapshot.bilibili_dependency || snapshot.source_status?.bilibili;
-  form.append(card("Bilibili AI Bot", "固定依赖 astrbot_plugin_bilibili_ai_bot；提供搜索、指定观看与公开视频记忆。", append(el("div", "stack"), badge(dependency?.available === true ? "ready" : dependency?.status || biliStatus?.status || "依赖状态待检测"), el("p", "muted", dependency?.text || dependency?.reason || biliStatus?.error || "缺失或停用依赖只影响 B 站与相应日报来源。"), f("近期公开视频记忆数量", "bilibili.recent_limit", { type: "number", min: 1, max: 30 }, 5), el("p", "hint", "日报会核对作者和发布日期；无法核实时明确标记，不把搜索或旧记忆当成新观看。"))));
-  form.append(card("网页搜索", "自动沿用 AstrBot 的网页搜索服务与凭据。", el("p", "muted", "请在 AstrBot 的网页搜索设置中配置服务。这里无需填写工具名称或参数名。")));
-  const newsRows = []; const newsHolder = el("div", "stack");
-  const addNews = (source = { id: `custom-${Date.now()}`, name: "", url: "", enabled: true }) => {
-    const item = el("div", "source-entry");
-    const fields = append(el("div", "form-grid"), field("来源名称", "name", source.name, { required: true }), field("RSS / Atom 地址", "url", source.url, { type: "url", required: true }), checkField("启用这个新闻源", "enabled", source.enabled !== false));
-    const entry = { source, item, fields }; newsRows.push(entry);
-    append(item, fields, button("移除这个新闻源", () => { newsRows.splice(newsRows.indexOf(entry), 1); item.remove(); dirty = true; }, "danger", true)); newsHolder.append(item);
-  };
-  (settings.news?.sources || (settings.news?.feeds || []).map((url, i) => ({ id: `legacy-${i}`, name: `已有来源 ${i + 1}`, url, enabled: true }))).forEach(addNews);
-  form.append(card("新闻源", "内置 BBC 中文、Google 新闻中文、Solidot、Hacker News、MIT Technology Review、Ars Technica，可逐项调整。", append(el("div", "stack"), newsHolder, append(el("div", "actions"), button("添加新闻源", () => { addNews(); dirty = true; }, "secondary", true), button("恢复六个默认新闻源", () => confirmAction("恢复默认新闻源", "将新闻来源列表替换为六个默认来源；已有见闻保留，不发起网络请求。", () => { dirty = false; return action("restore_news_sources"); }, false, "恢复默认来源"), "secondary", true)), f("每次候选新闻数量", "news.limit", { type: "number", min: 1, max: 30 }, 5))));
-  const digestRows = []; const digestHolder = el("div", "stack");
-  (settings.daily_digest?.sources || []).forEach((source) => {
-    const fields = append(el("div", "form-grid"), field("日报名称", "name", source.name, { required: true }), field("B 站作者 UID", "uid", source.uid, { required: true }), field("每日读取时间", "time", source.time || "12:00", { type: "time", required: true }), field("检索关键词", "keywords", Array.isArray(source.keywords) ? source.keywords.join(" ") : source.keywords || "", { type: "textarea", rows: 2, hint: "多个关键词用空格分隔。" }), checkField("启用这个日报", "enabled", source.enabled !== false));
-    digestRows.push({ source, fields }); digestHolder.append(append(el("div", "source-entry"), fields));
-  });
-  form.append(card("独立 AI 日报", "黑鸦 Heya 默认 12:00，橘鸦 Juya 默认 23:00。每天各一次，不占日程名额、不额外触发聊天，重启不集中补读。", append(el("div", "stack"), digestHolder, details(rows("daily_digest_runs"), "查看日报执行状态与跳过原因"), button("恢复两路默认 AI 日报", () => confirmAction("恢复默认 AI 日报", "恢复黑鸦 Heya 12:00 和橘鸦 Juya 23:00 的来源设置；已有阅读记录保留，不发起网络调用。", () => { dirty = false; return action("restore_digest_sources"); }, false, "恢复默认日报"), "secondary", true))));
-  form.addEventListener("submit", (event) => {
-    event.preventDefault(); const next = applyFields(clone(settings), form);
-    for (const key of ["name", "url", "enabled", "uid", "time", "keywords"]) delete next[key];
-    next.news.sources = newsRows.map((entry) => ({ ...entry.source, ...readFields(entry.fields) }));
-    next.daily_digest = { ...next.daily_digest, sources: digestRows.map((entry) => ({ ...entry.source, ...readFields(entry.fields) })) };
-    saveSettings(next);
-  });
-  return form;
-}
+
 function downloadJSON(value, filename) {
   const url = URL.createObjectURL(new Blob([stringify(value)], { type: "application/json;charset=utf-8" }));
   const link = el("a"); link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
@@ -1094,14 +1191,8 @@ function copyRecordToTrial(record) {
     for (const key of ["prompt", "system_prompt", "contexts", "image_urls", "audio_urls", "func_tool", "model", "session_id", "extra_user_content_parts", "tool_calls_result"]) delete parameters[key];
     draft = { task: record.task, module: record.module || "reply", scope: record.scope, provider_id: draft.provider_id, model: args.model || draft.model, prompt_mode: "raw", prompt: args.prompt || "", system_prompt: args.system_prompt || "", contexts: args.contexts || [], image_urls: args.image_urls || [], audio_urls: args.audio_urls || [], tools: args.func_tool || [], extra_user_content_parts: args.extra_user_content_parts || [], tool_calls_result: args.tool_calls_result || [], positional_arguments: draft.positional_arguments || [], parameters };
   }
-  rememberTrial(); debugTask = draft.task || debugTask; debugSection = "trial"; debugScope = draft.scope || "global"; debugMode = draft.prompt_mode || "raw";
-  testRequest = stringify(draft); rememberTrial(); render(); $("[name=request_json]")?.scrollIntoView({ behavior: "smooth", block: "center" });
-}
-function formatTaskContext(context) {
-  if (context == null) return "";
-  const text = (value) => typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  if (typeof context === "object" && !Array.isArray(context)) return Object.entries(context).map(([key, value]) => `【${key}】\n${text(value)}`).join("\n\n");
-  return text(context);
+  rememberTrial(); debugTask = draft.task || debugTask; debugScope = draft.scope || "global"; debugMode = draft.prompt_mode || "raw";
+  testRequest = stringify(draft); rememberTrial(); navigate("context", "trial");
 }
 function toolArguments(value) {
   if (typeof value !== "string") return value;
@@ -1247,52 +1338,59 @@ function renderDebugView(view, records, initiallyOpen) {
   callSelector.querySelector("select").addEventListener("change", (event) => { selected.call = Number(event.target.value); update(); });
   append(body, tabs, panel); container.append(body); update(); return container;
 }
-function renderDebug() {
+function renderTemplates() {
   const root = el("div", "stack");
-  const tabs = el("div", "debug-tabs debug-sections"); tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "调试管理菜单");
-  for (const [id, title] of [["records", "调用记录"], ["trial", "模型试跑与提示词模板"], ["layout", "上下文注入位置"]]) {
-    const tab = button(title, () => { debugSection = id; render(); $("#debug-section-" + id)?.focus(); }, "secondary");
-    tab.id = "debug-section-" + id; tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(debugSection === id));
-    tab.tabIndex = debugSection === id ? 0 : -1;
-    tab.addEventListener("keydown", (event) => {
-      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-      event.preventDefault();
-      const sections = ["records", "trial", "layout"], index = sections.indexOf(id);
-      debugSection = sections[event.key === "Home" ? 0 : event.key === "End" ? 2 : (index + (event.key === "ArrowRight" ? 1 : 2)) % 3];
-      render(); $("#debug-section-" + debugSection)?.focus();
-    });
-    tab.setAttribute("aria-controls", "debug-section-panel"); tabs.append(tab);
-  }
-  const panel = { records: renderDebugRecords, trial: renderDebugTrial, layout: renderContextLayout }[debugSection]();
-  panel.id = "debug-section-panel"; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", "debug-section-" + debugSection);
-  root.append(tabs, panel); dirty = hasDebugDrafts(); return root;
+  const templates = snapshot.debug?.templates || [];
+  const prior = rows("prompt_template_history");
+  const tasks = [...new Set([...templates.map((item) => item.task), ...prior.map((item) => item.task || item.id)])];
+  if (!tasks.length) return empty("尚未取得模板目录");
+  if (!tasks.includes(templateTask)) templateTask = tasks[0];
+  selections.set("template.task", templateTask);
+  root.append(chooser("选择任务模板", "template.task", tasks.map((value) => ({ value, label: taskDisplay(value) })), templateTask, (value) => { templateTask = value; selections.delete("template.version"); render(); }));
+  const item = templates.find((row) => row.task === templateTask);
+  const archived = prior.filter((row) => (row.task || row.id) === templateTask);
+  const versions = [...(item ? [{ value: "current", label: "当前使用的模板" }, { value: "default", label: "内置默认模板（只读）" }] : []), ...archived.map((row, index) => ({ value: String(index), label: `旧模板 · ${stamp(row.archived_at) || `版本 ${index + 1}`}` }))];
+  root.append(chooser("模板版本", "template.version", versions, "current"));
+  const version = selections.get("template.version");
+  if (version !== "current") return append(root, el("p", "hint", "只读查看，不会自动启用或覆盖当前模板。"), el("pre", "template-preview", version === "default" ? item?.default_template || "" : archived[Number(version)]?.template || ""));
+  const form = settingsForm("保存此任务模板", "只保存本任务公共指令；试跑 JSON 和私人资料不会自动写入模板。");
+  const selectedTask = templateTask;
+  const value = field("公共提示词模板", "template", templateDrafts.get(selectedTask) ?? item.template ?? item.default_template ?? "", { type: "textarea", rows: 12 });
+  value.querySelector("textarea").addEventListener("input", (event) => { templateDrafts.set(selectedTask, event.target.value); });
+  const finish = async (operation) => { const submitted = value.querySelector("textarea").value; const result = await operation(); if (result !== false) { if (templateDrafts.get(selectedTask) === submitted) templateDrafts.delete(selectedTask); render(); } };
+  form.querySelector(".section-toolbar").append(button("恢复默认模板", () => finish(() => action("reset_template", { task: selectedTask })), "secondary"));
+  form.append(value);
+  form.addEventListener("submit", (event) => { event.preventDefault(); finish(() => action("save_template", { task: selectedTask, template: value.querySelector("textarea").value })); });
+  root.append(form); return root;
 }
 
 function renderDebugRecords() {
   const root = el("div", "stack");
-  root.append(el("p", "hint", "每次调用只看四项：信息来源、API 原始请求、API 原始返回、回复阅读版。原文来自实际 HTTP 收发，仅隐藏认证凭据；管理员可查看所有场合。"));
   const settings = snapshot.settings || {};
-  const retention = settingsForm("保存记录数量", "聊天按完整轮次保留最近 N 轮；后台任务按类别保留最近 N 次。清理不影响正式数据。");
+  const retention = settingsForm("保存记录数量", "聊天按完整轮次保留；后台任务按类别保留。清理只影响调试。");
+  retention.classList.add("retention-form");
   retention.append(field("每类保留次数", "debug.retain_per_category", retentionDraft ?? settings.debug?.retain_per_category ?? 10, { type: "number", min: 1, max: 1000 }));
-  retention.addEventListener("input", () => { retentionDraft = retention.querySelector("input").value; dirty = true; });
-  retention.addEventListener("submit", async (event) => { event.preventDefault(); const submitted = retentionDraft; const result = await saveSettings(applyFields({}, retention)); if (result !== false) { if (retentionDraft === submitted) retentionDraft = null; render(); } });
-  root.append(card("调试记录保留", "默认最近 10 轮聊天及每类 10 次后台调用；工具后的模型调用也保留。", retention));
-  if (snapshot.provider_capture_available === false) root.append(el("p", "hint warning", "当前模型捕获适配不可用，未捕获内容会明确标注；旧版快照不会冒充 API 原文。"));
-  const records = rows("debug_records");
-  const views = Array.isArray(snapshot.debug_views) ? snapshot.debug_views : legacyDebugViews(records);
+  retention.addEventListener("input", () => { retentionDraft = retention.querySelector("input").value; });
+  retention.addEventListener("submit", async (event) => { event.preventDefault(); const submitted = retentionDraft; const result = await saveSettings(readFields(retention)); if (result !== false) { if (retentionDraft === submitted) retentionDraft = null; render(); } });
+  retention.querySelector(".section-toolbar").append(button(debugCategory ? "清空此类调试记录" : "清空全部调试记录", () => confirmAction("清空调试记录", "清理选定类别的完整聊天轮次与后台调用；正式数据、宿主历史和防重记录保留。", () => action("debug_clear", debugCategory ? { category: debugCategory } : {}), true, "清空调试记录"), "danger"));
+  root.append(retention);
+  const records = rows("debug_records"), views = Array.isArray(snapshot.debug_views) ? snapshot.debug_views : legacyDebugViews(records);
   const categories = [...new Set(views.flatMap((view) => view.categories?.length ? view.categories : [view.task]).filter(Boolean))];
   const category = field("筛选任务类别", "category", debugCategory, { options: [{ value: "", label: "全部类别" }, ...categories.map((task) => ({ value: task, label: taskDisplay(task) }))] });
-  category.querySelector("select").addEventListener("change", (event) => { debugCategory = event.target.value; render(); });
-  const list = el("div", "debug-round-list");
+  category.querySelector("select").addEventListener("change", (event) => { debugCategory = event.target.value; debugRound = ""; render(); });
   const filtered = views.filter((view) => !debugCategory || (view.categories || [view.task]).includes(debugCategory));
-  const focused = new URLSearchParams(location.hash.split("?")[1] || "").get("turn");
-  if (focused && !views.some((view) => view.id === focused || view.record_ids?.includes(focused))) list.append(el("p", "hint warning", "这次调用的调试记录已清理或尚未产生；正式日程档案仍保留。"));
-  filtered.forEach((view, index) => list.append(renderDebugView(view, records, index === 0)));
-  const callPanel = card("调用记录", "选择一次聊天或后台任务；多次模型请求使用下拉框切换，请求与返回始终成对。",
-    append(el("div", "stack"), category, list.childElementCount ? list : empty("此类别暂时没有调用记录")),
-    button(debugCategory ? "清空此类调试记录" : "清空全部调试记录", () => confirmAction("清空调试记录", "删除选定类别的完整聊天轮次和后台任务记录；不删除正式日程、记忆、消息历史或执行防重记录，不产生真实调用。", () => action("debug_clear", debugCategory ? { category: debugCategory } : {}), true, "清空调试记录"), "danger", true));
-  root.insertBefore(callPanel, root.children[1] || null);
-  return root;
+  const selected = filtered.find((view) => view.id === debugRound || view.record_ids?.includes(debugRound)) || filtered[0];
+  const missing = debugRound && !views.some((view) => view.id === debugRound || view.record_ids?.includes(debugRound));
+  if (missing) root.append(el("p", "hint warning", "这次调用的调试记录已清理或尚未产生；正式档案仍保留。"));
+  const round = field("选择调用轮次", "debug_round", selected?.id || "", { options: filtered.map((view) => ({ value: view.id, label: `${stamp(view.created_at || view.at)} · ${taskDisplay(view.task)} · ${view.title || scopeLabel(view.scope)} · ${view.id.slice(0, 8)}` })) });
+  round.querySelector("select").addEventListener("change", (event) => { debugRound = event.target.value; render(); });
+  const at = filtered.indexOf(selected);
+  const prev = button("上一轮", () => { debugRound = filtered[at - 1].id; render(); }, "secondary");
+  const next = button("下一轮", () => { debugRound = filtered[at + 1].id; render(); }, "secondary");
+  prev.dataset.disabled = String(at <= 0); next.dataset.disabled = String(at < 0 || at >= filtered.length - 1);
+  root.append(append(el("div", "compact-filter"), category, round, prev, next));
+  if (snapshot.provider_capture_available === false) root.append(el("p", "hint warning", "当前 HTTP 捕获适配不可用；旧快照不冒充原文。"));
+  root.append(selected ? renderDebugView(selected, records, true) : empty("此类别暂时没有调用记录")); return root;
 }
 
 function renderDebugTrial() {
@@ -1315,6 +1413,7 @@ function renderDebugTrial() {
   });
   modeField.querySelector("select").addEventListener("change", async () => {
     const nextMode = modeField.querySelector("select").value;
+    const task = debugTask, previous = { request: testRequest, scope: debugScope, mode: debugMode }, scope = debugScope;
     if (testRequest.trim()) {
       try {
         let edited = JSON.parse(testRequest);
@@ -1323,8 +1422,8 @@ function renderDebugTrial() {
           if (preview === false) { modeField.querySelector("select").value = debugMode; return; }
           edited = preview.request;
         }
-        edited.prompt_mode = nextMode; testRequest = stringify(edited);
-        requestField.querySelector("textarea").value = testRequest;
+        edited.prompt_mode = nextMode;
+        acceptTrial(task, previous, { request: stringify(edited), scope, mode: nextMode }); return;
       } catch (error) { notice(`请先修正测试 JSON：${error.message}`, true); modeField.querySelector("select").value = debugMode; return; }
     }
     debugMode = nextMode; rememberTrial(); updateHint();
@@ -1336,43 +1435,45 @@ function renderDebugTrial() {
     testRequest = draft?.request || ""; debugScope = draft?.scope || "global"; debugMode = draft?.mode || "structured"; render();
   });
   const build = async () => {
-    const result = await request(() => bridge.apiPost("action", { action: "debug_build", task: taskField.querySelector("select").value, scope: scopeField.querySelector("select").value }), "已建立测试请求；尚未调用模型");
-    if (result !== false) { const draft = result.request || result; testRequest = stringify(draft); requestField.querySelector("textarea").value = testRequest; debugMode = draft.prompt_mode || "raw"; modeField.querySelector("select").value = debugMode; rememberTrial(); updateHint(); }
+    const task = debugTask, previous = { request: testRequest, scope: debugScope, mode: debugMode }, scope = debugScope;
+    const result = await request(() => bridge.apiPost("action", { action: "debug_build", task, scope }), "已建立测试请求；尚未调用模型");
+    if (result !== false) { const draft = result.request || result; acceptTrial(task, previous, { request: stringify(draft), scope, mode: draft.prompt_mode || "raw" }); }
   };
   const test = async () => {
     try { const payload = JSON.parse(requestField.querySelector("textarea").value); if (!payload || Array.isArray(payload) || typeof payload !== "object") throw new Error("请求必须是 JSON 对象"); await action("debug_test", { request: payload }); }
     catch (error) { notice(`测试请求无效：${error.message}`, true); }
   };
-  root.append(card("模型试跑", "真实调用 AI，可能产生模型费用；不执行工具、不发送 QQ、不修改正式日程、记忆或生活数据。", append(el("div", "stack"), append(el("div", "form-grid"), taskField, scopeField), button("从当前配置建立测试请求", build, "secondary"), modeField, modeHint, requestField, button("仅调用 AI 试跑", test, "primary"))));
-  const templateBox = el("div", "stack");
-  for (const item of templates) {
-    const value = field("公共提示词模板", "template", templateDrafts.get(item.task) ?? item.template ?? item.default_template ?? "", { type: "textarea", rows: 6, hint: "这里只编辑任务指令。人格、私聊记忆、具体活动等动态上下文由每次调用注入。" });
-    value.querySelector("textarea").addEventListener("input", (event) => { templateDrafts.set(item.task, event.target.value); dirty = true; });
-    const finish = async (operation) => {
-      const submitted = value.querySelector("textarea").value;
-      const result = await operation(); if (result !== false) { if (templateDrafts.get(item.task) === submitted) templateDrafts.delete(item.task); render(); }
-    };
-    const row = append(el("details"), el("summary", "", taskDisplay(item.task)), value,
-      append(el("div", "actions"),
-        button("保存此任务模板", () => finish(() => action("save_template", { task: item.task, template: value.querySelector("textarea").value })), "secondary", true),
-        button("恢复默认模板", () => finish(() => action("reset_template", { task: item.task })), "secondary", true)),
-      details(item.default_template || "", "查看默认模板"));
-    row.open = templateOpen.get(item.task) || false;
-    row.addEventListener("toggle", () => templateOpen.set(item.task, row.open));
-    templateBox.append(row);
-  }
-  root.append(card("各任务提示词模板", "保存只修改公共指令，不会把试跑 JSON 或私人上下文存进模板；不调用模型。", templates.length ? templateBox : empty("暂未取得模板目录")));
-  const priorTemplates = rows("prompt_template_history");
-  if (priorTemplates.length) {
-    const archived = append(el("details", "card template-history"), el("summary", "", `升级前的提示词模板 · ${priorTemplates.length} 份`), el("p", "hint", "升级时备份的旧指令，只供核对。当前日程使用匹配新流程的模板；这里的文本不会自动重新启用。"));
-    priorTemplates.forEach((item) => archived.append(details(item.template ?? item, `${taskDisplay(item.task || item.id)}${item.archived_at ? ` · ${stamp(item.archived_at)}` : ""}`)));
-    root.append(archived);
-  }
+  root.append(card("模型试跑", "真实调用 AI，可能产生模型费用；不执行工具、不发送 QQ、不修改正式日程、记忆或生活数据。", append(el("div", "stack"), append(el("div", "actions"), button("仅调用 AI 试跑", test, "primary"), button("从当前配置建立测试请求", build, "secondary")), append(el("div", "form-grid"), taskField, scopeField), modeField, modeHint, requestField)));
   return root;
 }
 
+function showSourceIndex(id) {
+  const info = snapshot.context_layout_catalog?.blocks.find((item) => item.id === id);
+  if (!info) return;
+  sourceReturn = { hash: location.hash, scroll: window.scrollY, block: id, task: layoutTask };
+  $("#source-index-title").textContent = info.label;
+  const body = $("#source-index-body"); body.replaceChildren();
+  body.append(el("h3", "", "用途"), el("p", "", info.purpose || "此项由当前任务提供。"), el("h3", "", "资料从哪里来"), el("p", "", info.origin || "请查看该任务输入说明。"));
+  if (info.host_help) body.append(el("p", "hint", info.host_help));
+  const links = el("div", "source-targets");
+  for (const target of info.targets || []) {
+    if (!PAGES[target.page]?.tabs[target.tab]) continue;
+    const params = { ...target.params };
+    if (params.current_task) { delete params.current_task; if (snapshot.debug?.templates?.some((row) => row.task === layoutTask)) params.task = layoutTask; }
+    links.append(button(target.label, () => { $("#source-index").close(); navigate(target.page, target.tab, params); }, "secondary"));
+  }
+  if (links.childElementCount) body.append(el("h3", "", "管理入口"), links);
+  const tasks = [...new Set([...(info.templates || []), ...(id === "anchor.user" && snapshot.debug?.templates?.some((row) => row.task === layoutTask) ? [layoutTask] : [])])];
+  if (tasks.length) {
+    const choose = field("相关提示词", "source_template", tasks[0], { options: tasks.map((value) => ({ value, label: taskDisplay(value) })) });
+    body.append(choose, button("打开所选模板", () => { $("#source-index").close(); navigate("context", "templates", { task: choose.querySelector("select").value }); }, "secondary"));
+  }
+  body.append(el("p", "hint", "这里说明资料块的用途和管理入口，不表示某次历史调用采用了哪条原始记录。"));
+  $("#source-index").showModal();
+}
+$("#source-index-close").addEventListener("click", () => $("#source-index").close());
 function renderContextLayout() {
-  const root = el("div", "stack");
+  const root = el("div", "stack context-layout");
   const catalog = snapshot.context_layout_catalog;
   if (!catalog || !snapshot.settings?.context_layout) return empty("请更新并重载插件以取得上下文目录");
   const config = layoutDraft || snapshot.settings.context_layout;
@@ -1381,78 +1482,139 @@ function renderContextLayout() {
   const current = (layoutTask && config.tasks[layoutTask]) || config.default;
   const available = new Set(task?.blocks || catalog.blocks.map((item) => item.id));
   const blockNames = new Map(catalog.blocks.map((item) => [item.id, item]));
+  const mark = () => { layoutDraft ||= clone(snapshot.settings.context_layout); return layoutDraft; };
+  const editable = !layoutTask || override;
   const heading = field("调整范围", "layout_task", layoutTask, { options: [{ value: "", label: "全局默认" }, ...catalog.tasks.map((item) => ({ value: item.id, label: item.label }))] });
   heading.querySelector("select").dataset.skip = "1";
   heading.querySelector("select").addEventListener("change", (event) => { layoutTask = event.target.value; render(); });
-  root.append(card("上下文注入位置", "同一角色内从上到下就是注入顺序。拖动资料行或使用上下按钮；原始内容定位行只读，资料可以放到它的前后。设置只决定位置，资料仍按模块开关、数量、日期和场合筛选。", heading));
-  const mark = () => { layoutDraft ||= clone(snapshot.settings.context_layout); dirty = true; return layoutDraft; };
-  const editable = !layoutTask || override;
-  const editedList = () => { const value = mark(); return layoutTask ? value.tasks[layoutTask] : value.default; };
-  if (layoutTask) {
-    const controls = el("div", "actions");
-    controls.append(el("span", "muted", override ? "本任务使用独立列表，全局排序修改不影响此任务。" : "本任务正在继承全局默认；仅显示本任务适用的资料块。"));
-    controls.append(override
-      ? button("恢复继承全局", () => { mark().tasks[layoutTask] = null; render(); }, "secondary")
-      : button("为本任务单独设置", () => { mark().tasks[layoutTask] = clone(current); render(); }, "secondary"));
-    root.append(controls);
-  }
-  const move = (id, role, target = null, after = false) => {
-    if (!editable || busy || id?.startsWith("anchor.")) return;
-    const value = editedList();
-    for (const lane of ["system", "user"]) value[lane] = value[lane].filter((item) => item !== id);
-    const at = target === null ? value[role].length : value[role].indexOf(target) + (after ? 1 : 0);
-    value[role].splice(Math.max(0, at), 0, id); layoutDragged = null; render();
-    const row = [...content.querySelectorAll("[data-block-id]")].find((item) => item.dataset.blockId === id);
-    row?.querySelector("button,select")?.focus();
+  const save = async () => { const value = clone(layoutDraft || config); const result = await saveSettings({ context_layout: value }); if (result !== false) { if (JSON.stringify(layoutDraft || config) === JSON.stringify(value)) layoutDraft = null; render(); } };
+  const controls = append(el("div", "actions"), button("保存上下文位置", save, "primary"), button(layoutTask ? "重置本任务为初始位置" : "恢复全局初始位置", () => { const value = mark(); if (layoutTask) value.tasks[layoutTask] = clone(catalog.default); else value.default = clone(catalog.default); render(); }, "secondary"));
+  if (layoutTask) controls.append(override ? button("恢复继承全局", () => { mark().tasks[layoutTask] = null; render(); }, "secondary") : button("为本任务单独设置", () => { mark().tasks[layoutTask] = clone(current); render(); }, "secondary"));
+  root.append(controls, heading);
+  if (layoutTask) root.append(el("p", "layout-status", override ? "本任务独立设置；全局排序修改不影响此任务。" : "继承全局默认；仅显示适用资料，单独设置后可修改。"));
+  root.append(append(el("details", "layout-help"), el("summary", "", "排序与生效说明"), el("p", "", "同一角色内从上到下就是实际注入顺序。拖动左侧手柄，或使用角色下拉框、上下按钮。定位行只读，资料可放到它的前后。保存后下一轮生效；在途工具调用沿用快照。没有材料的行不注入，不增加召回、不改变场合过滤，临时资料不入历史。")));
+  const nodes = new Map(), lists = {}, ends = {};
+  let drag = null;
+  let pointer = null;
+  let scrollFrame = null;
+  const animateOrder = (layout) => {
+    const positions = new Map([...nodes].map(([id, node]) => [id, node.getBoundingClientRect()]));
+    nodes.forEach((node) => node.getAnimations().forEach((animation) => animation.cancel()));
+    for (const role of ["system", "user"]) {
+      let next = ends[role];
+      for (const id of [...layout[role]].reverse()) if (nodes.has(id)) {
+        const node = nodes.get(id);
+        if (node.parentNode !== lists[role] || node.nextSibling !== next) lists[role].insertBefore(node, next);
+        next = node;
+      }
+    }
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    for (const [id, node] of nodes) {
+      const from = positions.get(id), to = node.getBoundingClientRect();
+      if (id !== drag?.id && (from.x !== to.x || from.y !== to.y)) node.animate([{ transform: `translate(${from.x - to.x}px, ${from.y - to.y}px)` }, { transform: "none" }], { duration: 150, easing: "ease-out" });
+    }
   };
+  const commit = (next, id) => {
+    if (!editable || busy || next === current || JSON.stringify(next) === JSON.stringify(current)) return;
+    const value = mark(); if (layoutTask) value.tasks[layoutTask] = next; else value.default = next;
+    drag = null; cancelLayoutDrag = null; render();
+    [...content.querySelectorAll("[data-block-id]")].find((node) => node.dataset.blockId === id)?.querySelector(".layout-up:not(:disabled),select,button")?.focus();
+  };
+  const preview = (id, role, target = null, after = false) => {
+    if (!drag || busy || id !== drag.id) return;
+    const next = reorderedLayout(current, id, role, target, after);
+    if (JSON.stringify(next) !== JSON.stringify(drag.preview)) { drag.preview = next; animateOrder(next); }
+  };
+  const clearDrag = () => {
+    cancelAnimationFrame(scrollFrame); scrollFrame = null;
+    const active = pointer;
+    drag = null; pointer = null; cancelLayoutDrag = null;
+    if (active && root.hasPointerCapture(active.id)) root.releasePointerCapture(active.id);
+    animateOrder(current);
+    root.classList.remove("is-sorting");
+    nodes.forEach((node) => node.classList.remove("is-dragging"));
+    if (active) nodes.get(active.block)?.querySelector(".layout-source")?.focus({ preventScroll: true });
+  };
+  const pointTarget = (event) => {
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest(".layout-row,.layout-end");
+    return target && root.contains(target) ? target : null;
+  };
+  const previewPoint = (point) => {
+    const target = pointTarget(point); if (!target || !drag) return;
+    if (target.dataset.endRole) preview(drag.id, target.dataset.endRole);
+    else if (target.dataset.blockId !== drag.id) {
+      const bounds = target.getBoundingClientRect();
+      preview(drag.id, target.closest(".layout-lane").dataset.role, target.dataset.blockId, point.clientY > bounds.top + bounds.height / 2);
+    }
+  };
+  const scrollDrag = () => {
+    scrollFrame = null;
+    if (!pointer || !drag) return;
+    const direction = pointer.clientY < 80 ? -1 : pointer.clientY > innerHeight - 40 ? 1 : 0;
+    if (!direction) return;
+    window.scrollBy(0, direction * 14); previewPoint(pointer);
+    scrollFrame = requestAnimationFrame(scrollDrag);
+  };
+  root.addEventListener("pointermove", (event) => {
+    if (!pointer || pointer.id !== event.pointerId || busy) return;
+    if (!drag && Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 5) return;
+    event.preventDefault();
+    pointer.clientX = event.clientX; pointer.clientY = event.clientY;
+    if (!drag) { drag = { id: pointer.block, preview: current }; root.classList.add("is-sorting"); nodes.get(drag.id).classList.add("is-dragging"); }
+    previewPoint(event);
+    if (!scrollFrame) scrollFrame = requestAnimationFrame(scrollDrag);
+  });
+  root.addEventListener("pointerup", (event) => {
+    if (!pointer || pointer.id !== event.pointerId) return;
+    const pending = drag, target = pointTarget(event);
+    pointer = null;
+    cancelAnimationFrame(scrollFrame); scrollFrame = null;
+    if (root.hasPointerCapture(event.pointerId)) root.releasePointerCapture(event.pointerId);
+    if (pending && target) commit(pending.preview, pending.id);
+    if (drag || !pending) clearDrag();
+  });
+  root.addEventListener("pointercancel", clearDrag);
+  root.addEventListener("lostpointercapture", () => { if (pointer) clearDrag(); });
   for (const role of ["system", "user"]) {
     const lane = el("section", "layout-lane"); lane.dataset.role = role;
     lane.append(el("h3", "", role === "system" ? "system · 系统上下文" : "user · 本轮用户上下文"));
-    const list = el("ol", "layout-list"); list.setAttribute("aria-label", `${role} 注入顺序`);
+    const list = el("ol", "layout-list"); lists[role] = list; list.setAttribute("aria-label", `${role} 注入顺序`);
+    const end = el("li", "layout-end", "放到本组末尾"); end.dataset.endRole = role; ends[role] = end;
     const visible = current[role].filter((id) => available.has(id));
     visible.forEach((id, index) => {
-      const info = blockNames.get(id);
-      const row = el("li", `layout-row${info.anchor ? " layout-anchor" : ""}`); row.dataset.blockId = id;
-      row.draggable = editable && !info.anchor;
-      const name = append(el("div", "layout-name"), el("strong", "", info.label), el("small", "muted", info.anchor ? "原始内容定位行 · 不改写正文" : "拖动或使用上下按钮调整顺序"));
-      const controls = el("div", "layout-controls");
+      const info = blockNames.get(id), row = el("li", `layout-row${info.anchor ? " layout-anchor" : ""}`); row.dataset.blockId = id; nodes.set(id, row);
+      const handle = el("span", "layout-handle", info.anchor ? "▪" : "⠿"); handle.draggable = false; handle.title = info.anchor ? "只读定位行" : "拖动调整顺序";
+      if (!info.anchor) handle.addEventListener("pointerdown", (event) => {
+        if (!editable || busy || event.button !== 0) return;
+        event.preventDefault(); handle.closest(".layout-row").querySelector(".layout-source")?.focus({ preventScroll: true });
+        pointer = { id: event.pointerId, block: id, x: event.clientX, y: event.clientY }; cancelLayoutDrag = clearDrag; root.setPointerCapture(event.pointerId);
+      });
+      const name = el("strong", "layout-name", info.label); name.title = info.label;
+      row.append(handle, name, button("来源", () => showSourceIndex(id), "secondary layout-source"));
       if (!info.anchor) {
         const destination = field("注入角色", "layout_role", role, { options: ["system", "user"] });
-        const select = destination.querySelector("select"); select.dataset.skip = "1";
-        select.disabled = !editable; select.setAttribute("aria-label", `${info.label}的注入角色`);
-        select.addEventListener("change", () => move(id, select.value));
-        const up = button("↑", () => move(id, role, visible[index - 1]), "secondary");
-        const down = button("↓", () => move(id, role, visible[index + 1], true), "secondary");
+        const select = destination.querySelector("select"); select.dataset.skip = "1"; select.disabled = !editable; select.setAttribute("aria-label", `${info.label}的注入角色`);
+        select.addEventListener("change", () => commit(reorderedLayout(current, id, select.value), id));
+        const up = button("↑", () => commit(reorderedLayout(current, id, role, visible[index - 1]), id), "secondary layout-up");
+        const down = button("↓", () => commit(reorderedLayout(current, id, role, visible[index + 1], true), id), "secondary");
         up.setAttribute("aria-label", `上移${info.label}`); down.setAttribute("aria-label", `下移${info.label}`);
-        up.disabled = !editable || index === 0; down.disabled = !editable || index === visible.length - 1;
-        up.dataset.disabled = String(up.disabled); down.dataset.disabled = String(down.disabled);
-        controls.append(destination, up, down);
-        row.addEventListener("dragstart", (event) => { if (busy) { event.preventDefault(); return; } layoutDragged = id; event.dataTransfer.setData("text/plain", id); event.dataTransfer.effectAllowed = "move"; });
-        row.addEventListener("dragend", () => { layoutDragged = null; });
+        up.dataset.disabled = String(!editable || index === 0); down.dataset.disabled = String(!editable || index === visible.length - 1);
+        row.append(destination, up, down);
+        handle.addEventListener("dragstart", (event) => { if (busy || !editable) { event.preventDefault(); return; } drag = { id, preview: current }; row.classList.add("is-dragging"); root.classList.add("is-sorting"); event.dataTransfer.setData("text/plain", id); event.dataTransfer.effectAllowed = "move"; });
+        handle.addEventListener("dragend", () => { if (drag) { drag = null; animateOrder(current); } root.classList.remove("is-sorting"); row.classList.remove("is-dragging"); });
       }
-      row.addEventListener("dragover", (event) => { if (layoutDragged && editable && !busy) { event.preventDefault(); event.stopPropagation(); } });
-      row.addEventListener("drop", (event) => {
-        if (!layoutDragged || layoutDragged === id) return;
+      row.addEventListener("dragover", (event) => {
+        if (!drag || !editable || busy) return;
         event.preventDefault(); event.stopPropagation();
-        const bounds = row.getBoundingClientRect(); move(layoutDragged, role, id, event.clientY > bounds.top + bounds.height / 2);
+        if (drag.id !== id) { const bounds = row.getBoundingClientRect(); preview(drag.id, role, id, event.clientY > bounds.top + bounds.height / 2); }
       });
-      row.append(name, controls); list.append(row);
+      row.addEventListener("drop", (event) => { if (!drag) return; event.preventDefault(); event.stopPropagation(); const pending = drag; commit(pending.preview, pending.id); });
+      list.append(row);
     });
-    list.addEventListener("dragover", (event) => { if (layoutDragged && editable && !busy) event.preventDefault(); });
-    list.addEventListener("drop", (event) => { if (layoutDragged) { event.preventDefault(); move(layoutDragged, role); } });
-    lane.append(list); root.append(lane);
+    end.addEventListener("dragover", (event) => { if (drag && editable && !busy) { event.preventDefault(); event.stopPropagation(); preview(drag.id, role); } });
+    end.addEventListener("drop", (event) => { if (!drag) return; event.preventDefault(); event.stopPropagation(); const pending = drag; commit(reorderedLayout(current, pending.id, role), pending.id); });
+    list.append(end); lane.append(list); root.append(lane);
   }
-  const save = async () => {
-    const value = clone(layoutDraft || config);
-    const result = await saveSettings({ context_layout: value });
-    if (result !== false) { if (JSON.stringify(layoutDraft || config) === JSON.stringify(value)) layoutDraft = null; render(); }
-  };
-  root.append(append(el("div", "actions"), button("保存上下文位置", save, "primary"),
-    button(layoutTask ? "重置本任务为初始位置" : "恢复全局初始位置", () => {
-      const value = mark();
-      if (layoutTask) value.tasks[layoutTask] = clone(catalog.default); else value.default = clone(catalog.default);
-      render();
-    }, "secondary")), el("p", "hint", "保存后下一轮生效；正在调用工具的轮次沿用原快照。重置只修改表单，保存后生效。没有材料的行不会增加注入；临时资料不写入聊天历史。"));
   return root;
 }
 
@@ -1474,7 +1636,6 @@ function usageTable() {
   table.append(body);
   return append(el("div", "table-wrap"), table);
 }
-function renderSocial() { return renderWhitelist(); }
 
 function renderData() {
   const root = el("div", "stack");
@@ -1487,67 +1648,109 @@ function renderData() {
   }, "备份已准备下载，请妥善保存");
   const file = el("input"); file.type = "file"; file.accept = ".json,application/json"; file.setAttribute("aria-label", "选择 Living World 备份文件");
   const preview = el("div");
-  let imported = null;
+  const showPreview = () => { preview.replaceChildren(); if (pendingBackup) preview.append(el("p", "hint", `已读取 ${pendingBackup.name}`), details(pendingBackup.data, "预览备份内容")); };
+  showPreview();
   file.addEventListener("change", async () => {
-    imported = null; preview.replaceChildren();
+    pendingBackup = null; preview.replaceChildren();
     const selected = file.files?.[0]; if (!selected) return;
     try {
       if (selected.size > 20 * 1024 * 1024) throw new Error("备份文件超过 20 MB，请检查文件是否正确。");
-      imported = JSON.parse(await selected.text());
+      const imported = JSON.parse(await selected.text());
       if (!imported || typeof imported !== "object" || Array.isArray(imported)) throw new Error("备份必须是 JSON 对象。");
-      preview.append(el("p", "hint", `已读取 ${selected.name} · ${(selected.size / 1024).toFixed(1)} KB`), details(imported, "预览备份内容"));
+      pendingBackup = { data: imported, name: `${selected.name} · ${(selected.size / 1024).toFixed(1)} KB` }; showPreview();
     } catch (error) { notice(`读取备份失败：${error.message}`, true); }
   });
   const importAction = () => {
-    if (!imported) { notice("请先选择有效的 JSON 备份文件。", true); return; }
+    if (!pendingBackup) { notice("请先选择有效的 JSON 备份文件。", true); return; }
     confirmAction("恢复备份", "恢复备份中的配置，补入本地缺失的业务记录，保留本地已有记录与发送凭据。恢复后全部模块关闭，可检查配置后逐项开启。请先导出当前数据。", () => request(async () => {
-      const result = await bridge.apiPost("import", imported); imported = null;
+      const submitted = pendingBackup; const result = await bridge.apiPost("import", submitted.data); if (pendingBackup === submitted) pendingBackup = null;
       lastResult = { action: "import", result, time: new Date().toLocaleTimeString("zh-CN", { hour12: false }) };
-      await readState(); dirty = false; render();
+      await readState(); render();
     }, "备份已恢复"), true, "恢复备份");
   };
-  append(root, append(el("div", "grid"), card("导出备份", "保存配置、生活、记忆和运行记录，供迁移或恢复。", append(el("div", "stack"), el("p", "muted", "备份可能含私人记忆与角色资料，请保存在可信的位置。插件数据不包含 AstrBot 原始聊天历史。"), append(el("div", "actions"), button("下载 JSON 备份", exportAction, "primary")))), card("从备份恢复", "先选择文件并预览，再确认恢复。", append(el("div", "stack"), file, preview, append(el("div", "actions"), button("恢复所选备份", importAction, "secondary"))))));
-  root.append(card("整理旧记忆", "高级操作：淡化普通旧记忆、归档低强度记录；重要记忆保留。只整理记忆数据，不调用 AI、不发送消息。", button("整理旧记忆", () => action("maintain_memory"), "secondary")));
-  root.append(card("当前数据概况", "只读查看，不会触发探索或发送。", details({ version: snapshot.version, counts: Object.fromEntries(["activities", "memories", "observations", "entries", "events", "deliveries", "usage"].map((key) => [key, rows(key).length])), diagnostics: snapshot.diagnostics }, "查看数据统计与诊断")));
+  append(root, append(el("div", "grid"), card("导出备份", "保存配置、生活、记忆和运行记录，供迁移或恢复。", append(el("div", "stack"), el("p", "muted", "备份可能含私人记忆与角色资料，请保存在可信的位置。插件数据不包含 AstrBot 原始聊天历史。"), append(el("div", "actions"), button("下载 JSON 备份", exportAction, "primary")))), card("从备份恢复", "先选择文件并预览，再确认恢复。", append(el("div", "stack"), append(el("div", "actions"), button("恢复所选备份", importAction, "secondary")), file, preview))));
   return root;
 }
 
+
+function renderSystem(tab) {
+  if (tab === "backup") return renderData();
+  if (tab === "maintenance") return append(el("div", "stack"), button("整理旧记忆", () => action("maintain_memory"), "secondary"), el("p", "hint", "淡化普通旧记忆、归档低强度记录并保留重要记忆；不调用 AI、不发送 QQ。"), details(snapshot.diagnostics || [], "诊断信息"), details({ version: snapshot.version, counts: Object.fromEntries(["activities", "memories", "observations", "entries", "events", "deliveries", "usage"].map((key) => [key, rows(key).length])) }, "数据统计"), usageTable());
+  const form = settingsForm(tab === "models" ? "保存模型分配" : "保存模块开关", "只保存当前面板；关闭模块保留已有数据。");
+  if (tab === "modules") form.append(modulePanel(true));
+  else {
+    const providers = [{ value: "", label: "沿用默认模型" }, ...rows("providers").map((row) => ({ value: row.id, label: row.name || row.id }))];
+    const fields = el("div", "form-grid");
+    for (const [label, key] of [["默认模型", "default"], ["生活与日程", "life"], ["记忆提炼", "memory"], ["主动社交", "social"], ["外部见闻", "exploration"], ["日记与笔记", "journal"]]) fields.append(field(label, `models.${key}`, snapshot.settings.models?.[key] || "", { options: providers }));
+    form.append(fields);
+  }
+  return finishForm(form, "system." + tab);
+}
+function navigate(page, tab, params = {}) {
+  const hash = routeHash(page, tab, params);
+  if (location.hash === hash) { currentRoute = resolveRoute(hash, rememberedTabs); applyRouteSelection(); render(); focusTarget(); }
+  else location.hash = hash;
+}
+function applyRouteSelection() {
+  const { page, tab, params } = currentRoute;
+  rememberedTabs[page] = tab;
+  if (params.source !== undefined && page === "sources") selections.set("source." + tab, params.source);
+  if (params.task && page === "context") {
+    if (tab === "templates") { templateTask = params.task; selections.delete("template.version"); }
+    else if (tab === "layout") layoutTask = params.task;
+    else if (tab === "trial" && params.task !== debugTask) { rememberTrial(); debugTask = params.task; const draft = trialDrafts.get(debugTask); testRequest = draft?.request || ""; debugScope = draft?.scope || "global"; debugMode = draft?.mode || "structured"; }
+  }
+  if (params.turn) { debugCategory = ""; debugRound = params.turn; }
+}
+function focusTarget() {
+  const fieldName = currentRoute.params.field;
+  if (!fieldName) return;
+  const target = [...content.querySelectorAll("[name]")].find((node) => node.name === fieldName);
+  if (target) { target.closest(".field")?.classList.add("index-target"); target.scrollIntoView({ block: "center" }); target.focus({ preventScroll: true }); }
+}
 function render() {
-  const route = location.hash.slice(1).split("?")[0];
-  const view = Object.hasOwn(titles, route) ? route : "overview";
-  $("#page-title").textContent = titles[view];
-  document.title = `${titles[view]} · Living World`;
-  document.querySelectorAll("#navigation a").forEach((link) => { if (link.dataset.view === view) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current"); });
+  const { page, tab } = currentRoute, config = PAGES[page];
+  $("#page-title").textContent = config.label;
+  document.title = `${config.label} · Living World`;
+  document.querySelectorAll("#navigation a").forEach((link) => { if (link.dataset.view === page) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current"); });
   if (!snapshot) return;
-  const renderers = { whitelist: renderWhitelist, sources: renderSources, debug: renderDebug, overview: renderOverview, settings: renderSettings, drives: renderDrives, schedule: renderSchedule, memory: renderMemory, journal: renderJournal, social: renderSocial, data: renderData };
-  content.replaceChildren(renderers[view]());
-  if (view === "overview") { const timeline = content.querySelector(".home-timeline"); const current = timeline?.querySelector(".is-current"); if (current) timeline.scrollTop = Math.max(0, current.offsetTop - timeline.offsetTop - 60); }
-  if (lastResult && view !== "settings") content.firstChild.append(card("最近一次操作结果", `${lastResult.time} · ${lastResult.action}`, details(lastResult.result, "查看后端执行结果")));
+  const tabs = el("div", "secondary-tabs"); tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", config.label + "功能");
+  const ids = Object.keys(config.tabs);
+  for (const [id, label] of Object.entries(config.tabs)) {
+    const item = button(label, () => navigate(page, id), "secondary");
+    item.setAttribute("role", "tab"); item.setAttribute("aria-selected", String(id === tab)); item.setAttribute("aria-controls", "section-panel"); item.id = `section-${page}-${id}`; item.tabIndex = id === tab ? 0 : -1;
+    item.addEventListener("keydown", (event) => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); const next = ids[event.key === "Home" ? 0 : event.key === "End" ? ids.length - 1 : (ids.indexOf(id) + (event.key === "ArrowRight" ? 1 : ids.length - 1)) % ids.length]; navigate(page, next, { focus_tab: "1" }); });
+    tabs.append(item);
+  }
+  const renderers = { overview: renderOverview, character: renderCharacter, schedule: renderSchedule, chat: renderWhitelist, sources: renderSources, memory: renderMemory, system: renderSystem, context: (part) => ({ layout: renderContextLayout, templates: renderTemplates, trial: renderDebugTrial, calls: renderDebugRecords }[part]()) };
+  const panel = renderers[page](tab); panel.id = "section-panel"; panel.classList.add("section-panel"); panel.dataset.page = page; panel.dataset.section = tab; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", `section-${page}-${tab}`);
+  content.replaceChildren(tabs);
+  if (sourceReturn && !(page === "context" && tab === "layout")) content.append(button("返回上下文列表", () => {
+    const back = sourceReturn; layoutTask = back.task; sourceReturn = null;
+    const show = () => { requestAnimationFrame(() => { window.scrollTo(0, back.scroll); [...content.querySelectorAll("[data-block-id]")].find((node) => node.dataset.blockId === back.block)?.querySelector(".layout-source")?.focus({ preventScroll: true }); }); };
+    if (location.hash === back.hash) { render(); show(); } else { window.addEventListener("hashchange", show, { once: true }); location.hash = back.hash; }
+  }, "secondary return-to-context"));
+  content.append(panel);
+  if (lastResult) content.append(details(lastResult.result, `最近操作：${lastResult.action} · ${lastResult.time}`));
   setBusy(busy);
 }
-window.addEventListener("hashchange", () => { dirty = false; if (location.hash.startsWith("#debug?")) debugSection = "records"; render(); });
-window.addEventListener("beforeunload", (event) => { if (dirty || hasDriveDrafts() || hasDebugDrafts()) { event.preventDefault(); event.returnValue = ""; } });
-$("#navigation").addEventListener("click", (event) => {
-  const link = event.target.closest("a[data-view]");
-  if (!link || !dirty || ["#drives", "#debug"].includes(location.hash)) return;
-  event.preventDefault();
-  confirmAction("离开尚未保存的设置", "本页的修改尚未保存，离开后需要重新填写。", () => { dirty = false; location.hash = link.dataset.view; }, false, "放弃修改并离开");
+window.addEventListener("hashchange", () => {
+  cancelLayoutDrag?.();
+  scrollPositions.set(currentRoute.page + ":" + currentRoute.tab, window.scrollY);
+  currentRoute = resolveRoute(location.hash, rememberedTabs); applyRouteSelection(); render();
+  requestAnimationFrame(() => { window.scrollTo(0, scrollPositions.get(currentRoute.page + ":" + currentRoute.tab) || 0); focusTarget(); if (currentRoute.params.focus_tab) $("#section-" + currentRoute.page + "-" + currentRoute.tab)?.focus(); });
 });
-$("#refresh").addEventListener("click", () => {
-  if (dirty && !["#drives", "#debug"].includes(location.hash)) confirmAction("刷新并放弃未保存的修改", "刷新会重新读取后端数据，覆盖当前未保存的设置。", refresh, false, "刷新");
-  else refresh();
-});
+window.addEventListener("keydown", (event) => { if (event.key === "Escape" && cancelLayoutDrag) { event.preventDefault(); cancelLayoutDrag(); } });
+window.addEventListener("beforeunload", (event) => { if (hasDrafts()) { event.preventDefault(); event.returnValue = ""; } });
+$("#refresh").addEventListener("click", refresh);
 try {
   if (!bridge) throw new Error("请从 AstrBot 插件详情中的 Pages 打开此页面，以连接插件后端。");
-  await bridge.ready();
-  await refresh();
+  await bridge.ready(); applyRouteSelection(); await refresh(); focusTarget();
   setInterval(async () => {
-    if (busy || document.hidden || location.hash !== "#drives") return;
+    if (busy || document.hidden || currentRoute.page !== "character" || currentRoute.tab !== "drives") return;
     setBusy(true);
     try { await readState(); updateDriveStatusCards(); } catch (error) { notice(`数值刷新失败：${error.message}`, true); } finally { setBusy(false); }
   }, 60000);
 } catch (error) {
-  $("#connection").textContent = "连接不可用";
-  content.replaceChildren(empty("暂时无法连接", error.message));
-  notice(error.message, true);
+  $("#connection").textContent = "连接不可用"; content.replaceChildren(empty("暂时无法连接", error.message)); notice(error.message, true);
 }

@@ -15,16 +15,14 @@
           <span>Living World<small>让每一天，继续发生</small></span>
         </a>
         <nav id="navigation" aria-label="管理导航">
-          <a href="#overview" data-view="overview"><span>01</span>今日生活</a>
-          <a href="#settings" data-view="settings"><span>02</span>角色、模型与模块</a>
-          <a href="#schedule" data-view="schedule"><span>03</span>日程与行动</a>
-          <a href="#drives" data-view="drives"><span>04</span>内在状态</a>
-          <a href="#whitelist" data-view="whitelist"><span>05</span>聊天对象与白名单</a>
-          <a href="#journal" data-view="journal"><span>06</span>新闻、搜索与日记</a>
-          <a href="#memory" data-view="memory"><span>07</span>记忆与人物</a>
-          <a href="#sources" data-view="sources"><span>08</span>内容来源</a>
-          <a href="#debug" data-view="debug"><span>09</span>调试与调用记录</a>
-          <a href="#data" data-view="data"><span>10</span>数据与高级操作</a>
+          <a href="#overview" data-view="overview"><span>01</span>今日概览</a>
+          <a href="#context" data-view="context"><span>02</span>上下文与提示词</a>
+          <a href="#character" data-view="character"><span>03</span>角色与状态</a>
+          <a href="#schedule" data-view="schedule"><span>04</span>日程与行动</a>
+          <a href="#chat" data-view="chat"><span>05</span>聊天与对象</a>
+          <a href="#sources" data-view="sources"><span>06</span>见闻与来源</a>
+          <a href="#memory" data-view="memory"><span>07</span>记忆与日记</a>
+          <a href="#system" data-view="system"><span>08</span>系统与数据</a>
         </nav>
         <div class="sidebar-note"><span class="live-dot" aria-hidden="true"></span><span id="connection">正在连接 AstrBot</span><small id="version">Living World</small></div>
       </aside>
@@ -39,6 +37,7 @@
       </div>
     </div>
     <dialog id="editor" aria-labelledby="editor-title"><form id="editor-form"><div class="dialog-header"><h2 id="editor-title"></h2><button type="button" id="editor-close" class="icon-button" aria-label="关闭">×</button></div><div id="editor-body"></div><div class="dialog-actions"><button type="button" id="editor-cancel" class="button secondary">取消</button><button type="submit" id="editor-submit" class="button primary">保存</button></div></form></dialog>
+    <dialog id="source-index" class="source-drawer" aria-labelledby="source-index-title"><div class="dialog-header"><h2 id="source-index-title">资料来源</h2><button type="button" id="source-index-close" class="icon-button" aria-label="关闭来源说明">×</button></div><div id="source-index-body" class="stack"></div></dialog>
     <script type="module" src="./app.js"></script>
   </body>
 </html>
