@@ -11,7 +11,37 @@ export function createMemoryBrowser(ui) {
   const states = new Map(), names = new Map(), namePending = new Set(), drafts = new Map(), saving = new Set();
   let activeKey = "", epoch = 0, editorKey = "";
   const editor = el("dialog", "memory-editor");
-  document.body.append(editor);
+  const drawer = el("dialog", "memory-detail-drawer");
+  drawer.id = "memory-detail-drawer";
+  drawer.setAttribute("aria-labelledby", "memory-detail-title");
+  const drawerTitle = el("h2", "", "记忆详情"); drawerTitle.id = "memory-detail-title";
+  const drawerOwner = el("div", "memory-detail-owner");
+  const drawerClose = button("关闭", () => closeMemory(), "secondary", true);
+  drawerClose.autofocus = true;
+  const drawerBody = el("div", "memory-detail-body");
+  drawer.append(append(el("header", "memory-detail-header"), append(el("div"), drawerTitle, drawerOwner), drawerClose), drawerBody);
+  let selectedMemory = null, drawerReturn = null;
+  document.body.append(editor, drawer);
+  drawer.addEventListener("close", () => {
+    if (drawer.open) return;
+    const target = drawerReturn;
+    drawerReturn = null; selectedMemory = null; drawerBody.replaceChildren();
+    if (!target) return;
+    requestAnimationFrame(() => {
+      if (drawer.open || !isActive(target.state)) return;
+      const card = [...root.querySelectorAll(".memory-record-card")].find(node => node.dataset.memoryId === target.id);
+      (card || root.querySelector(".memory-toolbar button"))?.focus({ preventScroll: true });
+      window.scrollTo(0, target.scroll);
+    });
+  });
+  let backdropPressed = false;
+  const outsideDrawer = event => {
+    const rect = drawer.getBoundingClientRect();
+    return event.target === drawer && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom);
+  };
+  drawer.addEventListener("pointerdown", event => { backdropPressed = outsideDrawer(event); });
+  drawer.addEventListener("click", event => { if (backdropPressed && outsideDrawer(event)) closeMemory(); backdropPressed = false; });
+  window.addEventListener("hashchange", () => closeMemory(false));
   editor.addEventListener("close", () => { const state = states.get(activeKey); if (state && root.isConnected) draw(state); });
   const api = (action, data = {}) => ui.api(action, data);
   const sourceName = value => SOURCE_NAMES[value] || value || "未记录";
@@ -75,7 +105,7 @@ export function createMemoryBrowser(ui) {
   }
 
   function rememberScroll() { const state = states.get(activeKey); if (state && root.isConnected) state.scroll = window.scrollY; }
-  function go(params = {}) { rememberScroll(); ui.navigate(params); }
+  function go(params = {}) { rememberScroll(); closeMemory(false); ui.navigate(params); }
   function resetPages(state) { state.offset = 0; state.offsets = {}; state.opened.clear(); state.extras.clear(); state.views = {}; }
 
   function control(label, key, state, options, type = "select") {
@@ -212,7 +242,9 @@ export function createMemoryBrowser(ui) {
           root.append(section);
         }
       } else {
-        state.data.items.forEach(row => root.append(memoryCard(row, state)));
+        const list = el("div", "memory-record-list");
+        state.data.items.forEach(row => list.append(memoryCard(row, state)));
+        root.append(list);
         if (!state.data.items.length) root.append(empty("没有匹配的记忆", "请调整搜索或筛选条件。"));
         root.append(pagination(state, state.data.total, 20));
       }
@@ -254,9 +286,72 @@ export function createMemoryBrowser(ui) {
     return node;
   }
 
+  function memoryOwner(row, state) {
+    return state.data?.owners?.find(profile => profile.id === row.identity) || state.data?.profile;
+  }
+
   function memoryCard(row, state) {
-    const node = el("article", "memory-item"); node.dataset.memoryId = row.id;
-    const owner = state.data?.owners?.find(p => p.id === row.identity) || state.data?.profile;
+    const judgment = row.judgment || row.text || "未记录";
+    const node = el("button", "memory-record-card"); node.type = "button"; node.dataset.memoryId = row.id;
+    node.setAttribute("aria-haspopup", "dialog"); node.setAttribute("aria-controls", drawer.id);
+    node.setAttribute("aria-label", `查看记忆详情：${judgment}`);
+    node.addEventListener("click", event => {
+      // Selecting text for copying should not open the drawer on pointer release.
+      const selection = window.getSelection();
+      if (event.detail > 0 && selection && !selection.isCollapsed && node.contains(selection.anchorNode) && node.contains(selection.focusNode)) return;
+      openMemory(row, state);
+    });
+    const retained = row.important || row.protected;
+    const star = el("span", "memory-record-star" + (retained ? " is-protected" : ""), retained ? "★" : "☆");
+    star.title = row.important && row.protected ? "重要保留、主动记忆保护" : row.important ? "重要保留" : row.protected ? "主动记忆保护" : "未标记重要或主动保护";
+    star.setAttribute("role", "img"); star.setAttribute("aria-label", star.title);
+    const time = el("span", "memory-record-time", stamp(row.occurred_at)); time.title = "经历或获知时间";
+    const top = append(el("span", "memory-record-top"), star, el("span", "memory-record-strength", `强度 ${text(row.strength)}`), time);
+    if (state.mode !== "grouped") top.append(el("span", "memory-record-attribute", row.attribute || "未分类"));
+    if (!state.profile) {
+      const owner = memoryOwner(row, state);
+      top.append(owner ? named(owner, "memory-record-owner") : el("span", "memory-record-owner", row.persona_name || row.person_id || "未记录归属"));
+    }
+    node.append(top, el("span", "memory-record-judgment", judgment));
+    if (row.reasoning) node.append(el("span", "memory-record-reasoning", row.reasoning));
+    if (row.tags?.length) {
+      const tags = el("span", "memory-record-tags");
+      row.tags.forEach(tag => tags.append(el("span", "memory-chip", tag)));
+      node.append(tags);
+    }
+    return node;
+  }
+
+  function openMemory(row, state) {
+    rememberScroll();
+    drawerReturn = { id: row.id, state, scroll: window.scrollY };
+    selectedMemory = { row, state, owner: memoryOwner(row, state) };
+    drawMemoryDetail(); drawerBody.scrollTop = 0;
+    if (!drawer.open) drawer.showModal();
+    drawerClose.focus({ preventScroll: true });
+  }
+
+  function closeMemory(restoreFocus = true) {
+    if (!restoreFocus) drawerReturn = null;
+    selectedMemory = null;
+    if (drawer.open) drawer.close();
+  }
+
+  function drawMemoryDetail() {
+    if (!selectedMemory) return;
+    const { row, state, owner } = selectedMemory;
+    const scroll = drawerBody.scrollTop;
+    const focusedAction = drawerBody.contains(document.activeElement) ? document.activeElement.dataset.memoryAction : "";
+    drawerOwner.replaceChildren(owner ? named(owner) : el("span", "", row.persona_name || row.person_id || "未记录归属"));
+    if (owner) drawerOwner.append(el("span", "muted", owner.owner === "person" ? `QQ ${number(owner)}` : ownerKind(owner)));
+    drawerBody.replaceChildren(memoryDetail(row, state));
+    drawerBody.scrollTop = scroll;
+    if (focusedAction && !editor.open) drawerBody.querySelector(`[data-memory-action="${focusedAction}"]`)?.focus({ preventScroll: true });
+  }
+
+  function memoryDetail(row, state) {
+    const node = el("article", "memory-item memory-detail-content");
+    const owner = memoryOwner(row, state);
     const badges = append(el("div", "memory-tags"), badge(row.attribute || "未分类"), ...flags(row).map(f => badge(f)));
     if (owner && !state.profile) { const link = button(profileName(owner), () => go({ profile: owner.id }), "secondary", true); link.dataset.memoryName = owner.id; badges.prepend(link); }
     node.append(badges, el("p", "memory-judgment", row.judgment || row.text || "未记录"),
@@ -267,10 +362,12 @@ export function createMemoryBrowser(ui) {
     const c = ui.settings().memory;
     const retention = row.important || row.protected ? "免于遗忘" : row.useful_score >= c.long_threshold ? "长期保留" : row.useful_score >= c.medium_threshold ? "中档" : "普通记忆";
     node.append(tags, terms([["经历或获知", stamp(row.occurred_at)], ["来源", sourceName(row.source)], ["场合", row.scope ? scopeLabel(row.scope) : "未记录"], ["强度", row.strength], ["有用分", row.useful_score], ["保留阶段", row.active === false ? "已替换，停止召回" : retention]]));
-    node.append(append(el("div", "actions"), button("编辑", () => edit(row, owner), "secondary", true),
+    const actions = append(el("div", "actions"), button("编辑", () => edit(row, owner), "secondary", true),
       button(row.important ? "取消重要" : "标记重要", event => mark(row, event.currentTarget), "secondary", true),
-      button("删除", () => ui.confirmDelete(row, () => remove(row)), "danger", true)));
-    node.append(lazy("详细信息", row.id + ":detail", state, () => api("memory.detail", { id: row.id }), result => {
+      button("删除", () => ui.confirmDelete(row, () => remove(row)), "danger", true));
+    [...actions.children].forEach((control, index) => { control.dataset.memoryAction = ["edit", "important", "delete"][index]; });
+    node.append(actions);
+    node.append(lazy("版本与来源关联", row.id + ":detail", state, () => api("memory.detail", { id: row.id }), result => {
       const item = result.record;
       return terms([["创建时间", stamp(item.created_at)], ["更新时间", stamp(item.updated_at)], ["版本", item.version], ["记忆编号", item.id], ["来源关联", result.source_keys], ["替换为", result.replaced_by]]);
     }));
@@ -364,6 +461,10 @@ export function createMemoryBrowser(ui) {
           for (const field of ["scope", "source"]) if (row?.[field] && !data.filters[field].includes(row[field])) data.filters[field].push(row[field]);
         }
       }
+    }
+    if (selectedMemory?.row.id === id) {
+      if (row) { selectedMemory.row = row; selectedMemory.owner = receipt.profile || selectedMemory.owner; drawMemoryDetail(); }
+      else closeMemory();
     }
     const state = states.get(activeKey);
     if (state && root.isConnected) { if (state.data && !state.data.needsReload) draw(state); else load(state); }
@@ -460,6 +561,7 @@ export function createMemoryBrowser(ui) {
     render(params = {}) {
       const key = params.profile ? "profile:" + params.profile : params.view === "all" || params.attribute ? "all" : "profiles";
       const changed = activeKey !== key;
+      if (changed) closeMemory(false);
       activeKey = key; const state = getState(key, params.profile || "");
       if (params.attribute && ATTRIBUTES.includes(params.attribute) && state.routeAttribute !== params.attribute) {
         state.routeAttribute = params.attribute; state.attribute = params.attribute; state.data = null; resetPages(state);
@@ -473,6 +575,7 @@ export function createMemoryBrowser(ui) {
     captureScroll: rememberScroll,
     restoreScroll() { const state = states.get(activeKey); if (state?.data) { state.restore = true; restore(state); } },
     invalidate() {
+      closeMemory(false);
       epoch++; names.clear(); namePending.clear();
       for (const state of states.values()) { clearTimeout(state.timer); state.sequence++; state.data = null; state.loading = false; state.extras.clear(); state.views = {}; }
     },
