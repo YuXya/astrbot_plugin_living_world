@@ -7,12 +7,12 @@ module.exports = async (page, go, field, click, save, shot) => {
   await go("character", "drives"); await page.getByRole("link", { name: "模块启停设置", exact: true }).click();
   await page.locator('#section-panel[data-page="system"][data-section="modules"]').waitFor();
   await require("./ui_memory.cjs")(page, go, field, click, save, shot);
-  // All large archives page at ten records; opening text is deliberate.
+  // Non-memory archives retain ten-record pages; profiles use their own browser.
   await page.evaluate(() => {
-    for (const key of ["memories", "events", "observations", "entries", "deliveries"]) window.recordBackups ||= {}, window.recordBackups[key] = structuredClone(window.fixture[key]);
+    for (const key of ["events", "observations", "entries", "deliveries"]) window.recordBackups ||= {}, window.recordBackups[key] = structuredClone(window.fixture[key]);
     for (const key of Object.keys(window.recordBackups)) window.fixture[key] = Array.from({ length: 23 }, (_, i) => ({ id: `${key}-${i}`, schema_version: 2, title: `记录 ${i}：` + "长名称".repeat(30), text: `详细正文 ${key} ${i}`, scope: i % 2 ? "global" : "qq:FriendMessage:42", kind: key === "entries" ? "journal" : "event", module: "news", created_at: 1800000000 + i }));
   }); await click("刷新数据");
-  for (const [name, tab, key] of [["character", "events", "events"], ["memory", "records", "memories"], ["sources", "records", "observations"], ["memory", "journals", "journals"], ["chat", "deliveries", "deliveries"]]) {
+  for (const [name, tab, key] of [["character", "events", "events"], ["sources", "records", "observations"], ["memory", "journals", "journals"], ["chat", "deliveries", "deliveries"]]) {
     await go(name, tab); if (name === "sources") await field("source.records").selectOption("");
     if (key === "journals") await field("journals.kind").selectOption("");
     assert.equal(await page.locator(".compact-record-row").count(), 10, `${name}/${tab} defaults to ten`);

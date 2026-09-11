@@ -13,8 +13,8 @@ def qq_number(value):
     return str(int(match[1])) if match else ""
 
 
-async def named_profiles(runtime, profiles, memories):
-    """Decorate a read-only snapshot; never rewrite identity, ownership or memory data."""
+def profile_labels(runtime, profiles, memories):
+    """Resolve local labels immediately and return only uncached lookup descriptors."""
     result = copy.deepcopy(profiles)
     origins = {}
     for memory in memories:
@@ -34,17 +34,7 @@ async def named_profiles(runtime, profiles, memories):
         except (ValueError, AttributeError):
             continue
     connections = {scope.split(":", 1)[0] for scope, _ in configured}
-    semaphore = asyncio.Semaphore(6)
-    started = set()
-
-    async def resolve(profile, target, source_scope):
-        async with semaphore:
-            started.add(target)
-            name = await runtime.social._target_name(target, source_scope=source_scope)
-            if name:
-                profile.update(name=name, name_status="resolved")
-
-    tasks = {}
+    pending = []
     for profile in result:
         if profile.get("owner") != "person":
             continue
@@ -78,9 +68,29 @@ async def named_profiles(runtime, profiles, memories):
         )
         if connection:
             target = f"{connection}:FriendMessage:{number}"
-            tasks[
-                asyncio.create_task(resolve(profile, target, scopes[0] if scopes else target))
-            ] = target
+            cached = runtime.social._target_names.get(target)
+            if cached and cached[0] > monotonic():
+                if cached[1]:
+                    profile.update(name=cached[1], name_status="resolved")
+            else:
+                pending.append((profile, target, scopes[0] if scopes else target))
+    return result, pending
+
+
+async def named_profiles(runtime, profiles, memories):
+    """Decorate read-only labels with a bounded, connection-specific lookup."""
+    result, pending = profile_labels(runtime, profiles, memories)
+    semaphore = asyncio.Semaphore(6)
+    started = set()
+
+    async def resolve(profile, target, source_scope):
+        async with semaphore:
+            started.add(target)
+            name = await runtime.social._target_name(target, source_scope=source_scope)
+            if name:
+                profile.update(name=name, name_status="resolved")
+
+    tasks = {asyncio.create_task(resolve(*item)): item[1] for item in pending}
     if tasks:
         # A large profile bank or a disconnected bot must not stall the page serially.
         try:

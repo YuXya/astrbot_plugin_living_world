@@ -112,7 +112,7 @@ async def test_whole_page_timeout_is_bounded_and_failed_lookups_back_off(monkeyp
     assert len(cancelled) == runtime.host.target_name.await_count == 1
 
 
-async def test_snapshot_enriches_names_without_rewriting_existing_memory(tmp_path):
+async def test_profile_names_are_loaded_separately_without_rewriting_memory(tmp_path):
     host = FakeHost()
     host.target_name = AsyncMock(return_value="小明3号")
     runtime = Runtime(tmp_path / "names.sqlite", host)
@@ -124,7 +124,11 @@ async def test_snapshot_enriches_names_without_rewriting_existing_memory(tmp_pat
         )
         before = copy.deepcopy(row)
         snapshot = await runtime.snapshot()
-        assert snapshot["memory_profiles"][0]["name"] == "小明3号"
+        assert "memories" not in snapshot and "memory_profiles" not in snapshot
+        assert snapshot["memory_count"] == 1
+        host.target_name.assert_not_awaited()
+        result = await runtime.page_action({"action": "memory.names", "ids": [row["identity"]]})
+        assert result["items"][0]["name"] == "小明3号"
         assert runtime.store.get("memories", row["id"]) == before
     finally:
         await runtime.stop()

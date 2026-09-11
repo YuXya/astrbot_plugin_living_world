@@ -39,10 +39,10 @@ from .layout import (
     reply_blocks,
     FIELD_BLOCKS,
 )
-from .context_catalog import memory_category
 from .context_usage import usage_for
 from .life import LifeService
 from .memory import MemoryService
+from .memory_admin import MemoryAdmin, READ_ACTIONS
 from .store import Store
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,7 @@ class Runtime:
 
         self.chat = ChatService(self)
         self.memory = MemoryService(self)
+        self.memory_admin = MemoryAdmin(self)
         self.life = LifeService(self)
         with self.store.transaction():
             self.drives = DriveService(self)
@@ -985,8 +986,6 @@ class Runtime:
             await asyncio.sleep(float(self.settings["life"]["tick_seconds"]))
 
     async def snapshot(self):
-        from .profile_names import named_profiles
-
         catalogs = await self.host.catalogs(self.settings["sessions"])
         session_status = [await self.chat.inspect(s["umo"]) for s in self.settings["sessions"]]
         diagnostics = []
@@ -1017,8 +1016,6 @@ class Runtime:
             dependency.update(status="unavailable", text=str(exc))
             if self.enabled("bilibili") or self.enabled("daily_digest"):
                 diagnostics.append(str(exc))
-        memories = self.store.list("memories")
-        memory_profiles = await named_profiles(self, self.memory.profiles(), memories)
         return {
             "version": __version__,
             "settings": self.settings,
@@ -1057,9 +1054,8 @@ class Runtime:
             "context_layout_catalog": layout_catalog(),
             "session_status": session_status,
             "provider_capture_available": self.chat.audit.available and self.chat.audit.active,
-            "memories": [{**row, "context_category": memory_category(row)} for row in memories],
+            "memory_count": self.memory_admin.count(),
             "memory_status": {"queue": self.memory.queue_status()},
-            "memory_profiles": memory_profiles,
             "observations": self.store.list("observations"),
             "entries": self.journal.list_entries(),
             "events": self.store.list("events")[:200],
@@ -1113,7 +1109,21 @@ class Runtime:
 
     async def page_action(self, data):
         """Return affected page records without reloading unrelated host or debug data."""
+        memory_change = data.get("action") in {"memory.update", "memory.delete"}
+        old_memory = self.store.get("memories", str(data.get("id", ""))) if memory_change else None
         result = await self.action(data)
+        if memory_change:
+            if data["action"] == "memory.update" and not result:
+                raise ValueError("记忆未保存：请检查记忆模块是否开启；编辑草稿继续保留")
+            identity = (result or {}).get("identity") or (old_memory or {}).get("identity")
+            return {
+                **self.memory_admin.receipt(identity),
+                "record": self.memory_admin._record(result)
+                if data["action"] == "memory.update"
+                else None,
+                "previous": self.memory_admin._record(old_memory) if old_memory else None,
+                "deleted_id": str(data.get("id", "")) if data["action"] == "memory.delete" else "",
+            }
         if data.get("action") in {"update_activity", "update_activities"}:
             return {
                 "result": result,
@@ -1127,6 +1137,8 @@ class Runtime:
     async def _action(self, data):
         action = data.get("action")
         scope = str(data.get("scope", "global"))
+        if action in READ_ACTIONS:
+            return await self.memory_admin.handle(action, data)
         if action == "set_drive_value":
             return self.drives.set_value(data.get("id"), data.get("value"))
         if action == "save_drive_settings":
@@ -1175,11 +1187,20 @@ class Runtime:
             self.kick_memory()
             return self.memory.queue_status()
         if action == "memory.history":
-            return {"records": self.memory.history(str(data["id"]))}
+            return self.memory_admin.history(data)
         if action == "memory.update":
             patch = dict(data.get("patch", {}))
             if data.get("id"):
-                return self.memory.update(str(data["id"]), patch)
+                with self.store.transaction():
+                    current = self.memory_admin.detail(str(data["id"]))
+                    if data.get("expected_version", current["version"]) != current["version"]:
+                        raise ValueError("这条记忆已被更新，请查看最新版本后重新编辑；草稿仍保留")
+                    return self.memory.update(str(data["id"]), patch)
+            if data.get("profile_id"):
+                profile = self.memory_admin.profile(str(data["profile_id"]))
+                if profile["owner"] == "self" and not profile["current"]:
+                    raise ValueError("历史自身档案不能新增记忆；新增自身记忆使用当前人格")
+                data = {**data, "person_id": profile.get("person_id", "")}
             return self.memory.remember(
                 patch.get("text", patch.get("judgment", "")),
                 scope=scope,

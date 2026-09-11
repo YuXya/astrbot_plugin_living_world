@@ -109,9 +109,10 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       window.fixture.context_layout_catalog = bootstrap.context_layout_catalog;
       window.fixture.settings.context_layout = structuredClone(bootstrap.context_layout_defaults);
       window.fixture.settings.context_usage = structuredClone(bootstrap.context_usage_defaults);
+      window.fixture.settings.memory = { medium_threshold: 3, long_threshold: 10 };
       window.AstrBotPluginPage = {
         ready: async () => ({ isDark: false }),
-        apiGet: async (endpoint) => { window.calls.push({ endpoint, method: "GET" }); if (endpoint === "state" && window.rejectStateRead) throw new Error("保存设置不应重新读取全部状态"); return structuredClone(endpoint === "export" ? { version: 1, settings: window.fixture.settings } : window.fixture); },
+        apiGet: async (endpoint) => { window.calls.push({ endpoint, method: "GET" }); if (endpoint === "state" && window.rejectStateRead) throw new Error("保存设置不应重新读取全部状态"); const { memories, memory_profiles, ...state } = window.fixture; return structuredClone(endpoint === "export" ? { version: 2, settings: window.fixture.settings } : { ...state, memory_count: memories.length }); },
         apiPost: async (endpoint, body) => {
           window.calls.push({ endpoint, method: "POST", body: structuredClone(body) });
           if (window.failNext) { window.failNext = false; throw new Error("测试来源暂时不可用"); }
@@ -167,14 +168,37 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
             });
             return structuredClone({ result: body.action === "update_activity" ? changed[0] : changed, page_state: { activities: window.fixture.activities, detail_history: window.fixture.detail_history } });
           }
-          if (body.action === "memory.update") {
-            const row = window.fixture.memories.find(item => item.id === body.id);
-            if (row) { (window.memoryVersions ||= {})[row.id] ||= []; window.memoryVersions[row.id].push(structuredClone(row)); Object.assign(row, body.patch, { version: row.version + 1 }); return structuredClone(row); }
-            const created = { id: "manual-memory", schema_version: 2, owner: body.person_id ? "person" : "self", persona_name: body.person_id ? "" : "小夏", scope: body.scope, person_id: body.person_id, ...body.patch, version: 1 }; window.fixture.memories.push(created); return structuredClone(created);
+          if (body.action?.startsWith("memory.")) {
+            const attrs = ["用户别名", "事实属性", "技能树", "关系图谱", "活跃项目"];
+            const records = window.fixture.memories;
+            records.forEach(row => { row.identity ||= row.owner === "person" ? "person:" + row.person_id : "self:" + row.persona_name; });
+            const profiles = () => window.fixture.memory_profiles.map(profile => {
+              const rows = records.filter(row => row.identity === profile.id && row.active !== false);
+              return { ...profile, count: rows.length, stable_count: rows.filter(row => row.stable).length,
+                protected_count: rows.filter(row => row.important || row.protected).length, inferred_count: rows.filter(row => row.inferred).length,
+                attributes: Object.fromEntries(attrs.map(attr => [attr, rows.filter(row => row.attribute === attr).length])) };
+            });
+            const owners = profiles(), profile = owners.find(p => p.id === body.profile_id);
+            const pageOf = (rows, limit, offset = 0) => ({ items: structuredClone(rows.slice(offset, offset + limit)), total: rows.length, offset, limit, has_more: offset + limit < rows.length });
+            if (body.action === "memory.profiles") return { ...pageOf(owners, 12, body.offset), memory_count: records.length };
+            if (body.action === "memory.names") return { items: owners.filter(p => body.ids.includes(p.id)).map(p => ({ id: p.id, name: p.name, name_status: "resolved" })) };
+            if (body.action === "memory.records") {
+              const selected = records.filter(row => (!profile || row.identity === profile.id) && (!body.attribute || row.attribute === body.attribute));
+              const common = { owners, profile, filters: { scope: ["global", scope], source: [] }, total: selected.length };
+              return body.mode === "grouped" ? { ...common, groups: Object.fromEntries(attrs.filter(attr => !body.attribute || attr === body.attribute).map(attr => [attr, pageOf(selected.filter(row => row.attribute === attr), 10, body.offsets?.[attr])])) } : { ...common, ...pageOf(selected, 20, body.offset) };
+            }
+            const row = records.find(item => item.id === body.id), previous = row ? structuredClone(row) : null;
+            if (body.action === "memory.detail") return { record: structuredClone(row), source_keys: [], replaced_by: "" };
+            if (body.action === "memory.sources") return { items: [], notice: "未保存可定位的原记录" };
+            if (body.action === "memory.history") return { records: structuredClone(window.memoryVersions?.[body.id] || []).reverse(), current: structuredClone(row), offset: 0, limit: 20, has_more: false };
+            if (body.action === "memory.update") {
+              if (row) { (window.memoryVersions ||= {})[row.id] ||= []; window.memoryVersions[row.id].push(structuredClone(row)); Object.assign(row, body.patch, { version: row.version + 1 }); }
+              else records.push({ id: "manual-memory", schema_version: 2, owner: "self", identity: "self:小夏", persona_name: "小夏", scope: body.scope, ...body.patch, version: 1 });
+              const saved = row || records.at(-1);
+              return { record: structuredClone(saved), previous, profile: profiles().find(p => p.id === saved.identity), memory_count: records.length };
+            }
+            if (body.action === "memory.delete") { records.splice(records.indexOf(row), 1); return { previous, deleted_id: row.id, profile: profiles().find(p => p.id === row.identity), memory_count: records.length }; }
           }
-          if (body.action === "memory.history") return { records: structuredClone(window.memoryVersions?.[body.id] || []) };
-          if (body.action === "memory.delete") { window.fixture.memories = window.fixture.memories.filter(row => row.id !== body.id); return { status: "success" }; }
-          if (body.action === "memory.migration.pause" || body.action === "memory.migration.resume") { window.fixture.memory_status.migration.paused = body.action.endsWith("pause"); return structuredClone(window.fixture.memory_status); }
           return { status: "success", action: body.action };
         },
       };
