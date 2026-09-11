@@ -402,8 +402,29 @@ class RuntimeSocialBoundaryTests(unittest.IsolatedAsyncioTestCase):
             async def generate(self, provider, prompt, system, scope):
                 return "只在私聊中谈到的生日惊喜", {}
 
+            async def generate_request(self, request):
+                if request["task"] == "memory.reflect":
+                    return json.dumps(
+                        {
+                            "memories": [
+                                {
+                                    "judgment": "聊到了生日惊喜",
+                                    "evidence": "只在私聊中谈到的生日惊喜",
+                                    "owner": "self",
+                                    "attribute": "事实属性",
+                                }
+                            ]
+                        }
+                    ), {}
+                if request["task"].startswith("memory."):
+                    return '{"keywords":[],"feedback":[]}', {}
+                return await self.generate(
+                    None, request["prompt"], request["system_prompt"], request["scope"]
+                )
+
         host = IntegrationHost()
         runtime = ActualRuntime(":memory:", host)
+        runtime.kick_memory = lambda: None
         try:
             await runtime.update_settings(
                 {
@@ -418,6 +439,8 @@ class RuntimeSocialBoundaryTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(result["status"], "success")
             self.assertNotIn("生日惊喜", json.dumps(result, ensure_ascii=False))
+            self.assertNotIn("生日惊喜", await runtime.context_text(FRIEND))
+            await runtime.memory.process_pending()
             self.assertNotIn("生日惊喜", await runtime.context_text("global"))
             self.assertNotIn("生日惊喜", await runtime.context_text(GROUP))
             self.assertIn("生日惊喜", await runtime.context_text(FRIEND))

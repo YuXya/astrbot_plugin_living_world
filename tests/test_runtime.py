@@ -39,6 +39,16 @@ class FakeHost:
             raise value
         return value, {"provider": provider or "default", "input_tokens": 10}
 
+    async def generate_request(self, request):
+        task = request["task"]
+        if task == "memory.query":
+            return '{"keywords":["明天","约定"]}', {}
+        if task == "memory.feedback":
+            return '{"feedback":[]}', {}
+        return await self.generate(
+            request["provider_id"], request["prompt"], request["system_prompt"], request["scope"]
+        )
+
     async def history(self, scope):
         return "私聊秘密：准备惊喜礼物" if scope == PRIVATE else "小明：数学课有点难"
 
@@ -70,6 +80,7 @@ class FakeHost:
 async def runtime(tmp_path):
     host = FakeHost()
     runtime = Runtime(tmp_path / "world.sqlite", host)
+    runtime.kick_memory = lambda: None
     await runtime.update_settings(
         {
             "persona_id": "student",
@@ -208,6 +219,8 @@ async def test_action_duplicate_persists_after_restart(runtime, tmp_path):
 async def test_diary_cannot_leak_private_events(runtime):
     runtime.record_event("私人约定：礼物保密", scope=PRIVATE, source="action")
     runtime.record_event("角色今天忘带笔", scope="global", source="fiction")
+    runtime.memory.remember("私人约定：礼物保密", scope=PRIVATE, source="chat")
+    runtime.memory.remember("角色今天忘带笔", scope="global", source="fiction")
     runtime.host.answers = ["角色今天忘带笔。"]
     await runtime.journal.generate(scope="global")
     assert "礼物保密" not in runtime.host.calls[-1][1]
@@ -236,7 +249,11 @@ async def test_no_raw_chat_copy_and_memory_evidence(runtime):
         ),
         '{"updates":[],"additions":[],"cancel":[]}',
     ]
-    await runtime.reflect_chat("明天九点碰面", PRIVATE, "qq:42")
+    runtime.memory.enqueue_chat(
+        "明天九点碰面", "好的，九点碰面", scope=PRIVATE, person_id="42", round_id="final-turn"
+    )
+    await runtime.update_settings({"memory": {"chat_batch_rounds": 1}})
+    await runtime.memory.process_pending()
     assert runtime.store.list("memories")
     assert not runtime.store.list("events")
 
@@ -246,7 +263,7 @@ async def test_current_chat_memory_can_form_scoped_diary(runtime):
     runtime.memory.update(row["id"], {"text": "明天下午约好聊天"})
     runtime.host.answers = ["今天约好明天下午聊天。"]
     entry = await runtime.journal.generate(scope=PRIVATE)
-    prompt = runtime.host.calls[-2][1]
+    prompt = runtime.host.calls[-1][1]
     assert "明天下午约好聊天" in prompt and "明天早上约好聊天" not in prompt
     assert entry["scope"] == PRIVATE
     assert not runtime.journal.list_entries("global")

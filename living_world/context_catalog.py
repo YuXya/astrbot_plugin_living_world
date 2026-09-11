@@ -35,7 +35,10 @@ PAGES = {
         "见闻与来源",
         {"settings": "来源设置", "records": "近期见闻", "manual": "手动读取", "runs": "日报执行"},
     ),
-    "memory": ("记忆与日记", {"records": "记忆与人物", "journals": "日记与笔记"}),
+    "memory": (
+        "记忆与日记",
+        {"records": "记忆与画像", "settings": "提炼与遗忘", "journals": "日记与笔记"},
+    ),
     "system": (
         "系统与数据",
         {
@@ -55,7 +58,14 @@ MEMORY_DEFAULTS = {
     "memory.journal": 1,
     "memory.notes": 1,
 }
-DEFAULT_LIMITS = {**MEMORY_DEFAULTS, "experiences": 10, "observations": 5, "weather": 1}
+LEGACY_DEFAULT_LIMITS = {**MEMORY_DEFAULTS, "experiences": 10, "observations": 5, "weather": 1}
+DEFAULT_LIMITS = {
+    "memory.self": 5,
+    "memory.people": 5,
+    "memory.related": 10,
+    "memory.recent": 5,
+    "weather": 1,
+}
 BRIEF_IDS = {"journal": "memory.journal", "notes": "memory.notes"}
 SOURCE_NAMES = {"news": "新闻", "search": "搜索", "bilibili": "B站", "daily_digest": "AI日报"}
 OWNERS = {
@@ -103,6 +113,32 @@ OWNERS = {
 BLOCK_NAMES = {
     "anchor.system": "宿主：原有系统提示词与人格",
     "anchor.user": "宿主消息／任务模板：本轮原始内容",
+    **{key: f"{PAGES[page][1][tab]}：{name}" for key, (page, tab, name) in OWNERS.items()},
+}
+
+# Historical request snapshots keep their original labels and exact block directory.
+V3_OWNERS = copy.deepcopy(OWNERS)
+V3_BLOCK_NAMES = {
+    key: value.replace("记忆与画像：", "记忆与人物：") for key, value in BLOCK_NAMES.items()
+}
+RETIRED_BLOCKS = {
+    *MEMORY_DEFAULTS,
+    "observations",
+    "experiences",
+    "task.events",
+    "task.document",
+    "task.brief_limit",
+}
+OWNERS = {key: value for key, value in OWNERS.items() if key not in RETIRED_BLOCKS}
+OWNERS.update(
+    {
+        "memory": ("memory", "records", "记忆与画像"),
+        "memory.recent": ("memory", "records", "近期记忆"),
+    }
+)
+BLOCK_NAMES = {
+    "anchor.system": V3_BLOCK_NAMES["anchor.system"],
+    "anchor.user": V3_BLOCK_NAMES["anchor.user"],
     **{key: f"{PAGES[page][1][tab]}：{name}" for key, (page, tab, name) in OWNERS.items()},
 }
 

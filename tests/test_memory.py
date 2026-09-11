@@ -1,52 +1,38 @@
-"""Memory service tests with a storage and language-model double."""
-
-from __future__ import annotations
+"""Unified memory contracts, using a transactional store and deterministic models."""
 
 import asyncio
-import copy
 import json
 import unittest
 from datetime import UTC, datetime, timedelta
 
-from living_world.memory import MemoryService
-
-
-class Store:
-    def __init__(self):
-        self.data = {}
-
-    def get(self, namespace, key, default=None):
-        return copy.deepcopy(self.data.get(namespace, {}).get(key, default))
-
-    def put(self, namespace, key, value):
-        self.data.setdefault(namespace, {})[key] = copy.deepcopy(value)
-
-    def list(self, namespace):
-        return copy.deepcopy(list(self.data.get(namespace, {}).values()))
-
-    def delete(self, namespace, key):
-        self.data.get(namespace, {}).pop(key, None)
+from living_world.memory import ATTRIBUTES, MemoryService
+from living_world.memory_config import memory_settings
+from living_world.store import Store
 
 
 class Runtime:
-    def __init__(self):
-        self.store = Store()
-        self.settings = {}
+    def __init__(self, store=None):
+        self.store = store or Store(":memory:")
+        self.settings = {"persona_id": "可可", "character": {"timezone": "Asia/Shanghai"}}
         self.on = True
-        self.response = '{"memories": []}'
+        self.disabled = set()
         self.calls = []
-        self.disable_during_generation = False
+        self.response = {"memories": []}
+        self.hook = None
 
     def enabled(self, module):
-        return module == "memory" and self.on
+        return self.on and module not in self.disabled
 
-    async def generate(self, module, prompt, scope="global"):
-        self.calls.append((module, prompt, scope))
-        if self.disable_during_generation:
-            self.on = False
+    def _source_enabled(self, source):
+        return source.split(":")[0] not in self.disabled
+
+    async def complete(self, task, module, prompt, data, scope):
+        self.calls.append((task, data, scope))
+        if self.hook:
+            return await self.hook(task, data)
         if isinstance(self.response, Exception):
             raise self.response
-        return self.response
+        return json.dumps(self.response, ensure_ascii=False)
 
 
 class MemoryTests(unittest.TestCase):
@@ -54,438 +40,438 @@ class MemoryTests(unittest.TestCase):
         self.runtime = Runtime()
         self.memory = MemoryService(self.runtime)
 
-    def test_private_memory_is_not_visible_to_other_scopes(self):
-        private = self.memory.remember("明天一起学习数学", scope="qq:private:1", person_id="qq:1")
-        public = self.memory.remember("数学课忘带了笔", scope="global")
-        self.assertEqual(
-            [row["id"] for row in self.memory.recall("数学", scope="qq:group:2", person_id="qq:1")],
-            [public["id"]],
-        )
-        self.assertEqual(
-            {
-                row["id"]
-                for row in self.memory.recall("数学", scope="qq:private:1", person_id="qq:1")
-            },
-            {private["id"], public["id"]},
-        )
-        self.assertNotIn(private["id"], [row["id"] for row in self.memory.recall(scope="global")])
+    def tearDown(self):
+        self.runtime.store.close()
 
-    def test_profile_from_scoped_direct_remember_stays_scoped(self):
-        record = self.memory.remember(
-            "喜欢摄影", scope="qq:private:1", person_id="qq:1", profile=True
-        )
-        self.assertEqual(record["scope"], "qq:private:1")
-        self.assertEqual(self.memory.recall(scope="qq:group:2", person_id="qq:1"), [])
-        self.assertEqual(self.memory.recall(scope="qq:private:1", person_id="qq:2"), [])
+    def run_async(self, awaitable):
+        return asyncio.run(awaitable)
+
+    def candidate(self, text, **extra):
+        return {
+            "judgment": text,
+            "evidence": text,
+            "attribute": "事实属性",
+            "owner": "self",
+            **extra,
+        }
+
+    def test_five_attributes_no_old_classification(self):
+        self.assertEqual(len(ATTRIBUTES), 5)
+        for attribute in ATTRIBUTES:
+            row = self.memory.remember(attribute, attribute=attribute)
+            self.assertNotIn("kind", row)
+            self.assertEqual(row["schema_version"], 2)
         with self.assertRaises(ValueError):
-            self.memory.remember("未经证明的个人画像", person_id="qq:1", profile=True)
+            self.memory.remember("事件", attribute="事件")
 
-    def test_person_filter_does_not_pick_up_another_person(self):
-        self.memory.remember("甲喜欢数学", scope="qq:group:1", person_id="qq:1")
-        wanted = self.memory.remember("乙喜欢数学", scope="qq:group:1", person_id="qq:2")
+    def test_self_rename_and_return_other_people_survive(self):
+        own = self.memory.remember("学会水彩", stable=True)
+        person = self.memory.remember("小明喜欢举例", person_id="qq:1", stable=True)
+        self.runtime.settings["persona_id"] = "新名字"
+        self.assertEqual(self.memory.recall(person_id="qq:1"), [person])
+        second = self.memory.remember("刚认识新同学")
+        self.assertNotEqual(own["identity"], second["identity"])
+        self.runtime.settings["persona_id"] = "可可"
         self.assertEqual(
-            [row["id"] for row in self.memory.recall("数学", scope="qq:group:1", person_id="qq:2")],
-            [wanted["id"]],
+            {r["id"] for r in self.memory.recall(person_id="qq:1")}, {own["id"], person["id"]}
         )
+        self.assertEqual(len(self.memory.profiles()), 3)
 
-    def test_unowned_global_memories_are_available_to_any_person(self):
-        wanted = self.memory.remember("今日天气晴朗", kind="knowledge", source="weather")
-        self.assertEqual(
-            self.memory.recall("天气", scope="qq:group:1", person_id="qq:1")[0]["id"], wanted["id"]
+    def test_scope_and_module_isolation(self):
+        self.memory.remember("私人约定", scope="private:1", person_id="qq:1")
+        public = self.memory.remember("搜索海洋知识", source="search")
+        self.assertEqual(self.memory.recall(scope="group:2", person_id="qq:1"), [public])
+        self.runtime.disabled.add("search")
+        self.assertEqual(self.memory.recall(scope="group:2", person_id="qq:1"), [])
+
+    def test_recent_uses_actual_time_across_days_not_update_time(self):
+        old = self.memory.remember("上周练字", occurred_at="2026-09-01T09:00:00+08:00")
+        recent = self.memory.remember("昨天买书", occurred_at="2026-09-10T18:00:00+08:00")
+        self.memory.remember("没有可靠时间", occurred_at="")
+        self.memory.update(old["id"], {"text": "上周练字很认真"})
+        view = self.run_async(self.memory.select_context("global", selection=["memory.recent"]))
+        self.assertEqual([r["id"] for r in view["recent_memories"]], [recent["id"], old["id"]])
+        self.assertEqual(self.runtime.calls, [])
+
+    def test_recent_priority_and_unselected_does_not_consume_quota(self):
+        recent = self.memory.remember(
+            "喜欢水彩", stable=True, occurred_at="2026-09-10T18:00:00+08:00"
         )
+        other = self.memory.remember(
+            "喜欢摄影", stable=True, occurred_at="2026-09-09T18:00:00+08:00"
+        )
+        usage = {"limits": {"memory.recent": 1, "memory.self": 1, "memory.related": 0}}
+        view = self.run_async(self.memory.select_context("global", usage=usage))
+        self.assertEqual(view["recent_memories"], [recent])
+        self.assertEqual(view["memories"], [other])
+        alone = self.run_async(
+            self.memory.select_context("global", usage=usage, selection=["memory"])
+        )
+        self.assertEqual(alone["memories"], [recent])
 
-    def test_chinese_search_and_unrelated_query(self):
-        wanted = self.memory.remember("下午数学课上学习了几何")
-        self.memory.remember("晚上阅读关于海洋生物的书")
-        self.assertEqual(self.memory.recall("数学")[0]["id"], wanted["id"])
-        self.assertEqual(self.memory.recall("火箭发动机"), [])
+    def test_group_people_current_speaker_first_and_limit(self):
+        for identifier in ("qq:1", "qq:2", "qq:3"):
+            self.memory.remember(identifier + "偏好举例", person_id=identifier, stable=True)
+        view = self.run_async(
+            self.memory.select_context(
+                "group:1",
+                person_id="qq:3",
+                people=[{"person_id": "qq:1"}, "qq:2"],
+                usage={"people_limit": 2, "limits": {"memory.related": 0}},
+                selection=["memory"],
+            )
+        )
+        self.assertEqual([row["person_id"] for row in view["memories"]], ["qq:3", "qq:1"])
 
-    def test_recall_reinforces_the_returned_memory_only(self):
-        target = self.memory.remember("learned algebra")
-        untouched = self.memory.remember("listened to music")
-        recalled = self.memory.recall("algebra")[0]
-        self.assertGreater(recalled["strength"], target["strength"])
-        self.assertEqual(recalled["access_count"], 1)
-        self.assertEqual(self.runtime.store.get("memories", untouched["id"])["access_count"], 0)
+    def test_bm25_searches_tags_and_conclusions(self):
+        wanted = self.memory.remember("团子是家里的猫", tags=["宠物"])
+        self.memory.remember("学会蓝色湿画法", tags=["水彩"])
+        self.assertEqual(self.memory.recall("宠物"), [wanted])
+        self.assertEqual(self.memory.recall("家里的猫"), [wanted])
+        self.assertEqual(self.memory.recall("量子计算"), [])
 
-    def test_duplicate_text_reuses_a_record_but_respects_scope(self):
-        first = self.memory.remember("Enjoy  Music", scope="qq:group:1")
-        again = self.memory.remember("enjoy music", scope="qq:group:1", important=True)
-        other = self.memory.remember("enjoy music", scope="qq:group:2")
+    def test_model_expansion_connects_synonyms_without_writes(self):
+        wanted = self.memory.remember("养的猫叫团子", tags=["宠物"])
+        self.runtime.response = {"keywords": ["宠物", "猫", "名字"]}
+        before = self.runtime.store.export()
+        view = self.run_async(
+            self.memory.select_context("global", query="毛孩子叫什么", selection=["memory"])
+        )
+        self.assertEqual(view["memories"], [wanted])
+        self.assertEqual(self.runtime.store.export(), before)
+        self.assertEqual(self.runtime.calls[0][0], "memory.query")
+
+    def test_expansion_failure_and_timeout_fall_back(self):
+        wanted = self.memory.remember("我在学习 Python")
+        self.runtime.response = RuntimeError("unavailable")
+        view = self.run_async(
+            self.memory.select_context("global", query="Python", selection=["memory"])
+        )
+        self.assertEqual(view["memories"], [wanted])
+
+        async def slow(task, data):
+            await asyncio.sleep(5)
+
+        self.runtime.hook = slow
+        self.runtime.settings["memory"] = {"query_timeout_seconds": 0.1}
+        view = self.run_async(
+            self.memory.select_context("global", query="Python", selection=["memory"])
+        )
+        self.assertEqual(view["memories"], [wanted])
+
+    def test_internal_task_and_recent_only_do_not_expand(self):
+        self.memory.remember("Python", occurred_at="2026-09-10T18:00:00+08:00")
+        self.run_async(self.memory.select_context("global", query="Python", task="memory.reflect"))
+        self.run_async(
+            self.memory.select_context("global", query="Python", selection=["memory.recent"])
+        )
+        self.assertEqual(self.runtime.calls, [])
+
+    def test_date_uses_role_timezone_excludes_undated_profiles_and_other_people(self):
+        wanted = self.memory.remember("凌晨读书", occurred_at="2026-09-10T17:00:00+00:00")
+        self.memory.remember("长期喜好", stable=True, occurred_at="")
+        self.memory.remember("小明读书", person_id="qq:1", occurred_at="2026-09-10T17:00:00+00:00")
+        view = self.run_async(
+            self.memory.select_context(
+                "global", date="2026-09-11", self_only=True, person_id="qq:1", semantic=False
+            )
+        )
+        self.assertEqual(view["recent_memories"], [wanted])
+        self.assertEqual(view["memories"], [])
+
+    def test_chat_five_rounds_final_replies_only(self):
+        for n in range(4):
+            self.memory.enqueue_chat(
+                "我在练琴", "陪你练习" + str(n), scope="private:1", round_id=str(n)
+            )
+        self.assertEqual(self.run_async(self.memory.process_pending())["processed"], 0)
+        self.memory.enqueue_chat("我在练琴", "陪你练习4", scope="private:1", round_id="4")
+        self.runtime.response = {"memories": [self.candidate("我在练琴")]}
+        result = self.run_async(self.memory.process_pending())
+        self.assertEqual(result["processed"], 5)
+        self.assertEqual(len(self.runtime.store.list("memory_jobs")), 0)
+        self.assertEqual(len(self.runtime.store.list("memories")), 1)
+        self.assertNotIn("text", self.runtime.store.list("memory_materials")[0])
+
+    def test_idle_flush_survives_restart_and_scopes_remain_separate(self):
+        job = self.memory.enqueue_chat("练琴", "好的", scope="private:1", round_id="first")
+        job["created_at"] = (datetime.now(UTC) - timedelta(minutes=11)).isoformat()
+        self.runtime.store.put("memory_jobs", job["id"], job)
+        self.memory.enqueue_chat("吃饭", "好的", scope="group:2", round_id="second")
+        restarted = MemoryService(self.runtime)
+        self.assertEqual(self.run_async(restarted.process_pending())["processed"], 1)
+        self.assertEqual(self.runtime.store.list("memory_jobs")[0]["scope"], "group:2")
+
+    def test_immediate_material_idempotence_and_failure_retry(self):
+        first = self.memory.enqueue_material(
+            "学会 Python", key="observation:1", occurred_at="2026-09-01T00:00:00Z"
+        )
+        again = self.memory.enqueue_material("不同呈现格式", key="observation:1")
         self.assertEqual(first["id"], again["id"])
-        self.assertNotEqual(first["id"], other["id"])
-        self.assertTrue(again["important"])
-        self.assertEqual(len(self.runtime.store.list("memories")), 2)
+        self.runtime.response = "invalid"
+        self.assertEqual(self.run_async(self.memory.process_pending())["failed"], 1)
+        row = self.runtime.store.list("memory_jobs")[0]
+        self.assertEqual(row["text"], "学会 Python")
+        self.assertEqual(row["attempts"], 1)
+        row["retry_at"] = 0
+        self.runtime.store.put("memory_jobs", row["id"], row)
+        self.runtime.response = {"memories": [self.candidate("学会 Python")]}
+        self.assertEqual(self.run_async(self.memory.process_pending())["processed"], 1)
+        self.assertEqual(self.memory.recall()[0]["occurred_at"], "2026-09-01T00:00:00.000000+00:00")
 
-    def test_key_upsert_replaces_old_content_without_cross_scope_writes(self):
-        old = self.memory.remember("tea", key="drink", scope="qq:group:1")
-        new = self.memory.remember("coffee", key="drink", scope="qq:group:1")
-        self.assertEqual(old["id"], new["id"])
-        self.assertEqual(self.memory.recall("tea", scope="qq:group:1"), [])
-        with self.assertRaises(ValueError):
-            self.memory.remember("secret", key="drink", scope="qq:private:1")
+    def test_transaction_rejects_mixed_invalid_update_without_replacing_old(self):
+        old = self.memory.remember("喜欢茶", scope="private:1")
+        self.memory.enqueue_material("喜欢咖啡", scope="private:1", key="e:1")
+        self.runtime.response = {
+            "memories": [
+                self.candidate("喜欢咖啡", replace_id=old["id"]),
+                self.candidate("不存在的证据"),
+            ]
+        }
+        self.run_async(self.memory.process_pending())
+        self.assertEqual(self.memory.recall(scope="private:1")[0]["text"], "喜欢茶")
+        self.assertEqual(self.memory.versions(old["id"]), [])
 
-    def test_update_replaces_old_content_and_prevents_scope_widening(self):
-        row = self.memory.remember("tea", scope="qq:private:1")
-        updated = self.memory.update(row["id"], {"text": "coffee", "important": True})
-        self.assertTrue(updated["important"])
-        self.assertEqual(self.memory.recall("tea", scope="qq:private:1"), [])
-        self.assertEqual(self.memory.recall("coffee", scope="qq:private:1")[0]["id"], row["id"])
+    def test_unknown_identity_and_scope_escalation_are_rejected(self):
+        self.memory.enqueue_material("甲喜欢摄影", scope="private:1", person_id="qq:1")
+        self.runtime.response = {
+            "memories": [self.candidate("甲喜欢摄影", owner="person", person_id="qq:2")]
+        }
+        self.run_async(self.memory.process_pending())
+        self.assertEqual(self.memory.recall(person_id="qq:2"), [])
+        row = self.memory.remember("私人内容", scope="private:1")
         with self.assertRaises(ValueError):
             self.memory.update(row["id"], {"scope": "global"})
 
-    def test_merge_keeps_restrictive_scope_and_important_flag(self):
-        public = self.memory.remember("math class", important=True, source="life")
-        private = self.memory.remember(
-            "personal promise", scope="qq:private:1", person_id="qq:1", source="chat"
+    def test_useful_feedback_once_only_for_actual_adopted_memory(self):
+        used = self.memory.remember("猫叫团子")
+        unused = self.memory.remember("喜欢喝茶")
+        feedback = self.memory.record_feedback(
+            "r1",
+            [{"memory_ids": [used["id"]], "memories": [used]}],
+            "猫叫团子",
+            scope="global",
+            task="social.message",
         )
-        merged = self.memory.merge([public["id"], private["id"]], "math class promise")
-        self.assertEqual(merged["scope"], "qq:private:1")
-        self.assertEqual(merged["person_id"], "qq:1")
-        self.assertTrue(merged["important"])
-        self.assertEqual(set(merged["sources"]), {"life", "chat"})
-        self.assertEqual(len(self.runtime.store.list("memories")), 1)
-        self.assertEqual(self.memory.recall(scope="qq:group:1", person_id="qq:1"), [])
+        self.runtime.response = {
+            "feedback": [
+                {"round_id": "r1", "memory_id": used["id"], "useful": True},
+                {"round_id": "r1", "memory_id": unused["id"], "useful": True},
+            ]
+        }
+        self.run_async(self.memory.process_pending())
+        self.run_async(self.memory.process_pending())
+        self.assertEqual(self.runtime.store.get("memories", used["id"])["useful_score"], 2.5)
+        self.assertEqual(self.runtime.store.get("memories", unused["id"])["useful_score"], 0)
+        self.assertIsNotNone(self.runtime.store.get("memory_feedback_done", feedback["id"]))
 
-    def test_merge_rejects_unrelated_scopes_and_people(self):
-        first = self.memory.remember("first", scope="qq:private:1", person_id="qq:1")
-        second = self.memory.remember("second", scope="qq:group:1", person_id="qq:1")
-        with self.assertRaises(ValueError):
-            self.memory.merge([first["id"], second["id"]], "combined")
-        third = self.memory.remember("third", scope="qq:group:1", person_id="qq:2")
-        with self.assertRaises(ValueError):
-            self.memory.merge([second["id"], third["id"]], "combined")
-        self.assertEqual(len(self.runtime.store.list("memories")), 3)
+    def test_feedback_missing_failed_or_changed_version_never_reinforces(self):
+        used = self.memory.remember("旧结论")
+        self.memory.record_feedback(
+            "r1", [{"memory_ids": [used["id"]], "memories": [used]}], "回答", task="life.detail"
+        )
+        self.memory.update(used["id"], {"text": "新结论"})
+        self.runtime.response = {
+            "feedback": [{"round_id": "r1", "memory_id": used["id"], "useful": True}]
+        }
+        self.run_async(self.memory.process_pending())
+        self.assertEqual(self.runtime.store.get("memories", used["id"])["useful_score"], 0)
+        self.memory.record_feedback(
+            "r2", [{"memory_ids": [used["id"]]}], "回答", task="life.detail"
+        )
+        self.runtime.response = RuntimeError("offline")
+        self.run_async(self.memory.process_pending())
+        self.assertEqual(self.runtime.store.get("memories", used["id"])["strength"], 10)
 
-    def test_forgotten_memory_is_archived_important_memory_is_retained(self):
-        now = datetime.now(UTC)
-        ordinary = self.memory.remember("forgettable detail")
-        important = self.memory.remember("important anniversary", important=True)
-        for row in (ordinary, important):
-            for field in ("created_at", "updated_at", "last_accessed_at", "last_decay_at"):
-                row[field] = (now - timedelta(days=365)).isoformat()
+    def test_recall_and_injection_do_not_reinforce(self):
+        row = self.memory.remember("猫叫团子")
+        self.memory.recall("团子", reinforce=True)
+        self.memory.reinforce_sources([{"memory_ids": [row["id"]]}], "global")
+        self.assertEqual(self.runtime.store.get("memories", row["id"]), row)
+
+    def test_optional_decay_online_only_and_all_three_tiers(self):
+        low = self.memory.remember("普通")
+        medium = self.memory.remember("中档")
+        medium["useful_score"] = 3
+        self.runtime.store.put("memories", medium["id"], medium)
+        high = self.memory.remember("长期")
+        high["useful_score"] = 10
+        self.runtime.store.put("memories", high["id"], high)
+        protected = self.memory.remember("主动", protected=True)
+        important = self.memory.remember("重要", important=True)
+        self.memory.maintain(self.memory._clock + 259200)
+        self.assertEqual(self.runtime.store.get("memories", low["id"])["strength"], 10)
+        self.runtime.settings["memory"] = {"forgetting_enabled": True}
+        self.memory.rebase_clock()
+        self.memory.maintain(self.memory._clock + 259200)
+        self.assertEqual(self.runtime.store.get("memories", low["id"])["strength"], 9)
+        for row in (medium, high, protected, important):
+            self.assertEqual(self.runtime.store.get("memories", row["id"])["strength"], 10)
+        restarted = MemoryService(self.runtime)
+        restarted.maintain(restarted._clock)
+        self.assertEqual(self.runtime.store.get("memories", low["id"])["strength"], 9)
+
+    def test_useless_feedback_only_decays_medium_when_enabled(self):
+        self.runtime.settings["memory"] = {"forgetting_enabled": True}
+        for tier in (0, 3, 10):
+            row = self.memory.remember(str(tier))
+            row["useful_score"] = tier
             self.runtime.store.put("memories", row["id"], row)
-        result = self.memory.maintain(now)
-        self.assertEqual(result, {"decayed": 1, "forgotten": 1, "retained": 1})
-        self.assertFalse(self.runtime.store.get("memories", ordinary["id"])["active"])
-        self.assertEqual(self.memory.recall("forgettable"), [])
-        self.assertEqual(self.memory.recall("anniversary")[0]["id"], important["id"])
-        self.assertEqual(len(self.runtime.store.list("memories")), 2)
-
-    def test_decay_is_idempotent_for_the_same_time_and_can_be_restored(self):
-        row = self.memory.remember("detail")
-        now = datetime.now(UTC) + timedelta(days=30)
-        self.memory.maintain(now)
-        first = self.runtime.store.get("memories", row["id"])["strength"]
-        self.memory.maintain(now.isoformat())
-        self.assertAlmostEqual(self.runtime.store.get("memories", row["id"])["strength"], first)
-        self.memory.update(row["id"], {"active": False})
-        self.assertEqual(self.memory.recall(), [])
-        self.memory.update(row["id"], {"active": True})
-        self.assertEqual(self.memory.recall()[0]["id"], row["id"])
-
-    def test_disabled_business_calls_preserve_data_and_admin_still_works(self):
-        first = self.memory.remember("first")
-        second = self.memory.remember("second")
-        before = copy.deepcopy(self.runtime.store.data)
-        self.runtime.on = False
-        self.assertEqual(self.memory.remember("third"), {})
-        self.assertEqual(self.memory.recall(), [])
-        self.assertEqual(self.memory.merge([first["id"], second["id"]], "combined"), {})
-        self.assertEqual(
-            self.memory.maintain(datetime.now(UTC) + timedelta(days=999)),
-            {"decayed": 0, "forgotten": 0, "retained": 0},
-        )
-        self.assertEqual(self.runtime.store.data, before)
-        self.assertEqual(self.memory.update(first["id"], {"text": "edited"})["text"], "edited")
-        self.memory.delete(second["id"])
-        self.assertIsNone(self.runtime.store.get("memories", second["id"]))
-
-    def test_returned_records_do_not_expose_live_store_references(self):
-        row = self.memory.remember("unchanged")
-        row["text"] = "changed outside service"
-        self.assertEqual(self.memory.recall()[0]["text"], "unchanged")
-
-    def test_disabled_sources_are_hidden_from_direct_recall_without_reinforcement(self):
-        disabled = {"news", "weather", "bilibili", "life", "journal", "notes"}
-        self.runtime._source_enabled = lambda source: (
-            ("life" if source == "fiction" else source.split(":", 1)[0]) not in disabled
-        )
-        hidden = [
-            self.memory.remember(f"来源内容 {source}", source=source)
-            for source in ("news", "weather:actual", "bilibili", "fiction", "journal", "notes")
-        ]
-        kept = self.memory.remember("聊天约定", source="chat")
-        self.assertEqual([row["id"] for row in self.memory.recall()], [kept["id"]])
-        self.assertTrue(
-            all(
-                self.runtime.store.get("memories", row["id"])["access_count"] == 0 for row in hidden
+            feedback = self.memory.record_feedback(
+                str(tier), [{"memory_ids": [row["id"]]}], "回答", task="social.message"
             )
-        )
-        disabled.clear()
-        from living_world.context_usage import usage_for
+            self.memory._apply_feedback(
+                {"feedback": [{"round_id": str(tier), "memory_id": row["id"], "useful": False}]},
+                [feedback],
+            )
+            expected = 9 if tier == 3 else 10
+            self.assertEqual(self.runtime.store.get("memories", row["id"])["strength"], expected)
 
-        self.runtime.settings["context_usage"] = usage_for(self.runtime.settings)
-        self.runtime.settings["context_usage"]["limits"]["memory.event"] = 10
-        # Legacy journals remain archived until a brief is generated.
-        self.assertEqual(len(self.memory.recall()), 5)
+    def test_forgetting_deletes_versions_and_prevents_resurrection(self):
+        self.runtime.settings["memory"] = {"forgetting_enabled": True}
+        row = self.memory.remember("旧内容", key="fixed", source_keys=["event:1"])
+        row = self.memory.update(row["id"], {"text": "新内容"})
+        row["strength"] = 1
+        self.runtime.store.put("memories", row["id"], row)
+        self.memory.rebase_clock()
+        self.memory.maintain(self.memory._clock + 259200)
+        self.assertIsNone(self.runtime.store.get("memories", row["id"]))
+        self.assertEqual(self.memory.versions(row["id"]), [])
+        self.assertEqual(self.memory.remember("新内容", key="fixed"), {})
 
-    def test_merged_and_derived_memories_keep_source_disabled_boundaries(self):
-        self.runtime._source_enabled = lambda source: source != "news"
-        news = self.memory.remember("新闻中的新发现", source="news")
-        chat = self.memory.remember("交流中的感受", source="chat")
-        merged = self.memory.merge([news["id"], chat["id"]], "关于新闻的交流感受")
-        derived = self.memory.remember(
-            "新闻与生活日记",
-            source="journal",
-            sources=[{"source": "news", "scope": "global"}, {"source": "fiction"}],
-        )
-        self.assertEqual(self.memory.recall(), [])
-        self.assertIsNotNone(self.runtime.store.get("memories", merged["id"]))
-        self.assertIsNotNone(self.runtime.store.get("memories", derived["id"]))
-        twice_merged = self.memory.merge([merged["id"], derived["id"]], "合并后的记录仍含新闻")
-        self.assertIn("news", twice_merged["sources"])
-        self.assertEqual(self.memory.recall(), [])
-
-
-class ReflectionTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.runtime = Runtime()
-        self.memory = MemoryService(self.runtime)
-
-    def response(self, *records):
-        self.runtime.response = json.dumps({"memories": records}, ensure_ascii=False)
-
-    async def test_evidence_backed_name_follows_same_person_only(self):
-        self.response(
+    def test_migration_preserves_time_and_archives_once_and_waits_for_persona(self):
+        self.runtime.settings["persona_id"] = ""
+        self.runtime.store.put(
+            "events",
+            "e1",
             {
-                "text": "称呼小明",
-                "kind": "knowledge",
-                "profile_attribute": "name",
-                "value": "小明",
-                "evidence": "我叫小明",
-            }
-        )
-        result = await self.memory.reflect(
-            "我叫小明。", scope="qq:private:1", person_id="qq:1", source="chat"
-        )
-        self.assertEqual(result[0]["scope"], "global")
-        self.assertEqual(result[0]["origin_scope"], "qq:private:1")
-        self.assertEqual(result[0]["source"], "chat")
-        self.assertTrue(result[0]["profile"])
-        self.assertEqual(
-            self.memory.recall(scope="qq:group:2", person_id="qq:1")[0]["text"], "称呼：小明"
-        )
-        self.assertEqual(self.memory.recall(scope="qq:group:2", person_id="qq:2"), [])
-        self.assertEqual(self.memory.recall(scope="global"), [])
-
-    async def test_name_correction_replaces_previous_profile(self):
-        for name in ("小明", "小花"):
-            statement = f"我叫{name}"
-            self.response({"profile_attribute": "name", "value": name, "evidence": statement})
-            await self.memory.reflect(statement, scope="qq:private:1", person_id="qq:1")
-        profiles = self.memory.recall(scope="qq:group:1", person_id="qq:1")
-        self.assertEqual(len(profiles), 1)
-        self.assertEqual(profiles[0]["text"], "称呼：小花")
-
-    async def test_global_profile_evidence_does_not_include_surrounding_private_prose(self):
-        statement = "我叫小明，领导批评让我哭了一晚"
-        self.response(
-            {
-                "text": "称呼小明",
-                "profile_attribute": "name",
-                "value": "小明",
-                "evidence": statement,
-            }
-        )
-        result = await self.memory.reflect(statement, scope="qq:private:1", person_id="qq:1")
-        self.assertEqual(result[0]["profile_evidence"], "我叫小明")
-        recalled = self.memory.recall(scope="qq:group:1", person_id="qq:1")
-        self.assertNotIn("领导", json.dumps(recalled, ensure_ascii=False))
-
-    async def test_interest_and_relationship_use_short_verified_values(self):
-        self.response(
-            {
-                "text": "喜欢摄影",
-                "profile_attribute": "interest",
-                "value": "摄影",
-                "evidence": "我平时喜欢摄影",
-            },
-            {
-                "text": "我们是朋友",
-                "profile_attribute": "relationship",
-                "value": "朋友",
-                "evidence": "我们是朋友",
-            },
-        )
-        result = await self.memory.reflect(
-            "我平时喜欢摄影，我们是朋友。", scope="qq:private:1", person_id="qq:1"
-        )
-        self.assertEqual({row["text"] for row in result}, {"稳定兴趣：摄影", "关系：朋友"})
-        self.assertTrue(all(row["scope"] == "global" for row in result))
-
-    async def test_scoped_emotions_and_promises_cannot_be_promoted_by_model(self):
-        statement = "我明天要去医院，希望你陪我"
-        self.response(
-            {
-                "text": "明天陪他去医院的约定",
-                "kind": "emotional",
-                "evidence": statement,
+                "id": "e1",
+                "text": "去年练琴",
                 "scope": "global",
-                "person_id": "someone-else",
-                "profile": True,
-                "profile_attribute": "interest",
-                "value": "医院",
-            }
+                "source": "fiction",
+                "created_at": 1700000000,
+            },
         )
-        result = await self.memory.reflect(statement, scope="qq:private:1", person_id="qq:1")
-        self.assertEqual(result[0]["scope"], "qq:private:1")
-        self.assertEqual(result[0]["person_id"], "qq:1")
-        self.assertFalse(result[0]["profile"])
-        self.assertEqual(self.memory.recall(scope="qq:group:1", person_id="qq:1"), [])
-
-    async def test_request_to_keep_a_name_private_prevents_promotion(self):
-        self.response(
-            {
-                "text": "称呼小明",
-                "profile_attribute": "name",
-                "value": "小明",
-                "evidence": "我叫小明",
-            }
+        self.runtime.store.put(
+            "memories",
+            "old",
+            {"id": "old", "text": "去年练琴", "source_event_id": "e1", "scope": "global"},
         )
-        result = await self.memory.reflect(
-            "我叫小明，但别告诉别人。", scope="qq:private:1", person_id="qq:1"
-        )
-        self.assertEqual(result[0]["scope"], "qq:private:1")
-        self.assertEqual(self.memory.recall(scope="qq:group:1", person_id="qq:1"), [])
+        status = self.memory.migrate()
+        self.assertTrue(status["waiting_persona"])
+        self.assertEqual(status["pending"], 1)
+        self.assertEqual(self.run_async(self.memory.process_pending())["processed"], 0)
+        self.runtime.settings["persona_id"] = "可可"
+        self.runtime.response = {"memories": [self.candidate("去年练琴")]}
+        self.assertEqual(self.run_async(self.memory.process_pending())["processed"], 1)
+        self.assertEqual(self.memory.recall()[0]["occurred_at"], "2023-11-14T22:13:20.000000+00:00")
+        self.memory.migrate()
+        self.assertEqual(self.memory.migration_status()["completed"], 1)
+        self.assertIsNotNone(self.runtime.store.get("memory_legacy", "legacy-memory:old"))
 
-    async def test_unverified_or_missing_evidence_is_not_saved(self):
-        self.response({"text": "made up", "evidence": "not in input"}, {"text": "no evidence"})
-        self.assertEqual(await self.memory.reflect("actual input", scope="qq:private:1"), [])
+    def test_migration_pause_and_source_deletion(self):
+        self.runtime.store.put("journals", "j1", {"id": "j1", "text": "日记", "kind": "journal"})
+        self.memory.migrate()
+        self.memory.pause_migration()
+        self.assertEqual(self.run_async(self.memory.process_pending())["processed"], 0)
+        self.memory.resume_migration()
+        row = self.memory.remember("日记里的事实", source_keys=["journal:j1"])
+        self.memory.delete_source("journal:j1")
+        self.assertIsNone(self.runtime.store.get("memories", row["id"]))
+        self.assertEqual(self.runtime.store.list("memory_jobs"), [])
+        self.assertEqual(self.memory.enqueue_material("日记", key="journal:j1"), {})
 
-    async def test_profile_value_must_occur_in_explicit_self_statement(self):
-        self.response(
-            {
-                "text": "读过摄影入门",
-                "profile_attribute": "interest",
-                "value": "摄影",
-                "evidence": "读过摄影入门",
-            }
-        )
-        result = await self.memory.reflect("读过摄影入门", scope="qq:private:1", person_id="qq:1")
-        self.assertEqual(result[0]["scope"], "qq:private:1")
-        self.assertFalse(result[0]["profile"])
+    def test_settings_validate_ranges_and_default_forgetting_off(self):
+        self.assertFalse(memory_settings({"half_life_days": 30})["forgetting_enabled"])
+        for config in (
+            {"query_timeout_seconds": 16},
+            {"chat_batch_rounds": 0},
+            {"long_threshold": 2, "medium_threshold": 3},
+            {"initial_strength": float("nan")},
+        ):
+            with self.assertRaises(ValueError):
+                memory_settings(config)
 
-    async def test_malformed_extraction_does_not_crash_or_invent_records(self):
-        for response in ("not json", "{}", "null", "[]", '{"memories": "invalid"}'):
-            self.runtime.response = response
-            self.assertEqual(await self.memory.reflect("some text", scope="qq:private:1"), [])
-        self.response({"profile_attribute": [], "text": "some text", "evidence": "some text"})
-        result = await self.memory.reflect("some text", scope="qq:private:1", person_id="qq:1")
-        self.assertEqual(result[0]["scope"], "qq:private:1")
+    def test_stale_inflight_correction_cannot_overwrite_admin(self):
+        old = self.memory.remember("喜欢茶", scope="p")
+        self.memory.enqueue_material("喜欢咖啡", key="e", scope="p")
 
-    async def test_existing_scoped_memory_can_be_corrected(self):
-        previous = self.memory.remember("meet on Monday", scope="qq:private:1", person_id="qq:1")
-        self.response(
-            {"text": "meet on Tuesday", "evidence": "Tuesday instead", "replace_id": previous["id"]}
-        )
-        result = await self.memory.reflect(
-            "Tuesday instead", scope="qq:private:1", person_id="qq:1"
-        )
-        self.assertEqual(result[0]["id"], previous["id"])
-        self.assertEqual(self.memory.recall("Monday", scope="qq:private:1", person_id="qq:1"), [])
-        self.assertEqual(len(self.runtime.store.list("memories")), 1)
+        async def change(task, data):
+            self.memory.update(old["id"], {"text": "管理员修正"})
+            return json.dumps(
+                {"memories": [self.candidate("喜欢咖啡", replace_id=old["id"])]}, ensure_ascii=False
+            )
 
-    async def test_replace_id_cannot_edit_a_different_scope(self):
-        previous = self.memory.remember("private fact", scope="qq:private:1", person_id="qq:1")
-        self.response(
-            {"text": "new public fact", "evidence": "new public fact", "replace_id": previous["id"]}
-        )
-        result = await self.memory.reflect("new public fact", scope="qq:group:1", person_id="qq:1")
-        self.assertNotEqual(result[0]["id"], previous["id"])
-        self.assertEqual(self.runtime.store.get("memories", previous["id"])["text"], "private fact")
+        self.runtime.hook = change
+        self.run_async(self.memory.process_pending())
+        self.assertEqual(self.runtime.store.get("memories", old["id"])["text"], "管理员修正")
 
-    async def test_disabled_module_never_calls_model_and_midflight_disable_discards_result(self):
+    def test_clock_disabled_interval_is_discarded(self):
+        row = self.memory.remember("普通")
+        self.runtime.settings["memory"] = {"forgetting_enabled": True}
+        self.memory.rebase_clock()
         self.runtime.on = False
-        self.assertEqual(await self.memory.reflect("some text", scope="qq:private:1"), [])
-        self.assertEqual(self.runtime.calls, [])
+        self.memory.maintain(self.memory._clock + 500000)
         self.runtime.on = True
-        self.runtime.disable_during_generation = True
-        self.response({"text": "some text", "evidence": "some text"})
-        self.assertEqual(await self.memory.reflect("some text", scope="qq:private:1"), [])
-        self.assertEqual(self.runtime.store.list("memories"), [])
+        self.memory.maintain(self.memory._clock + 500000)
+        self.assertEqual(self.runtime.store.get("memories", row["id"])["strength"], 10)
 
-    async def test_async_waiting_reflection_cannot_write_after_disable(self):
-        entered, released = asyncio.Event(), asyncio.Event()
-
-        async def paused_generate(*args, **kwargs):
-            entered.set()
-            await released.wait()
-            return json.dumps({"memories": [{"text": "private fact", "evidence": "private fact"}]})
-
-        self.runtime.generate = paused_generate
-        task = asyncio.create_task(self.memory.reflect("private fact", scope="qq:private:1"))
-        await asyncio.wait_for(entered.wait(), 1)
-        self.runtime.on = False
-        released.set()
-        self.assertEqual(await task, [])
-        self.assertEqual(self.runtime.store.list("memories"), [])
-
-    async def test_admin_correction_during_extraction_is_not_overwritten(self):
-        row = self.memory.remember("meet on Monday", scope="qq:private:1", person_id="qq:1")
-
-        async def concurrent_generate(*args, **kwargs):
-            self.memory.update(row["id"], {"text": "meet on Friday"})
-            return json.dumps(
-                {
-                    "memories": [
-                        {
-                            "text": "meet on Tuesday",
-                            "evidence": "Tuesday instead",
-                            "replace_id": row["id"],
-                        }
-                    ]
-                }
+    def test_qq_ids_canonicalize_without_guessing_other_identifiers(self):
+        raw = self.memory.remember("偏好举例", person_id="42", stable=True)
+        prefixed = self.memory.remember("偏好举例", person_id="qq:42", stable=True)
+        self.assertEqual(raw["id"], prefixed["id"])
+        self.assertEqual(raw["person_id"], "qq:42")
+        selection = self.run_async(
+            self.memory.select_context(
+                "global",
+                person_id="42",
+                selection=["memory"],
+                usage={"limits": {"memory.related": 0}},
             )
-
-        self.runtime.generate = concurrent_generate
-        self.assertEqual(
-            await self.memory.reflect("Tuesday instead", scope="qq:private:1", person_id="qq:1"), []
         )
-        self.assertEqual(self.runtime.store.get("memories", row["id"])["text"], "meet on Friday")
+        self.assertEqual(selection["memories"][0]["person_id"], "qq:42")
+        other = self.memory.remember("未知标识仍原样保留", person_id="import:unknown")
+        self.assertEqual(other["person_id"], "import:unknown")
+        job = self.memory.enqueue_chat("我喜欢举例", "记住了", scope="p", person_id="42")
+        self.assertEqual(job["person_id"], "qq:42")
 
-    async def test_admin_delete_during_extraction_is_not_resurrected(self):
-        row = self.memory.remember("meet on Monday", scope="qq:private:1", person_id="qq:1")
+    def test_inferences_require_factual_basis_on_creation_and_edit(self):
+        with self.assertRaises(ValueError):
+            self.memory.remember("可能喜欢水彩", inferred=True)
+        row = self.memory.remember("可能喜欢水彩", inferred=True, reasoning="多次主动学习水彩")
+        with self.assertRaises(ValueError):
+            self.memory.update(row["id"], {"reasoning": ""})
+        self.assertEqual(self.runtime.store.get("memories", row["id"]), row)
 
-        async def concurrent_generate(*args, **kwargs):
-            self.memory.delete(row["id"])
-            return json.dumps(
-                {
-                    "memories": [
-                        {
-                            "text": "meet on Tuesday",
-                            "evidence": "Tuesday instead",
-                            "replace_id": row["id"],
-                        }
-                    ]
-                }
-            )
+    def test_recall_can_find_absent_people_only_within_allowed_scope(self):
+        visible = self.memory.remember("小明正在学 Python", person_id="42", scope="group:1")
+        self.memory.remember("小明的私密约定", person_id="42", scope="private:42")
+        self.assertEqual(self.memory.recall("小明", scope="group:1", person_id="qq:99"), [visible])
+        self.assertEqual(self.memory.recall("小明", scope="group:2", person_id="qq:99"), [])
 
-        self.runtime.generate = concurrent_generate
-        self.assertEqual(
-            await self.memory.reflect("Tuesday instead", scope="qq:private:1", person_id="qq:1"), []
+    def test_migration_does_not_capture_new_persona_sources_on_each_worker(self):
+        self.memory.migrate()
+        self.runtime.settings["persona_id"] = "新名字"
+        self.runtime.store.put(
+            "events", "new", {"id": "new", "text": "新名字的经历", "source": "fiction"}
         )
+        self.memory.migrate()
+        self.assertEqual(self.runtime.store.list("memory_jobs"), [])
+        self.assertIsNone(self.runtime.store.get("memory_legacy", "events:new"))
+        job = self.memory.enqueue_material("新名字的经历", key="event:new")
+        self.assertEqual(job["persona_name"], "新名字")
+        self.assertFalse(job["migration"])
+
+    def test_merge_preserves_source_modules_and_deletion_removes_all_versions(self):
+        first = self.memory.remember("新闻读到天文学", source="news")
+        second = self.memory.remember("搜索读到天文学", source="search", protected=True)
+        merged = self.memory.merge([first["id"], second["id"]], "两份来源谈到了天文学")
+        self.assertTrue(merged["protected"])
+        self.runtime.disabled.add("search")
+        self.assertEqual(self.memory.recall("天文学"), [])
+        self.memory.delete(merged["id"])
         self.assertEqual(self.runtime.store.list("memories"), [])
-
-    async def test_model_failure_is_nonfatal_and_repeated_reflection_deduplicates(self):
-        self.runtime.response = RuntimeError("provider unavailable")
-        with self.assertLogs("living_world.memory", level="WARNING"):
-            self.assertEqual(await self.memory.reflect("some text", scope="qq:private:1"), [])
-        self.response({"text": "some text", "evidence": "some text"})
-        first = await self.memory.reflect("some text", scope="qq:private:1")
-        second = await self.memory.reflect("some text", scope="qq:private:1")
-        self.assertEqual(first[0]["id"], second[0]["id"])
-        self.assertEqual(len(self.runtime.store.list("memories")), 1)
+        self.assertEqual(self.runtime.store.list("memory_versions"), [])
 
 
 if __name__ == "__main__":

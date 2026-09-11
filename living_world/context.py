@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+import copy
 import re
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .context_catalog import BLOCK_NAMES, MEMORY_DEFAULTS, SOURCE_NAMES, memory_category
+from .context_catalog import (
+    BLOCK_NAMES,
+    MEMORY_DEFAULTS,
+    SOURCE_NAMES,
+    V3_BLOCK_NAMES,
+    memory_category,
+)
 
 PLACEMENT = "本轮动态资料（不写入聊天历史）"
 STATUS = {
@@ -344,9 +351,112 @@ def observation_text(row):
     return "\n".join(lines)
 
 
-def memory_blocks(records, now=None, usage=None, *, include_identifiers=False):
+def unified_memory_text(row, now):
+    """Project a conclusion and its factual provenance without retention mechanics."""
+    judgment = clean_life_text(row.get("judgment") or row.get("text"))
+    if not judgment:
+        return ""
+    owner = clean_life_text(row.get("owner_name") or row.get("persona_name"))
+    if row.get("owner") == "person" and owner == row.get("person_id"):
+        owner = "当前人物"
+    attribute = clean_life_text(row.get("attribute"))
+    moment = material_time(row.get("occurred_at"), now)
+    heading = " · ".join(
+        filter(None, (owner, attribute, moment.strftime("%Y-%m-%d %H：%M") if moment else ""))
+    )
+    label = "有依据的推断" if row.get("inferred") else "记录"
+    if row.get("stable"):
+        label = "稳定画像，" + label
+    parts = [f"{heading + '：' if heading else ''}{label}：{judgment}"]
+    if row.get("source") == "fiction" or row.get("fiction"):
+        parts.append("角色虚构经历，不是真实网络事实")
+    if basis := BASIS.get(row.get("reading_basis")):
+        parts.append(basis)
+    if reasoning := clean_life_text(row.get("reasoning")):
+        parts.append("事实依据：" + reasoning)
+    return "；".join(parts)
+
+
+def unified_memory_rows(records, *, seen=None):
+    """Accept only migrated records; repeated selection of the same version is harmless."""
+    seen = set() if seen is None else seen
+    rows = []
+    for row in records:
+        if (
+            not isinstance(row, dict)
+            or row.get("schema_version") != 2
+            or not row.get("active", True)
+        ):
+            continue
+        identity = str(row.get("id", ""))
+        if identity and identity in seen:
+            continue
+        if not clean_life_text(row.get("judgment") or row.get("text")):
+            continue
+        if identity:
+            seen.add(identity)
+        rows.append(row)
+    return rows
+
+
+def memory_blocks(
+    records, now=None, usage=None, *, include_identifiers=False, version=4, identifier="memory"
+):
     """Render already selected, typed memories without rereading storage."""
     now = now or datetime.now(UTC)
+    if version >= 4:
+        rows = unified_memory_rows(records)
+        if not rows:
+            return []
+        content = "\n".join(f"- {unified_memory_text(row, now)}" for row in rows)
+        if include_identifiers:
+            content = json.dumps(
+                {
+                    "known": [
+                        {
+                            key: row.get(key)
+                            for key in (
+                                "id",
+                                "version",
+                                "judgment",
+                                "reasoning",
+                                "attribute",
+                                "tags",
+                                "owner",
+                                "persona_name",
+                                "person_id",
+                                "scope",
+                                "stable",
+                                "inferred",
+                            )
+                        }
+                        for row in rows
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        item = source_item(
+            BLOCK_NAMES[identifier],
+            "统一记忆库在本轮按人格、人物、场合及模块选择的同次资料",
+            content,
+            block_id=identifier,
+        )
+        item.update(
+            count=len(rows),
+            memory_ids=[str(row["id"]) for row in rows if row.get("id")],
+            memory_versions={
+                str(row["id"]): row.get("version", 1) for row in rows if row.get("id")
+            },
+            memory_snapshots=copy.deepcopy(rows),
+            memory_projection_time=now.isoformat(),
+            include_memory_identifiers=include_identifiers,
+        )
+        if usage and identifier == "memory.recent":
+            item["limit"] = usage.get("limits", {}).get(identifier, 5)
+        if any(row.get("source") == "fiction" or row.get("fiction") for row in rows):
+            item["notice"] = FICTION_NOTICE
+        return [item]
     grouped = {identifier: [] for identifier in MEMORY_DEFAULTS}
     for row in records:
         identifier = memory_category(row)
@@ -371,7 +481,7 @@ def memory_blocks(records, now=None, usage=None, *, include_identifiers=False):
                 indent=2,
             )
         item = source_item(
-            BLOCK_NAMES[identifier],
+            V3_BLOCK_NAMES[identifier],
             "记忆库按结构化类型、人物与场合筛选的同次资料",
             content,
             block_id=identifier,
@@ -386,7 +496,7 @@ def memory_blocks(records, now=None, usage=None, *, include_identifiers=False):
     return blocks
 
 
-def context_from_data(data, *, legacy=False, version=3):
+def context_from_data(data, *, legacy=False, version=4):
     """Create readable content and its source list without re-reading any business data."""
     if not isinstance(data, dict):
         raise TypeError("Living World context must be an object")
@@ -414,7 +524,9 @@ def context_from_data(data, *, legacy=False, version=3):
 
     def add(title, source, content, identifier=None):
         identifier = identifier or identifiers[title]
-        display_title = title if legacy else BLOCK_NAMES[identifier]
+        display_title = (
+            title if legacy else (BLOCK_NAMES if version >= 4 else V3_BLOCK_NAMES)[identifier]
+        )
         if version == 2 and identifier == "schedule":
             display_title = "日程与执行：今日日程"
         sources.append(source_item(display_title, source, content, block_id=identifier))
@@ -456,6 +568,43 @@ def context_from_data(data, *, legacy=False, version=3):
             or "今天尚未生成可用日程，不代表角色没有日程能力。",
             identifier="schedule.recent",
         )
+    if version >= 4:
+        selection = data.get("context_selection")
+        selection = set(selection) if isinstance(selection, list) else None
+        seen = set()
+        for identifier, field in (("memory.recent", "recent_memories"), ("memory", "memories")):
+            if selection is not None and identifier not in selection:
+                continue
+            sources.extend(
+                memory_blocks(
+                    unified_memory_rows(data.get(field, []), seen=seen),
+                    now,
+                    data.get("context_usage"),
+                    version=version,
+                    identifier=identifier,
+                )
+            )
+        if selection is None or "weather" in selection:
+            for row in data.get("observations", []):
+                if row.get("module") == "weather":
+                    add(
+                        "天气",
+                        "本轮场合可见的已保存天气记录",
+                        observation_text(row),
+                        identifier="weather",
+                    )
+                    sources[-1]["count"] = 1
+        if selection is not None:
+            sources = [row for row in sources if row["block_id"] in selection]
+        return {
+            "text": "\n\n".join(
+                f"【{row['title']}】\n"
+                + (row["notice"] + "\n" if row.get("notice") else "")
+                + row["content"]
+                for row in sources
+            ),
+            "sources": sources,
+        }
     seen = set()
     selection = data.get("context_selection") if version >= 3 else None
     selection = set(selection) if isinstance(selection, list) else None
@@ -497,7 +646,7 @@ def context_from_data(data, *, legacy=False, version=3):
             "\n".join(memory_lines) or "本轮没有可用的相关记忆。",
         )
     else:
-        sources.extend(memory_blocks(memories, now, data.get("context_usage")))
+        sources.extend(memory_blocks(memories, now, data.get("context_usage"), version=version))
     experience_lines = [f"- {record_text(row, now)}" for row in experiences]
     if experience_lines:
         add("近期经历", "生活记录中当前场合可见的经历", "\n".join(experience_lines))
@@ -571,9 +720,9 @@ def group_messages_text(messages):
 def is_life_snapshot(value):
     return (
         isinstance(value, dict)
-        and {"current_time", "memories", "schedule", "observations"} <= value.keys()
+        and {"current_time", "memories", "schedule"} <= value.keys()
         and isinstance(value["memories"], list)
-        and isinstance(value["observations"], list)
+        and isinstance(value.get("observations", []), list)
         and isinstance(value["schedule"], dict)
         and value["schedule"].get("status") in {"disabled", "missing", "available"}
     )

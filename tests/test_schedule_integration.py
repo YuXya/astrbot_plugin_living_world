@@ -105,17 +105,35 @@ class ExternalHost:
                 "impression": "想听听同学是否也对观星感兴趣。",
             }
         elif task == "search.topic":
-            assert NEWS_FACT in request["prompt"], "The earlier news must inform the search context"
             response = {"query": "城市天文馆 开放时间", "reason": "刚看到观测活动，查一下周末安排"}
         elif task == "search.reflect":
             assert SEARCH_FACT in request["prompt"]
             response = {"factual_summary": SEARCH_FACT, "impression": "晚上也有机会去看看。"}
         elif task == "social.message":
             assert request["scope"] == ACTUAL_GROUP
-            assert NEWS_FACT in request["prompt"] and SEARCH_FACT in request["prompt"]
             assert "群里在讨论函数" in request["prompt"]
             assert PRIVATE_FACT not in request["prompt"]
-            response = f"这道函数题先缓缓，刚看到{NEWS_FACT}，还查到{SEARCH_FACT}，有人感兴趣吗？"
+            response = "这道函数题先缓缓，有人周末想一起去天文馆吗？"
+        elif task == "memory.query":
+            response = {"keywords": ["天文台", "天文馆", "公开观测", "开放"]}
+        elif task == "memory.reflect":
+            materials = request["dynamic_context"]["materials"]
+            response = {
+                "memories": [
+                    {
+                        "judgment": fact,
+                        "evidence": fact,
+                        "attribute": "事实属性",
+                        "owner": "self",
+                        "stable": False,
+                        "tags": ["天文"],
+                    }
+                    for fact in (NEWS_FACT, SEARCH_FACT)
+                    if any(fact in material["text"] for material in materials)
+                ]
+            }
+        elif task == "memory.feedback":
+            response = {"feedback": []}
         else:
             raise AssertionError(f"Unexpected model task: {task}")
         text = response if isinstance(response, str) else json.dumps(response, ensure_ascii=False)
@@ -254,6 +272,9 @@ async def test_real_pipeline_orders_overlapping_actions_and_does_not_replay(tmp_
             item["factual_summary"] and item["impression"] and item["sources"]
             for item in observations
         )
+        # Extraction is background work; subsequent turns see the completed bank.
+        recalled = await runtime.context_bundle(ACTUAL_GROUP, selection=["memory.recent"])
+        assert NEWS_FACT in recalled["text"] and SEARCH_FACT in recalled["text"]
         assert len(runtime.store.list("actions")) == 3
         assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 50
         assert runtime.drives.snapshot()["meters"]["loneliness"]["value"] == 40

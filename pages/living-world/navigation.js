@@ -6,7 +6,7 @@ export const PAGES = {
   schedule: { label: "日程与行动", tabs: { timeline: "日程与执行", settings: "生成与细化设置", archives: "日程档案" } },
   chat: { label: "聊天与对象", tabs: { targets: "聊天白名单", reply: "回复与插话", limits: "发送限制", deliveries: "发送记录" } },
   sources: { label: "见闻与来源", tabs: { settings: "来源设置", records: "近期见闻", manual: "手动读取", runs: "日报执行" } },
-  memory: { label: "记忆与日记", tabs: { records: "记忆与人物", journals: "日记与笔记" } },
+  memory: { label: "记忆与日记", tabs: { records: "记忆与画像", settings: "提炼与遗忘", journals: "日记与笔记" } },
   system: { label: "系统与数据", tabs: { models: "模型分配", modules: "模块开关", backup: "备份恢复", maintenance: "维护与诊断" } },
 };
 const ALIASES = {

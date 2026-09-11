@@ -722,6 +722,21 @@ class SourceService:
         if reflection.get("reflection_status") == "failed":
             record.update({"status": "partial", "reason": "reflection_failed"})
         self.runtime.store.put("observations", record["id"], record)
+        if (
+            module != "weather"
+            and reflection.get("reflection_status") == "success"
+            and self.runtime.enabled("memory")
+        ):
+            self.runtime.memory.enqueue_material(
+                rendered,
+                scope=scope,
+                source=module,
+                key="observation:" + record["id"],
+                occurred_at=record["created_at"],
+                sources=[{"id": record["id"], "source": module, "scope": scope}],
+                reading_basis=record.get("reading_basis", "unknown"),
+            )
+            self.runtime.kick_memory()
         return record
 
     async def explore(
@@ -858,6 +873,7 @@ class SourceService:
                 kind="read",
                 source="daily_digest",
                 key=f"digest:{now.date()}:{source['id']}",
+                source_record_id=record["id"],
             )
             if inspect.isawaitable(result):
                 await result

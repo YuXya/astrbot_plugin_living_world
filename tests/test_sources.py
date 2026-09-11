@@ -1,5 +1,6 @@
 import copy
 import json
+from types import SimpleNamespace
 from datetime import datetime
 
 import pytest
@@ -93,6 +94,14 @@ class Runtime:
         self.disabled = set()
         self.calls = []
         self.audits = []
+        self.memory_jobs = []
+        self.memory = SimpleNamespace(enqueue_material=self.enqueue_material)
+
+    def enqueue_material(self, text, **metadata):
+        self.memory_jobs.append({"text": text, **metadata})
+
+    def kick_memory(self):
+        pass
 
     def enabled(self, module):
         return module not in self.disabled

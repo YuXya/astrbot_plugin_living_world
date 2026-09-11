@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
@@ -14,10 +15,12 @@ from .living_world.host import AstrBotHost
 from .living_world.runtime import Runtime
 
 PLUGIN = "astrbot_plugin_living_world"
+logger = logging.getLogger(__name__)
 TOOL_MODULES = {
     "living_world_social": "proactive",
     "living_world_explore": None,
     "living_world_remember": "memory",
+    "living_world_recall": "memory",
 }
 
 
@@ -178,6 +181,11 @@ class Main(Star):
     async def restore_group_history(self, event, run_context, resp):
         if self.runtime:
             self.runtime.chat.restore_history(event, run_context)
+            try:
+                self.runtime.chat.protect_memory_history(event, run_context)
+                await self.runtime.chat.finalize_memory(event, resp)
+            except Exception:
+                logger.warning("Completed chat could not be queued for memory", exc_info=True)
 
     @filter.on_using_llm_tool()
     async def trace_tool_start(self, event, tool, tool_args):
@@ -191,25 +199,10 @@ class Main(Star):
 
     @filter.on_llm_response()
     async def remember_reply(self, event: AstrMessageEvent, resp: LLMResponse):
-        """Extract facts from the user's words, without storing a second chat log."""
+        """Record the response; the agent completion hook owns memory batching."""
         runtime = self.runtime
         if runtime and not runtime.stopped:
             runtime.chat.response(event, resp)
-        if (
-            not runtime
-            or not runtime.enabled("memory")
-            or not event.get_extra("living_world_reply")
-        ):
-            return
-        if event.get_extra("living_world_reflected"):
-            return
-        event.set_extra("living_world_reflected", True)
-        runtime.spawn(
-            "memory",
-            runtime.reflect_chat(
-                event.message_str, event.unified_msg_origin, "qq:" + event.get_sender_id()
-            ),
-        )
 
     async def social_tool(self, event: AstrMessageEvent, reason: str):
         """Keep legacy direct callers harmless after removing spontaneous contact."""
@@ -274,36 +267,100 @@ class Main(Star):
 
     @filter.llm_tool(name="living_world_remember")
     async def remember_tool(
-        self, event: AstrMessageEvent, text: str, kind: str = "event", important: bool = False
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        attribute: str = "事实属性",
+        tags: str = "",
+        reasoning: str = "",
     ):
         """Remember a fact or personal impression in the current conversation.
 
         Args:
             text(string): The fact or impression to remember; do not invent execution results.
-            kind(string): knowledge, event, skill or emotional.
-            important(boolean): Whether this memory should be protected from ordinary fading.
+            attribute(string): 用户别名, 事实属性, 技能树, 关系图谱 or 活跃项目.
+            tags(string): Short search tags separated by commas.
+            reasoning(string): Supporting facts or source evidence, not private reasoning.
         """
         runtime = self.runtime
         if not runtime or not await runtime.scope_allowed(event.unified_msg_origin):
             return "Session is not managed"
         record = runtime.memory.remember(
             text,
-            kind=kind,
             scope=event.unified_msg_origin,
-            person_id="qq:" + event.get_sender_id(),
-            important=important,
+            attribute=attribute,
+            tags=[tag.strip() for tag in tags.replace("，", ",").split(",") if tag.strip()],
+            reasoning=reasoning,
             source="explicit",
         )
         if record:
             runtime.spawn("life", runtime.revise(event.unified_msg_origin, "主动记忆更新"))
         runtime.audit_external(
             "tool.living_world_remember",
-            {"text": text, "kind": kind, "important": important},
+            {"text": text, "attribute": attribute, "tags": tags, "reasoning": reasoning},
             record,
             event.unified_msg_origin,
             "Living World 工具执行入参与结果",
         )
         return json.dumps(record, ensure_ascii=False)
+
+    @filter.llm_tool(name="living_world_recall")
+    async def recall_tool(self, event: AstrMessageEvent, query: str, limit: int = 10):
+        """Search accessible memories and profiles using meaningful search words.
+
+        Args:
+            query(string): Search words, including alternative names when helpful.
+            limit(int): Maximum returned memories, between 1 and 30.
+        """
+        runtime = self.runtime
+        if (
+            not runtime
+            or not runtime.enabled("memory")
+            or not await runtime.scope_allowed(event.unified_msg_origin)
+        ):
+            return "Session is not managed or memory is disabled"
+        rows = runtime.memory.recall(
+            query,
+            scope=event.unified_msg_origin,
+            person_id="qq:" + event.get_sender_id(),
+            limit=max(1, min(30, int(limit))),
+            reinforce=False,
+        )
+        result = {
+            "memories": [
+                {
+                    key: row.get(key)
+                    for key in (
+                        "id",
+                        "text",
+                        "reasoning",
+                        "attribute",
+                        "tags",
+                        "occurred_at",
+                        "inferred",
+                    )
+                }
+                for row in rows
+            ]
+        }
+        trace = event.get_extra("living_world_trace")
+        if trace and trace.get("managed"):
+            trace.setdefault("memory_sources", []).append(
+                {
+                    "block_id": "memory.tool",
+                    "memory_ids": [row["id"] for row in rows],
+                    "memory_versions": {row["id"]: row.get("version", 1) for row in rows},
+                    "memory_snapshots": json_value(rows),
+                    "content": json.dumps(result, ensure_ascii=False),
+                }
+            )
+        runtime.audit_external(
+            "tool.living_world_recall",
+            {"query": query, "limit": limit},
+            result,
+            event.unified_msg_origin,
+        )
+        return json.dumps(result, ensure_ascii=False)
 
     async def terminate(self):
         for path, handler in self._routes:

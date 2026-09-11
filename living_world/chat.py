@@ -90,6 +90,30 @@ class ChatService:
     def _window(self, scope):
         return self.runtime.store.get("group_context", self._key(scope), {}).get("messages", [])
 
+    def memory_people(self, scope, person_id="", messages=None):
+        """Resolve participants from this conversation without opening other histories."""
+        people, seen = [], set()
+        if person_id:
+            people.append({"person_id": person_id, "name": ""})
+            seen.add(person_id)
+        if messages is None and ":GroupMessage:" not in scope:
+            return people
+        for row in reversed(self._window(scope) if messages is None else messages):
+            if (
+                row.get("role") in {"assistant", "system", "tool"}
+                or row.get("sender_name") == "Bot"
+            ):
+                continue
+            identifier = str(row.get("sender_id", ""))
+            if not identifier or not identifier.isdigit():
+                continue
+            identifier = "qq:" + identifier
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+            people.append({"person_id": identifier, "name": str(row.get("sender_name", ""))})
+        return people
+
     def add_group_message(self, scope, row):
         if self.runtime.stopped:
             return
@@ -429,6 +453,8 @@ class ChatService:
             )
             return
         task = "chat.group" if event.get_group_id() else "chat.private"
+        persona_name = self.runtime.settings["persona_id"]
+        config_version = self.runtime.config_version
         layout = resolve_layout(self.runtime.settings, task)
         selection = resolve_selection(self.runtime.settings, task)
         character = copy.deepcopy(self.runtime.settings["character"])
@@ -449,8 +475,18 @@ class ChatService:
                 usage=usage,
                 selection=selection,
                 reinforce=False,
+                task=task,
+                persona_name=persona_name,
+                people=self.memory_people(
+                    event.unified_msg_origin, "qq:" + event.get_sender_id(), history["messages"]
+                ),
             )
             speaker = event.get_sender_name() or "当前聊天对象"
+            if (
+                self.runtime.config_version != config_version
+                or self.runtime.settings["persona_id"] != persona_name
+            ):
+                raise ValueError("聊天资料准备期间配置已改变，保留宿主原请求")
             blocks = [
                 block("profile", "角色补充资料", character["profile"], "Living World 角色设置"),
                 block("world", "世界设定", character["world"], "Living World 世界设置"),
@@ -515,7 +551,11 @@ class ChatService:
                 system_restored=False,
             )
             sources = assembled["sources"]
-            self.runtime.memory.reinforce_sources(sources, event.unified_msg_origin)
+            trace["memory_sources"] = copy.deepcopy(sources)
+            trace["memory_history"] = copy.deepcopy(history["messages"][-10:])
+            trace["memory_people"] = self.memory_people(
+                event.unified_msg_origin, "qq:" + event.get_sender_id(), history["messages"]
+            )
             if not event.get_group_id():
                 sources.append(
                     source_item(
@@ -537,7 +577,7 @@ class ChatService:
                     "sources": sources,
                     "injected_text": assembled["injected_text"],
                     "context_layout": layout,
-                    "context_layout_version": 3,
+                    "context_layout_version": 4,
                     "context_selection": selection,
                     "context_usage": usage,
                     "injection_segments": assembled["segments"],
@@ -811,6 +851,75 @@ class ChatService:
             for stack in trace["tools"].values():
                 for entry, _ in stack:
                     self.runtime.debug.finish(entry, status="unknown", error="工具未返回完成回调")
+
+    async def finalize_memory(self, event, resp):
+        """Queue exactly one completed conversation, never intermediate tool responses."""
+        trace = event.get_extra("living_world_trace")
+        if (
+            not trace
+            or not trace.get("managed")
+            or trace.get("memory_finalized")
+            or not self.runtime.enabled("memory")
+            or getattr(resp, "role", "") == "err"
+            or not await self.runtime.scope_allowed(event.unified_msg_origin)
+        ):
+            return
+        final = getattr(resp, "completion_text", "")
+        if (
+            not isinstance(final, str)
+            or not final.strip()
+            or getattr(resp, "tools_call_name", None)
+        ):
+            return
+        memory_ids = list(
+            dict.fromkeys(
+                mid
+                for source in trace.get("memory_sources", [])
+                for mid in source.get("memory_ids", [])
+            )
+        )
+        self.runtime.memory.enqueue_chat(
+            event.message_str,
+            final,
+            scope=event.unified_msg_origin,
+            person_id="qq:" + event.get_sender_id(),
+            people=trace.get("memory_people", []),
+            recent_history=trace.get("memory_history", []),
+            round_id=trace["id"],
+            memory_ids=memory_ids,
+            memory_sources=trace.get("memory_sources", []),
+            persona_name=trace.get("bound_persona"),
+            occurred_at=trace.get("received_at"),
+        )
+        trace["memory_finalized"] = True
+        self.runtime.kick_memory()
+
+    def protect_memory_history(self, event, run_context):
+        """Keep tool-call pairing while excluding temporary recalled prose from storage."""
+        from astrbot.core.agent.message import TextPart
+
+        trace = event.get_extra("living_world_trace")
+        if not trace or not trace.get("managed"):
+            return
+        call_ids = {
+            call.get("id")
+            for message in run_context.messages
+            for call in (json_value(getattr(message, "tool_calls", None)) or [])
+            if isinstance(call, dict)
+            and call.get("function", {}).get("name") == "living_world_recall"
+        }
+        for message in run_context.messages:
+            if message.role != "tool" or getattr(message, "tool_call_id", None) not in call_ids:
+                continue
+            if message.tool_call_id in trace.setdefault("protected_memory_calls", set()):
+                continue
+            content = message.content
+            parts = content if isinstance(content, list) else [TextPart(text=str(content or ""))]
+            for part in parts:
+                part._no_save = True
+            message.content = [*parts, TextPart(text="本轮已查询记忆；历史不保存临时召回资料。")]
+            trace["protected_memory_calls"].add(message.tool_call_id)
+            # Text parts are the host's stable no-save contract across supported versions.
 
     def tool_start(self, event, tool, args):
         trace = event.get_extra("living_world_trace")

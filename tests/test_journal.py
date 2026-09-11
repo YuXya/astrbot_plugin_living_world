@@ -1,200 +1,206 @@
+"""Journal writing consumes scoped unified memories and archives full output."""
+
+import asyncio
 import copy
-from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta, timezone
+import json
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from living_world.journal import JournalService
+from living_world.runtime import Runtime
 
-NOW = datetime(2026, 9, 5, 23, tzinfo=timezone(timedelta(hours=8)))
+PRIVATE = "qq:FriendMessage:42"
+OTHER = "qq:FriendMessage:43"
 
 
-class Store:
+class Host:
     def __init__(self):
-        self.data = {}
-
-    def get(self, namespace, key, default=None):
-        return copy.deepcopy(self.data.get(namespace, {}).get(key, default))
-
-    def put(self, namespace, key, value):
-        self.data.setdefault(namespace, {})[key] = copy.deepcopy(value)
-
-    def list(self, namespace):
-        return list(copy.deepcopy(self.data.get(namespace, {})).values())
-
-    def delete(self, namespace, key):
-        self.data.get(namespace, {}).pop(key, None)
-
-    def claim(self, namespace, key, value):
-        if key in self.data.get(namespace, {}):
-            return False
-        self.put(namespace, key, value)
-        return True
-
-    @contextmanager
-    def transaction(self):
-        before = copy.deepcopy(self.data)
-        try:
-            yield
-        except BaseException:
-            self.data = before
-            raise
-
-
-class Memory:
-    def __init__(self):
-        self.entries = []
-        self.writes = []
-        self.deletes = []
-
-    def recall(self, **kwargs):
-        return copy.deepcopy(self.entries)
-
-    def remember(self, text, **kwargs):
-        result = {"text": text, **kwargs}
-        self.writes.append(result)
-        return result
-
-    def delete(self, key):
-        self.deletes.append(key)
-
-
-class Runtime:
-    def __init__(self):
-        self.store = Store()
-        self.memory = Memory()
-        self.settings = {"character": {"timezone": "Asia/Shanghai"}}
-        self.disabled = set()
         self.calls = []
+        self.entered = asyncio.Event()
+        self.block = None
+        self.block_task = ""
+        self.responses = {}
 
-    def enabled(self, name):
-        return name not in self.disabled
+    async def persona(self, name):
+        return "角色：" + name
 
-    async def generate(self, module, prompt, scope="global"):
-        self.calls.append((module, prompt, scope))
-        return "今天在角色生活里忘了带笔；实际发出了一条问候，还没有回复。"
+    async def session_persona(self, scope):
+        return "可可"
+
+    async def history(self, scope):
+        return ""
+
+    async def generate_request(self, request):
+        self.calls.append(copy.deepcopy(request))
+        task = request["task"]
+        if self.block and task == self.block_task:
+            self.entered.set()
+            await self.block.wait()
+        response = self.responses.get(task)
+        if isinstance(response, Exception):
+            raise response
+        if response is not None:
+            return response, {}
+        if task == "memory.query":
+            return '{"keywords":["知识","新闻","天文","学习"]}', {}
+        if task == "memory.reflect":
+            evidence = request["dynamic_context"]["materials"][0]["text"]
+            return json.dumps(
+                {
+                    "memories": [
+                        {
+                            "judgment": "整理得到了新的学习体会",
+                            "evidence": evidence,
+                            "attribute": "事实属性",
+                            "owner": "self",
+                            "stable": False,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ), {}
+        if task == "memory.feedback":
+            return '{"feedback":[]}', {}
+        return "今天在角色生活里认真练琴；实际发出了一条问候，还没有收到回复。", {}
 
 
-def event(runtime, key, text, scope="global", source="action", **changes):
-    row = {
-        "id": key,
-        "text": text,
-        "scope": scope,
-        "source": source,
-        "kind": "event",
-        "created_at": NOW.timestamp(),
-    }
-    row.update(changes)
-    runtime.store.put("events", key, row)
-
-
-@pytest.mark.asyncio
-async def test_public_journal_cannot_use_private_evidence_or_future_plans():
-    runtime = Runtime()
-    event(runtime, "fiction", "忘带笔", source="fiction")
-    event(runtime, "sent", "消息已发出，未收到回复")
-    event(runtime, "private", "私人谈话秘密", scope="private-a")
-    event(runtime, "tomorrow", "明天计划看视频", kind="plan")
-    event(runtime, "failed", "搜索失败不能说已看过", status="failed")
-    event(
-        runtime,
-        "yesterday",
-        "昨天的事情",
-        created_at=(NOW - timedelta(days=1)).timestamp(),
+@pytest.fixture
+async def world(tmp_path):
+    world = Runtime(tmp_path / "journal.sqlite", Host())
+    world.kick_memory = lambda: None
+    await world.update_settings(
+        {"persona_id": "可可", "sessions": [{"umo": PRIVATE}, {"umo": OTHER}]}
     )
-    runtime.memory.entries = [
-        {"scope": "private-a", "kind": "knowledge", "text": "私人的知识"},
-        {"scope": "global", "kind": "event", "text": "明天计划登月"},
-    ]
-    service = JournalService(runtime)
-    entry = await service.generate("2026-09-05")
-    prompt = runtime.calls[0][1]
-    assert "忘带笔" in prompt and "消息已发出，未收到回复" in prompt
-    for excluded in (
-        "私人谈话秘密",
-        "明天计划看视频",
-        "搜索失败不能说已看过",
-        "昨天的事情",
-        "私人的知识",
-        "明天计划登月",
-    ):
-        assert excluded not in prompt
-    assert {source["id"] for source in entry["sources"]} == {"fiction", "sent"}
-    assert runtime.memory.writes[0]["scope"] == "global"
-    assert runtime.memory.writes[0]["source"] == "journal:brief"
-    assert any(s["fiction"] for s in runtime.memory.writes[0]["sources"])
+    yield world
+    await world.stop()
 
 
-@pytest.mark.asyncio
-async def test_private_journal_keeps_scope_and_is_not_publicly_listed():
-    runtime = Runtime()
-    event(runtime, "private", "私人约定今天已兑现", scope="private-a")
-    event(runtime, "another", "别处内容", scope="private-b")
-    service = JournalService(runtime)
-    entry = await service.generate("2026-09-05", scope="private-a")
-    assert entry["scope"] == runtime.memory.writes[0]["scope"] == "private-a"
-    assert "私人约定今天已兑现" in runtime.calls[0][1]
-    assert "别处内容" not in runtime.calls[0][1]
-    assert service.list_entries("global") == []
-    assert service.list_entries("private-b") == []
-    assert service.list_entries("private-a") == [entry]
+def memory(world, text, *, scope="global", occurred_at=None, **changes):
+    return world.memory.remember(
+        text,
+        scope=scope,
+        source="fiction",
+        occurred_at=occurred_at or world.life._now().isoformat(),
+        **changes,
+    )
 
 
-@pytest.mark.asyncio
-async def test_generation_is_deduplicated_by_kind_day_scope_across_restart():
-    runtime = Runtime()
-    event(runtime, "real", "读到了一篇新闻", source="https://example.test/news")
-    first = await JournalService(runtime).generate("2026-09-05")
-    second = await JournalService(runtime).generate("2026-09-05")
+async def test_public_journal_uses_only_current_day_self_memories(world):
+    own = memory(world, "练琴时忘带谱子")
+    sent = memory(world, "已发出消息，还未收到回复")
+    memory(world, "私人的约定", scope=PRIVATE)
+    memory(world, "别人的画作", person_id="qq:42")
+    memory(world, "昨日事情", occurred_at=(world.life._now() - timedelta(days=1)).isoformat())
+    world.store.put("events", "raw", {"id": "raw", "text": "未提炼的聊天原文", "scope": "global"})
+    entry = await world.journal.generate()
+    request = next(row for row in world.host.calls if row["task"] == "journal.write")
+    for wanted in ("练琴时忘带谱子", "已发出消息，还未收到回复"):
+        assert wanted in request["prompt"]
+    for excluded in ("私人的约定", "别人的画作", "昨日事情", "未提炼的聊天原文"):
+        assert excluded not in request["prompt"]
+    assert {source["id"] for source in entry["sources"]} == {own["id"], sent["id"]}
+    assert [row["task"] for row in world.host.calls] == ["journal.write"]
+    assert world.store.list("memory_jobs")[0]["text"] == entry["text"]
+
+
+async def test_private_journal_stays_in_scope(world):
+    memory(world, "私人的约定", scope=PRIVATE)
+    memory(world, "别处的约定", scope=OTHER)
+    entry = await world.journal.generate(scope=PRIVATE)
+    request = next(row for row in world.host.calls if row["task"] == "journal.write")
+    assert "私人的约定" in request["prompt"] and "别处的约定" not in request["prompt"]
+    assert entry["scope"] == PRIVATE
+    assert world.journal.list_entries("global") == []
+    assert world.journal.list_entries(OTHER) == []
+    assert world.journal.list_entries(PRIVATE) == [entry]
+    assert world.store.list("memory_jobs")[0]["scope"] == PRIVATE
+
+
+async def test_generation_deduplicates_day_scope_persona_across_restart(world):
+    memory(world, "学习天文学")
+    first = await world.journal.generate()
+    second = await world.journal.generate()
     assert first == second
-    assert len(runtime.calls) == 2 and len(runtime.memory.writes) == 1
-    note = await JournalService(runtime).generate("2026-09-05", kind="notes")
-    assert note["id"] != first["id"]
-    assert note["sources"][0]["source"] == "https://example.test/news"
+    assert len([row for row in world.host.calls if row["task"] == "journal.write"]) == 1
+    assert len(world.store.list("memory_jobs")) == 1
+    await world.update_settings({"persona_id": "另一个名字"})
+    assert (await world.journal.generate())["reason"] == "no_memories"
+    await world.update_settings({"persona_id": "可可"})
+    assert await world.journal.generate() == first
 
 
-@pytest.mark.asyncio
-async def test_notes_exclude_fiction_and_no_evidence_does_not_generate():
-    runtime = Runtime()
-    event(runtime, "fiction", "在梦里看到新闻", source="fiction")
-    result = await JournalService(runtime).generate("2026-09-05", kind="notes")
-    assert result == {"status": "skipped", "reason": "no_events"}
-    assert runtime.calls == []
+async def test_no_memory_skips_without_model_even_when_raw_events_exist(world):
+    world.store.put("events", "raw", {"id": "raw", "text": "未提炼事件"})
+    result = await world.journal.generate()
+    assert result == {"status": "skipped", "reason": "no_memories"}
+    assert world.host.calls == []
 
 
-@pytest.mark.asyncio
-async def test_disable_during_generation_prevents_journal_and_memory_writes():
-    runtime = Runtime()
-    event(runtime, "real", "已发送问候")
-
-    async def disable(*args, **kwargs):
-        runtime.disabled.add("journal")
-        return "今天的日记"
-
-    runtime.generate = disable
-    assert (await JournalService(runtime).generate("2026-09-05"))["reason"] == "module_disabled"
-    assert runtime.store.list("journals") == runtime.memory.writes == []
+async def test_notes_use_topic_recall_not_day_filter_or_people(world):
+    own = memory(world, "三个月前学到了天文学知识", occurred_at="2026-06-01T09:00:00+08:00")
+    memory(world, "其他人的天文学偏好", person_id="qq:42")
+    entry = await world.journal.generate(kind="notes", topic="天文学")
+    request = next(row for row in world.host.calls if row["task"] == "notes.write")
+    assert "三个月前学到了天文学知识" in request["prompt"]
+    assert "其他人的天文学偏好" not in request["prompt"]
+    assert entry["sources"][0]["id"] == own["id"]
+    assert not any(row["task"].endswith(".brief") for row in world.host.calls)
 
 
-@pytest.mark.asyncio
-async def test_delete_removes_derived_memory_through_public_service():
-    runtime = Runtime()
-    event(runtime, "real", "已发送问候")
-    service = JournalService(runtime)
-    entry = await service.generate("2026-09-05")
-    service.delete(entry["id"])
-    assert service.list_entries() == []
-    assert runtime.memory.deletes == [f"journal:{entry['id']}"]
+@pytest.mark.parametrize("change", ["disable", "rename", "cancel"])
+async def test_configuration_change_or_cancellation_never_saves_generated_archive(world, change):
+    memory(world, "练琴")
+    world.host.block_task = "journal.write"
+    world.host.block = asyncio.Event()
+    task = asyncio.create_task(world.journal.generate())
+    await world.host.entered.wait()
+    if change == "disable":
+        await world.update_settings({"modules": {"journal": False}})
+    elif change == "rename":
+        await world.update_settings({"persona_id": "新名字"})
+    else:
+        task.cancel()
+    world.host.block.set()
+    try:
+        result = await task
+        assert result["reason"] == "configuration_changed"
+    except asyncio.CancelledError:
+        pass
+    assert world.store.list("journals") == []
+    assert world.store.list("memory_jobs") == []
 
 
-@pytest.mark.asyncio
-async def test_civil_day_uses_configured_timezone_at_midnight():
-    runtime = Runtime()
-    event(
-        runtime,
-        "utc",
-        "本地凌晨发生",
-        created_at=datetime(2026, 9, 4, 16, 5, tzinfo=UTC).timestamp(),
+async def test_journal_timezone_boundaries(world):
+    now = world.life._now()
+    day = str(now.date())
+    local_midnight = datetime.combine(now.date(), datetime.min.time(), ZoneInfo("Asia/Shanghai"))
+    kept = memory(
+        world, "本地凌晨发生", occurred_at=(local_midnight + timedelta(minutes=5)).isoformat()
     )
-    entry = await JournalService(runtime).generate("2026-09-05")
-    assert entry["sources"][0]["id"] == "utc"
+    memory(world, "上个本地日期", occurred_at=(local_midnight - timedelta(minutes=5)).isoformat())
+    entry = await world.journal.generate(day)
+    assert {row["id"] for row in entry["sources"]} == {kept["id"]}
+
+
+async def test_concurrent_journal_generation_uses_one_model_call(world):
+    memory(world, "练琴")
+    first, second = await asyncio.gather(world.journal.generate(), world.journal.generate())
+    assert first == second
+    assert len([row for row in world.host.calls if row["task"] == "journal.write"]) == 1
+
+
+async def test_archive_and_extraction_job_are_committed_atomically(world, monkeypatch):
+    memory(world, "练琴")
+    original = world.store.put
+
+    def fail(namespace, key, value):
+        if namespace == "memory_jobs":
+            raise RuntimeError("disk full")
+        return original(namespace, key, value)
+
+    monkeypatch.setattr(world.store, "put", fail)
+    with pytest.raises(RuntimeError, match="disk full"):
+        await world.journal.generate()
+    assert world.store.list("journals") == []
+    assert world.store.list("memory_jobs") == []

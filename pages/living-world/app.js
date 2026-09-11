@@ -11,7 +11,6 @@ let lastResult = null;
 let dialogHandler = null;
 let modalDraft = false;
 let scheduleDate = "";
-let selectedMemories = new Set();
 let debugCategory = "";
 let testRequest = "";
 let debugTask = "life.plan";
@@ -150,7 +149,7 @@ function openRecord(title, body) { openEditor(title, body, () => true, "关闭")
 function compactRecords(key, records, options = {}) {
   const root = el("div", "stack compact-records");
   const state = listStates.get(key) || { query: "", page: 0 }; listStates.set(key, state);
-  const search = field("搜索记录", key + ".search", state.query, { placeholder: "搜索标题或正文" });
+  const search = field("搜索记录", key + ".search", state.query, { placeholder: options.searchHint || "搜索标题或正文" });
   const controls = append(el("div", "compact-filter"), search);
   if (options.filter) controls.append(options.filter);
   root.append(controls);
@@ -169,7 +168,7 @@ function compactRecords(key, records, options = {}) {
       const title = options.title?.(record) || recordTitle(record);
       const view = button(title, () => openRecord(title, options.body ? options.body(record) : recordList([record])), "record-open"); view.title = title;
       row.append(options.head?.(record) || el("span", "record-dot", "·"), view,
-        el("span", "record-date", stamp(record.created_at || record.occurred_at || record.day || record.date)),
+        el("span", "record-date", stamp(options.date ? options.date(record) : record.created_at || record.occurred_at || record.day || record.date)),
         options.actions?.(record) || el("span"));
       list.append(row);
     }
@@ -317,7 +316,7 @@ async function action(name, payload = {}) {
     if (name === "debug_test" && result?.status === "success") navigate("context", "calls");
     render();
     return result ?? true;
-  }, (result) => result?.reason === "brief_failed" ? "简报生成失败，已保留正文和已有简报；可点击生成简报重试。" : result?.status === "skipped" ? `本次未执行：${result.text || result.reason || "请查看操作结果"}` : result?.status === "failed" ? `本次执行失败：${result.text || result.error || result.reason || "请查看操作结果"}` : "操作已完成，请查看执行结果");
+  }, (result) => result?.status === "skipped" ? `本次未执行：${result.text || result.reason || "请查看操作结果"}` : result?.status === "failed" ? `本次执行失败：${result.text || result.error || result.reason || "请查看操作结果"}` : name === "memory.process" ? "已安排后台提炼，点击刷新数据查看进度" : "操作已完成，请查看执行结果");
 }
 async function saveSettings(settings) {
   return request(async () => {
@@ -415,7 +414,7 @@ function recordList(records, options = {}) {
     if (time) meta.append(el("span", options.timeline ? "timeline-time" : "", options.timeline && record.end ? `${clockTime(time)} — ${clockTime(record.end)}` : stamp(time)));
     if (options.currentId === record.id) meta.append(badge("当前活动", "good"));
     if (record.important || record.pinned) meta.append(badge("重要保留", "good"));
-    if (record.profile && !record.context_category) meta.append(badge(contextName("memory.profile"), "good"));
+    if (record.stable && !record.context_category) meta.append(badge("稳定画像", "good"));
     append(item, append(el("div", "record-head"), title, options.head?.(record)), meta);
     const text = record.content || record.text || record.summary || record.description || record.error;
     if (text && text !== recordTitle(record)) item.append(el("p", "record-body", stringify(text)));
@@ -884,86 +883,135 @@ function renderDrives() {
   return root;
 }
 
+const memoryAttributes = ["用户别名", "事实属性", "技能树", "关系图谱", "活跃项目"];
+function memoryCheck(label, name, value) {
+  const node = append(el("label", "inline-check"), el("input"), el("span", "", label));
+  Object.assign(node.firstChild, { type: "checkbox", name, checked: Boolean(value) }); return node;
+}
+function memoryOwner(record) { return record.owner === "person" || record.person_id ? `QQ ${record.person_id || "身份未记录"}` : record.persona_name || record.owner_name || "当前人格"; }
 function editMemory(record = {}) {
-  const important = append(el("label", "inline-check"), el("input"), el("span", "", "重要记忆，长期保留"));
-  important.firstChild.type = "checkbox"; important.firstChild.name = "important"; important.firstChild.checked = Boolean(record.important || record.pinned);
-  openEditor(record.id ? "编辑记忆" : "添加记忆", [
-    field("内容", "content", record.content || record.text || "", { type: "textarea", required: true, readOnly: Boolean(record.profile && record.scope === "global"), hint: record.profile && record.scope === "global" ? "此人物认知由已核对的谈话证据形成，内容保持只读，可调整保留标记或删除。" : "" }),
-    field("分类", "kind", record.kind || "event", { options: ["knowledge", "event", "skill", "emotional"].map((kind) => ({ value: kind, label: contextName("memory." + kind) })) }),
-    record.id ? el("p", "hint", `所属场合：${scopeLabel(record.scope)}；人物：${record.person_id || "角色自身 / 未关联"}。编辑保留原有场合与人物；保存后可能调用 AI 核对未来日程，不发送 QQ 消息。`) : field("所属场合", "scope", "global", { options: scopeOptions(), hint: "私人谈话、经历与约定请选择对应会话。" }),
-    record.id ? el("span") : field("人物标识", "person_id", "", { hint: "留空表示角色自身或不关联人物。" }), important,
-  ], (patch) => {
-    if (!record.id) return action("remember", patch);
-    const { content: text, ...rest } = patch;
-    return action("update_memory", { id: record.id, patch: { ...rest, text } });
-  });
+  const owner = record.id ? el("p", "hint", `所属场合：${scopeLabel(record.scope)}；画像：${memoryOwner(record)}。编辑保留原有场合与人物归属。`) : append(el("div", "form-grid"),
+    field("所属场合", "scope", "global", { options: scopeOptions(), hint: "私人谈话、经历与约定请选择对应会话。" }),
+    field("QQ 身份", "person_id", "", { hint: "留空记入当前人格的自身画像；填写 QQ 号记入此人的画像。" }));
+  const body = [
+    field("记忆结论", "text", record.judgment || record.text || record.content || "", { type: "textarea", required: true }),
+    field("事实依据", "reasoning", record.reasoning || "", { type: "textarea", hint: "写出支持结论的来源或事实，不填写模型思考过程。" }),
+    append(el("div", "form-grid"), field("画像属性", "attribute", record.attribute || "事实属性", { options: memoryAttributes }),
+      field("检索标签", "tags", (record.tags || []).join("\n"), { type: "textarea", rows: 3, lines: true, hint: "每行一个标签，可填写人物、项目、工具或主题。" })), owner,
+    memoryCheck("属于稳定画像", "stable", record.stable), memoryCheck("这是有依据的推断", "inferred", record.inferred),
+    memoryCheck("重要记忆，免于遗忘", "important", record.important),
+  ];
+  openEditor(record.id ? "编辑记忆" : "添加记忆", body, ({ scope, person_id, ...patch }) => action("memory.update", { id: record.id || "", patch, ...(record.id ? {} : { scope, person_id }) }));
 }
 function contextName(id) { return snapshot?.context_layout_catalog?.blocks?.find((item) => item.id === id)?.label || id; }
-function categoryOf(row) {
-  if (row.context_category !== undefined) return row.context_category;
-  const source = String(row.source || "").split(":")[0];
-  if (["journal:brief", "notes:brief"].includes(row.source)) return "memory." + source;
-  return ["journal", "notes"].includes(source) || String(row.id || "").startsWith("journal:") ? null : row.profile ? "memory.profile" : "memory." + row.kind;
-}
 function sourceIndexButton(id) {
   const item = button("来源", () => showSourceIndex(id), "secondary layout-source", true);
   item.setAttribute("aria-label", contextName(id) + " · 来源"); return item;
 }
 function renderContextUsage() {
-  const catalog = snapshot.context_layout_catalog?.blocks || [];
-  const categories = catalog.filter((item) => item.usage);
-  if (!categories.length) return empty("请更新并重载插件以取得上下文用量目录");
-  const data = snapshot.settings.context_usage || { limits: {}, brief_max_chars: {} };
-  const form = settingsForm("保存上下文用量", "每类独立限量，不借用其他类别额度。0 表示该类不自动注入；保存不调用模型、不删除存档。"); form.id = "context-usage-settings";
+  const categories = [
+    { id: "memory.self", label: "记忆与画像 · 自身稳定画像", initial: 5, source: "memory" },
+    { id: "memory.people", label: "记忆与画像 · 每人稳定画像", initial: 5, source: "memory" },
+    { id: "memory.related", label: "记忆与画像 · 话题相关记忆", initial: 10, source: "memory" },
+    { id: "memory.recent", label: "近期记忆", initial: 5, source: "memory.recent" },
+    { id: "weather", label: "天气", initial: 1, source: "weather", max: 1 },
+  ];
+  const data = snapshot.settings.context_usage || { limits: {} };
+  const form = settingsForm("保存上下文用量", "各部分独立限量，0 停止对应资料注入；保存不调用模型、不删除存档。"); form.id = "context-usage-settings";
   const total = el("output", "context-usage-total"); total.setAttribute("aria-live", "polite");
-  form.append(total, el("p", "hint", "合计只读，由下面各项相加；实际注入受任务、模块、场合、日期和可用材料影响。不包含人格、日程、宿主聊天历史及任务明确要求的原文。来源每次读取数量、列表每页条数分别设置。"));
+  form.append(total, el("p", "hint", "上限按自身画像＋每人画像×最多人物数＋相关记忆＋近期记忆＋天气计算。实际数量还受任务勾选、场合、模块和去重影响；近期记忆优先。日程、宿主人格和聊天历史另计。"));
   const list = el("div", "context-usage-list");
   for (const item of categories) {
     const row = el("div", "context-usage-row"); row.dataset.blockId = item.id;
-    const amount = field(item.label + " · 最多条数", "context_usage.limits." + item.id, data.limits[item.id] ?? item.usage.default, { type: "number", min: 0, max: item.usage.max, step: 1, required: true });
+    const amount = field(item.label + " · 最多条数", "context_usage.limits." + item.id, data.limits[item.id] ?? item.initial, { type: "number", min: 0, max: item.max || 50, step: 1, required: true });
     amount.querySelector("input").dataset.limitId = item.id;
-    row.append(amount, sourceIndexButton(item.id));
-    if (item.usage.brief) {
-      const chars = field(item.label + " · 最长字符", "context_usage.brief_max_chars." + item.id, data.brief_max_chars[item.id] ?? item.usage.brief.default, { type: "number", min: item.usage.brief.min, max: item.usage.brief.max, step: 1, required: true });
-      chars.querySelector("input").dataset.briefId = item.id; row.append(chars);
-    }
+    row.append(amount, sourceIndexButton(item.source));
     list.append(row);
   }
-  form.append(list);
+  const people = field("群聊最多人物数", "context_usage.people_limit", data.people_limit ?? 3, { type: "number", min: 0, max: 20, step: 1, required: true, hint: "优先当前说话人，再取近期窗口内的参与者；0 不加载人物画像。" });
+  form.append(list, people);
   finishForm(form, "context.usage", () => saveSettings({ context_usage: {
-    version: 1,
+    version: 2,
     limits: Object.fromEntries([...form.querySelectorAll("[data-limit-id]")].map((input) => [input.dataset.limitId, Number(input.value)])),
-    brief_max_chars: Object.fromEntries([...form.querySelectorAll("[data-brief-id]")].map((input) => [input.dataset.briefId, Number(input.value)])),
+    people_limit: Number(people.querySelector("input").value),
   } }));
-  const updateTotal = () => { total.textContent = `配置合计最多注入 ${[...form.querySelectorAll("[data-limit-id]")].reduce((sum, input) => sum + (Number(input.value) || 0), 0)} 条`; };
+  const updateTotal = () => { total.textContent = `配置合计最多注入 ${[...form.querySelectorAll("[data-limit-id]")].reduce((sum, input) => sum + (Number(input.value) || 0) * (input.dataset.limitId === "memory.people" ? Number(people.querySelector("input").value) || 0 : 1), 0)} 条`; };
   form.querySelector(".section-toolbar").append(button("恢复初始用量", () => {
-    for (const input of form.querySelectorAll("[data-limit-id], [data-brief-id]")) {
-      const item = categories.find(item => item.id === (input.dataset.limitId || input.dataset.briefId));
-      input.value = input.dataset.limitId ? item.usage.default : item.usage.brief.default;
+    for (const input of form.querySelectorAll("[data-limit-id]")) {
+      input.value = categories.find(item => item.id === input.dataset.limitId).initial;
       input.dispatchEvent(new Event("input", { bubbles: true }));
     }
+    people.querySelector("input").value = 3; people.querySelector("input").dispatchEvent(new Event("input", { bubbles: true }));
   }, "secondary"));
   form.addEventListener("input", updateTotal); updateTotal(); return form;
+}
+function memoryProgress() {
+  const status = snapshot.memory_status || {};
+  const migration = status.migration || status;
+  const queue = status.queue || {};
+  const paused = Boolean(migration.paused);
+  const root = el("div", "memory-progress stack");
+  root.append(el("p", "", `旧资料整理：已完成 ${migration.completed || 0} / ${migration.total || 0}，待处理 ${migration.pending || 0}，失败 ${migration.failed || 0}${paused ? " · 已暂停" : ""}。`));
+  if (migration.waiting_persona) root.append(el("p", "hint", "等待解析当前人格；归属未确认的资料暂停整理。"));
+  if (migration.persona_name) root.append(el("p", "hint", `本次旧资料整理绑定人格：${migration.persona_name}`));
+  if (Object.keys(queue).length) root.append(el("p", "hint", `新材料提炼：待处理 ${queue.pending || 0}，失败 ${queue.failed || 0}。只在所属场合内整理。`));
+  root.append(append(el("div", "actions"), button(paused ? "继续旧资料整理" : "暂停旧资料整理", () => action(paused ? "memory.migration.resume" : "memory.migration.pause"), "secondary"), button("处理待提炼材料", () => action("memory.process"), "secondary")), el("p", "hint", "处理材料可能调用记忆模型；不执行搜索或发送 QQ。原始经历、见闻和日记继续保留。"));
+  return root;
+}
+function renderMemorySettings() {
+  const data = snapshot.settings.memory || {};
+  const form = settingsForm("保存提炼与遗忘设置", "保存本面板参数，下一次处理采用新设置。模型在系统与数据 → 模型分配设置。");
+  const f = (label, key, initial, extra = {}) => field(label, `memory.${key}`, data[key] ?? initial, { type: "number", min: 0, step: 1, required: true, ...extra });
+  form.append(heading("记忆提炼", "普通聊天使用最终回复及必要背景；来源材料保存后进入后台提炼。"), append(el("div", "form-grid"),
+    f("累计聊天轮数", "chat_batch_rounds", 5, { min: 1, max: 100 }),
+    field("闲置多少分钟后处理", "memory.chat_idle_minutes", (data.chat_idle_seconds ?? 600) / 60, { type: "number", min: 1 / 60, max: 1440, step: "any", required: true }),
+    f("每次最多提炼条数", "reflection_limit", 8, { min: 1, max: 100 }),
+    f("检索词理解超时（秒）", "query_timeout_seconds", 15, { min: 1, max: 15 })),
+    heading("可选遗忘", "默认关闭。只计算插件在线、记忆模块及此开关同时开启的时间；主动记忆和手动重要项免于遗忘。"),
+    memoryCheck("开启遗忘", "memory.forgetting_enabled", data.forgetting_enabled),
+    el("p", "hint", "达到遗忘条件会彻底删除该记忆正文、历史版本及索引关联；原始来源仍保留。关闭开关后暂停计时，重新开启不补扣。"),
+    append(el("div", "form-grid"), f("普通记忆初始强度", "initial_strength", 10, { min: 0.01, step: "any" }),
+      field("低档淡化间隔（在线天数）", "memory.low_decay_days", (data.low_decay_seconds ?? 259200) / 86400, { type: "number", min: 1 / 86400, max: 365, step: "any", required: true }),
+      f("每次淡化强度", "low_decay_amount", 1, { min: 0.01, step: "any" }), f("有用反馈增加强度", "useful_strength", 1, { step: "any" }),
+      f("有用反馈增加分数", "useful_score", 2.5, { step: 0.5 }), f("中档有用分门槛", "medium_threshold", 3, { step: 0.5 }),
+      f("长期保留有用分门槛", "long_threshold", 10, { step: 0.5 }), f("无用反馈降低强度", "useless_strength", 1, { step: 0.5 })),
+    el("p", "hint", "低档随在线时间淡化；达到中档后只因明确无用反馈淡化；达到长期门槛后保留。反馈只针对本轮实际提供的记忆，失败或缺失不奖惩。"));
+  finishForm(form, "memory.settings", ({ memory }) => {
+    const { chat_idle_minutes, low_decay_days, ...values } = memory;
+    return saveSettings({ memory: { ...values, chat_idle_seconds: Math.round(chat_idle_minutes * 60), low_decay_seconds: Math.round(low_decay_days * 86400) } });
+  });
+  return append(el("div", "stack"), form, card("后台提炼与旧资料整理", "队列与进度持久化，重启后继续；失败材料保留待重试。", memoryProgress()));
+}
+function memoryBody(record) {
+  const flags = [record.stable && "稳定画像", record.inferred && "有依据的推断", record.important && "重要保留", record.protected && "主动记忆保护", record.active === false && "已替换"].filter(Boolean);
+  return append(el("div", "stack"), el("p", "record-body", record.judgment || record.text || record.content || ""),
+    el("p", "hint", `${memoryOwner(record)} · ${record.attribute || "事实属性"} · ${scopeLabel(record.scope)}${flags.length ? " · " + flags.join(" / ") : ""}`),
+    el("p", "hint", `经历或获知时间：${record.occurred_at ? stamp(record.occurred_at) : "未记录"}；版本：${record.version || 1}`),
+    el("p", "record-body", `事实依据：${record.reasoning || "未记录"}`), el("p", "hint", `检索标签：${(record.tags || []).join("、") || "无"}`),
+    el("p", "hint", `来源：${record.source || "未记录"}；强度：${record.strength ?? "未记录"}；有用分：${record.useful_score ?? 0}`));
 }
 function renderMemory(tab = "records") {
   if (tab === "journals") return renderJournal();
   if (tab === "usage") return renderContextUsage();
+  if (tab === "settings") return renderMemorySettings();
   const root = el("div", "stack");
-  const merge = () => {
-    const chosen = rows("memories").filter((row) => selectedMemories.has(row.id));
-    if (chosen.length < 2) { notice("请先勾选至少两条记忆。", true); return; }
-    if (new Set(chosen.map((row) => row.scope || "global")).size > 1) { notice("只能合并同一场合的记忆，避免把私人内容带到其他场合。", true); return; }
-    if (chosen.some((row) => row.profile && row.scope === "global")) { notice("全局人物认知来自可核对的谈话证据，不能用手工合并的内容替换。", true); return; }
-    openEditor("合并选中的记忆", [el("p", "hint", "可能调用 AI 核对未来日程，不发送消息；只合并同场合资料。"), field("合并内容", "content", chosen.map((row) => row.content || row.text || "").join("\n"), { type: "textarea", required: true })], async (values) => { const result = await action("merge_memories", { ids: chosen.map((row) => row.id), content: values.content }); if (result !== false) selectedMemories.clear(); return result; }, "合并记忆");
+  const profiles = snapshot.memory_profiles || [];
+  const profileOptions = [{ value: "", label: "全部画像" }, ...profiles.map((profile) => ({ value: profile.id, label: `${profile.name || profile.persona_name || profile.person_id}${profile.owner === "person" ? " · QQ " + profile.person_id : profile.current ? " · 当前自身画像" : " · 历史自身画像"}（${profile.count || 0} 条）` }))];
+  const memorySource = sourceIndexButton("memory"), recentSource = sourceIndexButton("memory.recent");
+  memorySource.textContent = "记忆与画像来源"; recentSource.textContent = "近期记忆来源";
+  root.append(el("p", "hint", "自身记忆按人格名称分别保存；QQ 人物画像按身份识别。人格改名后使用空的自身档案，旧档可查看，改回原名可继续使用。"), append(el("div", "actions"), button("添加记忆", () => editMemory(), "primary"), memorySource, recentSource));
+  if (rows("memories").some(row => row.schema_version !== 2)) root.append(append(el("div", "actions"), el("span", "hint", "旧格式资料正在分批整理，完成后出现在对应画像中。"), button("查看整理进度", () => navigate("memory", "settings"), "secondary", true)));
+  const filters = append(el("div", "compact-filter"), chooser("画像档案", "memory.profile", profileOptions), recordScopeFilter("memories"), chooser("画像属性", "memory.attribute", [{ value: "", label: "全部属性" }, ...memoryAttributes.map(value => ({ value, label: value }))]), chooser("保留状态", "memory.state", [{ value: "", label: "全部有效记忆" }, { value: "important", label: "重要或主动保护" }, { value: "stable", label: "稳定画像" }]));
+  const selected = profiles.find(profile => profile.id === selections.get("memory.profile"));
+  const data = byRecordScope("memories", rows("memories")).filter(row => row.schema_version === 2 && row.active !== false && (!selected || (selected.owner === "person" ? row.person_id === selected.person_id : !row.person_id && row.persona_name === selected.persona_name)) && (!selections.get("memory.attribute") || row.attribute === selections.get("memory.attribute")) && (!selections.get("memory.state") || (selections.get("memory.state") === "stable" ? row.stable : row.important || row.protected)));
+  const history = async (record) => {
+    const result = await action("memory.history", { id: record.id }); if (result === false) return;
+    const versions = Array.isArray(result) ? result : result.records || result.history || [];
+    openRecord("记忆变更记录", versions.length ? versions.map(version => card(`版本 ${version.version || ""}`, version.reason || "", memoryBody(version.record || version))) : empty("尚无历史版本"));
   };
-  root.append(append(el("div", "actions"), button("添加记忆", () => editMemory(), "primary"), button("合并所选", merge, "secondary")));
-  const filters = append(el("div", "compact-filter"), recordScopeFilter("memories"), chooser("记忆分类", "memory.kind", [{ value: "", label: "全部分类" }, ...(snapshot.context_layout_catalog?.blocks || []).filter((item) => item.id.startsWith("memory.")).map((item) => ({ value: item.id, label: item.label }))]));
-  const kind = selections.get("memory.kind");
-  const data = byRecordScope("memories", rows("memories")).filter((row) => !kind || categoryOf(row) === kind).map((row) => ({ ...row, context_category: categoryOf(row) }));
-  if (kind) filters.append(sourceIndexButton(kind));
   root.append(filters, compactRecords("memories", data, {
-    head: (record) => { const check = el("input"); check.type = "checkbox"; check.checked = selectedMemories.has(record.id); check.setAttribute("aria-label", `选择记忆 ${recordTitle(record)}`); check.addEventListener("change", () => { if (check.checked) selectedMemories.add(record.id); else selectedMemories.delete(record.id); }); return check; },
-    actions: (record) => append(el("div", "actions"), button("编辑", () => editMemory(record), "secondary", true), button("删除", () => confirmAction("删除这条记忆", "删除后不再召回，可能调用 AI 核对未来日程；不发送 QQ，不删除宿主历史。", () => action("delete_memory", { id: record.id }), true, "删除记忆"), "danger", true)),
+    title: record => `${record.important || record.protected ? "★ " : ""}${record.judgment || record.text || record.content || record.id}`, body: memoryBody, date: record => record.occurred_at, searchHint: "搜索结论、依据或标签",
+    actions: record => append(el("div", "actions"), button("编辑", () => editMemory(record), "secondary", true), button("变更记录", () => history(record), "secondary", true), button("删除", () => confirmAction("删除这条记忆", "彻底删除该记忆及历史版本，停止召回；保留原始来源和必要的处理标记。", () => action("memory.delete", { id: record.id }), true, "删除记忆"), "danger", true)),
   }));
   return root;
 }
@@ -978,15 +1026,15 @@ function realSourceAction(source, label, queryLabel = "", placeholder = "") {
 }
 function renderJournal() {
   const root = el("div", "stack");
-  const generate = () => openEditor("生成日记或笔记", [el("p", "hint", "先生成正文，再调用模型提炼简报，不发送 QQ。简报失败保留正文。"), field("日期", "date", dayNow(), { type: "date", required: true }), field("类型", "kind", "journal", { options: [{ value: "journal", label: "生活日记" }, { value: "note", label: "见闻笔记" }] }), field("所属场合", "scope", "global", { options: scopeOptions() })], (values) => action("generate_journal", values), "调用 AI 并保存记录");
-  const kind = chooser("类型", "journals.kind", [{ value: "", label: "全部类型" }, { value: "journal", label: contextName("memory.journal") }, { value: "notes", label: contextName("memory.notes") }]);
+  const generate = () => openEditor("生成日记或笔记", [el("p", "hint", "从记忆中取材生成正文，保存后进入统一后台提炼；不发送 QQ。没有材料时跳过。"), field("日期", "date", dayNow(), { type: "date", required: true }), field("类型", "kind", "journal", { options: [{ value: "journal", label: "生活日记" }, { value: "note", label: "见闻笔记" }] }), field("主题（笔记使用）", "topic", "", { hint: "日记按目标日期回顾，笔记按主题召回相关记忆。" }), field("所属场合", "scope", "global", { options: scopeOptions() })], (values) => action("generate_journal", values), "调用 AI 并保存记录");
+  const kind = chooser("类型", "journals.kind", [{ value: "", label: "全部类型" }, { value: "journal", label: "生活日记" }, { value: "notes", label: "见闻笔记" }]);
   root.append(append(el("div", "actions"), button("生成日记或笔记", generate, "primary")), append(el("div", "compact-filter"), recordScopeFilter("journals"), kind));
   const records = byRecordScope("journals", rows("entries")).filter((row) => !selections.get("journals.kind") || row.kind === selections.get("journals.kind"));
   const body = (record) => append(el("div", "stack"), el("p", "hint", `所属场合：${scopeLabel(record.scope)}`),
-    el("p", record.summary ? "record-body" : "hint", record.summary || (record.summary_status === "failed" ? "简报生成失败，正文已保留；当前不注入全文。" : "尚无简报，当前不注入全文。")),
+    el("p", "hint", "正文保存后由统一记忆系统提炼。日常聊天通过记忆与画像、近期记忆获取相关内容。"),
     append(el("details"), el("summary", "", "查看完整正文"), el("div", "record-body", record.text || "")));
-  root.append(compactRecords("journals", records, { title: (row) => `${row.day || "未记录日期"} · ${kindNames[row.kind] || "日记"} · ${row.summary ? "已有简报" : "尚无简报"}`, body,
-    actions: (record) => append(el("div", "actions"), button(record.summary ? "重新生成简报" : "生成简报", () => confirmAction("生成上下文简报", "调用一次模型提炼原文并保存简报，不改正文、不发送消息；失败保留已有简报。", () => action("summarize_journal", { id: record.id, regenerate: Boolean(record.summary) }), false, "调用 AI 生成简报"), "secondary", true), button("删除", () => confirmAction("删除这篇记录", "删除日记或笔记及派生记忆，不删除原始见闻，不调用模型。", () => action("delete_entry", { id: record.id }), true, "删除记录"), "danger", true)),
+  root.append(compactRecords("journals", records, { title: (row) => `${row.day || "未记录日期"} · ${kindNames[row.kind] || "日记"}`, body,
+    actions: (record) => button("删除", () => confirmAction("删除这篇记录", "删除日记或笔记及派生记忆，不删除原始见闻，不调用模型。", () => action("delete_entry", { id: record.id }), true, "删除记录"), "danger", true),
   })); root.id = "journal-entries"; return root;
 }
 
@@ -1736,13 +1784,13 @@ function renderData() {
 
 function renderSystem(tab) {
   if (tab === "backup") return renderData();
-  if (tab === "maintenance") return append(el("div", "stack"), button("整理旧记忆", () => action("maintain_memory"), "secondary"), el("p", "hint", "淡化普通旧记忆、归档低强度记录并保留重要记忆；不调用 AI、不发送 QQ。"), details(snapshot.diagnostics || [], "诊断信息"), details({ version: snapshot.version, counts: Object.fromEntries(["activities", "memories", "observations", "entries", "events", "deliveries", "usage"].map((key) => [key, rows(key).length])) }, "数据统计"), usageTable());
+  if (tab === "maintenance") return append(el("div", "stack"), button("记忆提炼与遗忘设置", () => navigate("memory", "settings"), "secondary"), details(snapshot.diagnostics || [], "诊断信息"), details({ version: snapshot.version, counts: Object.fromEntries(["activities", "memories", "observations", "entries", "events", "deliveries", "usage"].map((key) => [key, rows(key).length])) }, "数据统计"), usageTable());
   const form = settingsForm(tab === "models" ? "保存模型分配" : "保存模块开关", "只保存当前面板；关闭模块保留已有数据。");
   if (tab === "modules") form.append(modulePanel(true));
   else {
     const providers = [{ value: "", label: "沿用默认模型" }, ...rows("providers").map((row) => ({ value: row.id, label: row.name || row.id }))];
     const fields = el("div", "form-grid");
-    for (const [label, key] of [["默认模型", "default"], ["生活与日程", "life"], ["记忆提炼", "memory"], ["主动社交", "social"], ["外部见闻", "exploration"], ["日记与笔记", "journal"]]) fields.append(field(label, `models.${key}`, snapshot.settings.models?.[key] || "", { options: providers }));
+    for (const [label, key] of [["默认模型", "default"], ["生活与日程", "life"], ["记忆提炼、检索与反馈", "memory"], ["主动社交", "social"], ["外部见闻", "exploration"], ["日记与笔记", "journal"]]) fields.append(field(label, `models.${key}`, snapshot.settings.models?.[key] || "", { options: providers }));
     form.append(fields);
   }
   return finishForm(form, "system." + tab);
@@ -1756,7 +1804,7 @@ function applyRouteSelection() {
   const { page, tab, params } = currentRoute;
   rememberedTabs[page] = tab;
   if (params.source !== undefined && page === "sources") selections.set("source." + tab, params.source);
-  if (params.category !== undefined && page === "memory" && tab === "records") selections.set("memory.kind", params.category);
+  if (params.attribute !== undefined && page === "memory" && tab === "records") selections.set("memory.attribute", params.attribute);
   if (params.kind !== undefined && page === "memory" && tab === "journals") selections.set("journals.kind", params.kind);
   if (params.task && page === "context") {
     if (tab === "templates") { templateTask = params.task; selections.delete("template.version"); }

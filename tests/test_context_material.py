@@ -1,4 +1,4 @@
-"""Automatic life material is compact, dated, scoped and separate from raw evidence."""
+"""Historical life projections and current source material preserve their fact boundaries."""
 
 import copy
 import json
@@ -20,6 +20,10 @@ from test_runtime import FakeHost, GROUP, PRIVATE
 
 NOW = datetime(2026, 9, 9, 19, tzinfo=ZoneInfo("Asia/Shanghai"))
 URL = "https://example.test/story?first=1&second=2"
+
+
+def historical_context(data, *, legacy=False):
+    return context_from_data(data, version=3, legacy=legacy)
 
 
 def event(key="life:first", text="自由活动与准备休息。", at=None, scope="global", **extra):
@@ -84,7 +88,7 @@ def test_today_events_deduplicate_memory_lineage_without_rewriting_records():
     timeless = {**event("life:missing", "日期未知。"), "created_at": "invalid"}
     data = material([first, older, timeless], [memory, {**older, "id": "event:life:old"}])
     before = copy.deepcopy(data)
-    bundle = context_from_data(data)
+    bundle = historical_context(data)
     assert bundle["text"].count("角色经历（18：00）：自由活动与准备休息。") == 1
     assert "角色虚构日常" in bundle["text"]
     assert "昨晚散步" not in bundle["text"] and "日期未知" not in bundle["text"]
@@ -98,18 +102,18 @@ def test_legacy_exact_copy_and_distinct_occurrences():
     distinct = event("life:second", at=NOW.replace(hour=17))
     simultaneous = event("life:third")
     unlinked = {**first, "id": "old-memory", "source_event_id": ""}
-    bundle = context_from_data(material([first, distinct, simultaneous], [unlinked]), legacy=True)
+    bundle = historical_context(material([first, distinct, simultaneous], [unlinked]), legacy=True)
     assert bundle["text"].count("自由活动与准备休息。") == 3
     assert bundle["text"].index("18：00") < bundle["text"].index("17：00")
     assert (
-        context_from_data(material([first, distinct, simultaneous], [unlinked]))["text"].count(
+        historical_context(material([first, distinct, simultaneous], [unlinked]))["text"].count(
             "自由活动与准备休息。"
         )
         == 4
     )
     private_copy = {**unlinked, "scope": PRIVATE}
     assert (
-        context_from_data(material([first], [private_copy]))["text"].count("自由活动与准备休息。")
+        historical_context(material([first], [private_copy]))["text"].count("自由活动与准备休息。")
         == 2
     )
 
@@ -127,7 +131,7 @@ def test_character_timezone_midnight_and_dst():
     autumn = datetime(2026, 11, 1, 12, tzinfo=ZoneInfo("America/New_York"))
     data = material([{**event(), "created_at": "2026-11-01T04:30:00Z"}])
     data.update(current_time=autumn.isoformat(), timezone="America/New_York")
-    assert "角色经历（00：30）" in context_from_data(data)["text"]
+    assert "角色经历（00：30）" in historical_context(data)["text"]
 
 
 def test_missing_dates_do_not_remove_knowledge_profiles_or_promises():
@@ -136,7 +140,7 @@ def test_missing_dates_do_not_remove_knowledge_profiles_or_promises():
         {"text": "喜欢数学", "kind": "event", "profile": True, "source": "chat"},
         {"text": "下周一起复习", "kind": "event", "source": "chat"},
     ]
-    text = context_from_data(material(memories=rows))["text"]
+    text = historical_context(material(memories=rows))["text"]
     assert all(row["text"] in text for row in rows)
 
 
@@ -192,70 +196,110 @@ async def world(tmp_path):
         {"persona_id": "student", "sessions": [{"umo": PRIVATE}, {"umo": GROUP}]}
     )
     runtime.life._now = lambda value=None: value or NOW
+    runtime.kick_memory = lambda: None
     yield runtime
     await runtime.stop()
 
 
+async def extract_pending(world):
+    for job in world.store.list("memory_jobs"):
+        world.host.answers.append(
+            json.dumps(
+                {
+                    "memories": [
+                        {
+                            "judgment": clean_life_text(job["text"]),
+                            "evidence": job["text"],
+                            "attribute": "事实属性",
+                            "owner": "self",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+        await world.memory._extract_batch([job])
+
+
 async def test_sqlite_event_time_dedup_recall_and_restart(world):
     first = world.record_event("角色虚构生活：自由活动。", source="fiction", key="life:first")
-    memory = world.store.get("memories", "event:life:first")
-    assert memory["text"] == first["text"] == "自由活动。"
-    assert memory["source_event_id"] == first["id"]
-    assert memory["occurred_at"] == first["occurred_at"] == NOW.isoformat()
+    jobs = world.store.list("memory_jobs")
+    assert len(jobs) == 1 and jobs[0]["occurred_at"] == NOW.isoformat()
+    assert world.store.list("memories") == []
     assert world.record_event("不应覆盖", source="fiction", key="life:first") == first
-    assert world.store.get("memories", "event:life:first") == memory
+    assert world.store.list("memory_jobs") == jobs
+    await extract_pending(world)
+    memory = world.store.list("memories")[0]
+    assert memory["text"] == first["text"] == "自由活动。"
+    assert datetime.fromisoformat(memory["occurred_at"]) == datetime.fromisoformat(
+        first["occurred_at"]
+    )
+    assert "event:life:first" in memory["source_keys"]
     bundle = await world.context_bundle(PRIVATE, reinforce=False)
-    assert bundle["text"].count("角色经历（19：00）：自由活动。") == 1
+    assert (
+        len(
+            [
+                row
+                for source in bundle["sources"]
+                for row in source.get("memory_ids", [])
+                if row == memory["id"]
+            ]
+        )
+        == 1
+    )
     world.life._now = lambda value=None: value or NOW + timedelta(days=1)
-    assert "自由活动。" not in (await world.context_bundle(PRIVATE, reinforce=False))["text"]
+    assert "自由活动。" in (await world.context_bundle(PRIVATE, reinforce=False))["text"]
     assert world.store.get("events", first["id"]) == first
     reopened = Runtime(world.store.db.execute("PRAGMA database_list").fetchone()[2], FakeHost())
     try:
-        reopened.life._now = lambda value=None: value or NOW + timedelta(days=1)
+        reopened.kick_memory = lambda: None
         assert reopened.record_event("重启不覆盖", source="fiction", key=first["id"]) == first
         assert reopened.store.get("memories", memory["id"])["occurred_at"] == memory["occurred_at"]
     finally:
         await reopened.stop()
 
 
-async def test_event_and_derived_memory_rollback_together(world, monkeypatch):
+async def test_event_and_pending_extraction_rollback_together(world, monkeypatch):
     def fail(*args, **kwargs):
-        raise RuntimeError("memory write failed")
+        raise RuntimeError("memory enqueue failed")
 
-    monkeypatch.setattr(world.memory, "remember", fail)
-    with pytest.raises(RuntimeError, match="memory write failed"):
+    monkeypatch.setattr(world.memory, "enqueue_material", fail)
+    with pytest.raises(RuntimeError, match="memory enqueue failed"):
         world.record_event("活动正文", source="fiction", key="rollback")
     assert world.store.get("events", "rollback") is None
-    assert world.store.get("memories", "event:rollback") is None
+    assert not world.store.list("memory_jobs")
 
 
-async def test_old_fiction_is_filtered_before_recall_limit_without_strengthening(world):
+async def test_old_fiction_can_be_recalled_without_automatic_strengthening(world):
     for index in range(15):
-        world.record_event(
-            f"昨天重复的关键词 {index}",
+        world.memory.remember(
+            f"昨天散步经历 {index}",
             source="fiction",
-            key=f"old:{index}",
             occurred_at=(NOW - timedelta(days=1)).isoformat(),
         )
-    wanted = world.memory.remember("关键词的长期知识", kind="knowledge")
-    previous = world.store.get("memories", "event:old:0")
+    wanted = world.memory.remember("关键词的长期知识")
+    previous = world.store.list("memories")
     selected = world.memory.recall("关键词", limit=1, context_now=NOW)
     assert selected[0]["id"] == wanted["id"]
-    assert world.store.get("memories", previous["id"]) == previous
+    past = world.memory.recall("昨天散步", limit=2, context_now=NOW)
+    assert len(past) == 2
+    assert world.store.list("memories") == previous
 
 
-async def test_legacy_origin_time_beats_recent_memory_creation_and_private_stays_private(world):
+async def test_old_occurrence_is_preserved_and_private_memory_stays_private(world):
     raw = event("legacy", "角色虚构生活：昨天的生活", NOW - timedelta(days=1))
     world.store.put("events", "legacy", raw)
-    memory = world.memory.remember(
-        "角色虚构经历：" + raw["text"], source="fiction", key="event:legacy"
+    memory = world.memory.remember(raw["text"], source="fiction", occurred_at=raw["created_at"])
+    private_memory = world.memory.remember(
+        "只在私聊中的经历", scope=PRIVATE, source="fiction", occurred_at=NOW.isoformat()
     )
-    world.record_event("只在私聊中的经历", scope=PRIVATE, source="fiction", key="private")
     private = (await world.context_bundle(PRIVATE, reinforce=False))["text"]
     public = (await world.context_bundle(GROUP, reinforce=False))["text"]
-    assert "昨天的生活" not in private + public
+    assert "昨天的生活" in private and "昨天的生活" in public
     assert "只在私聊中的经历" in private and "只在私聊中的经历" not in public
+    assert "2026-09-08" in private
     assert world.store.get("memories", memory["id"]) == memory
+    assert world.store.get("memories", private_memory["id"]) == private_memory
     assert world.store.get("events", "legacy") == raw
 
 
@@ -269,7 +313,9 @@ async def test_detail_plan_preview_and_source_evidence_use_correct_material(worl
         key="yesterday",
         occurred_at=(NOW - timedelta(days=1)).isoformat(),
     )
-    world.memory.remember(f"天文知识，[观测指南]({URL})", kind="knowledge")
+    world.memory.remember(f"天文知识，[观测指南]({URL})", stable=True)
+    await world.update_settings({"modules": {"search": True}})
+    await extract_pending(world)
     activity = {
         "id": "future",
         "date": str(NOW.date()),
@@ -284,13 +330,14 @@ async def test_detail_plan_preview_and_source_evidence_use_correct_material(worl
     payload = (
         await world.prepare_request("life.detail", "life", detail["template"], detail["context"])
     )["prompt"]
-    assert payload.count("中文摘要") == 1
-    assert "今天散步" in payload and "角色经历（19：00）" in payload
-    assert "昨天散步" not in payload and URL not in payload and "search_results" not in payload
+    assert "中文摘要" in payload
+    assert "今天散步" in payload and "2026-09-09 19：00" in payload
+    assert "昨天散步" in payload and URL not in payload and "search_results" not in payload
     plan = json.dumps(world.life.plan_request()["context"], ensure_ascii=False)
-    assert URL not in plan and "昨天散步" not in plan and "今天散步" in plan
+    assert "memories" not in world.life.plan_request()["context"]
+    assert URL not in plan
     preview = await world.build_test_request("life.detail")
-    assert preview["dynamic_context"] == detail["context"]
+    assert preview["dynamic_context"]["待细化活动"] == detail["context"]["待细化活动"]
     assert URL not in preview["prompt"]
     reflected = await world.prepare_request(
         "search.reflect",

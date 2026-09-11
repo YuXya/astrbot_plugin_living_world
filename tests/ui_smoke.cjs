@@ -46,7 +46,9 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
         day_summary: { date: day, counts: { news: { started: 1, arranged: 1, success: 0, failed: 1, skipped: 2 }, search: { started: 0, arranged: 2, success: 0, failed: 0, skipped: 0 }, social: { started: 1, arranged: 0, success: 1, failed: 0, skipped: 1 } } },
         prompt_template_history: [{ id: "life.detail", task: "life.detail", template: "旧版指令：不能新增行动。", archived_at: new Date().toISOString() }],
         life_days: [{ date: day, scope: "global", parameters: { activity_count: 10, news_count: 2, search_count: 2, social_count: 3 }, full_request: { prompt: "daily plan complete request" }, raw_json: JSON.stringify({ activities: activities.slice(0, 10) }), adopted_activities: activities.slice(0, 10) }],
-        memories: [{ id: "m1", text: "约好了明天一起聊流星雨", kind: "event", scope, person_id: "42", important: true }, { id: "m2", text: "朋友最近喜欢看天文纪录片", kind: "knowledge", scope, person_id: "42" }, { id: "m3", text: "<img src=x onerror=window.xss=true>", kind: "event", scope: "global" }],
+        memories: [{ id: "m1", schema_version: 2, text: "约好了明天一起聊流星雨", attribute: "活跃项目", tags: ["流星雨"], scope, person_id: "42", owner: "person", important: true, version: 1, reasoning: "聊天明确约定", occurred_at: 1800000000 }, { id: "m2", schema_version: 2, text: "朋友最近喜欢看天文纪录片", attribute: "事实属性", scope, person_id: "42", owner: "person", stable: true, tags: ["天文"], version: 1 }, { id: "m3", schema_version: 2, text: "<img src=x onerror=window.xss=true>", attribute: "事实属性", scope: "global", owner: "self", persona_name: "小夏", tags: [], version: 1 }],
+        memory_profiles: [{ id: "self:小夏", owner: "self", persona_name: "小夏", name: "小夏", current: true, count: 1 }, { id: "self:旧名字", owner: "self", persona_name: "旧名字", name: "旧名字", current: false, count: 0 }, { id: "person:42", owner: "person", person_id: "42", name: "朋友", count: 2 }],
+        memory_status: { migration: { version: 1, total: 10, completed: 6, pending: 3, failed: 1, paused: false, persona_name: "小夏" }, queue: { pending: 2, failed: 0 } },
         observations: [{ id: "o1", module: "news", title: "今晚试着看看星空", selection_reason: "喜欢天文", factual_summary: "本周有流星雨观测窗口。", impression: "想在放学后看看天空。", reading_basis: "RSS 摘要", sources: [{ url: "https://example.test/story" }], scope: "global" }, { id: "o2", module: "search", title: "流星雨观测地点", query: "城市周边 观星", factual_summary: "搜索提供了两处公园的信息。", impression: "下次想和朋友讨论路线。", reading_basis: "搜索结果摘要", sources: ["https://example.test/search"], scope: "global" }, { id: "o3", module: "weather", text: "晴，26°C，适合散步。", scope: "global" }],
         entries: [{ id: "j1", day, text: "晚风很舒服，回家看到一颗很亮的星。", kind: "journal", scope: "global" }], events: [], deliveries: [{ id: "d1", umo: scope, text: "今晚还想一起聊星星吗？", status: "sent" }], usage: [], diagnostics: [],
         debug: { templates: [{ task: "life.plan_day", default_template: template, template }] },
@@ -165,11 +167,14 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
             Object.assign(row, body.patch, { detailed: false, actions: {}, description: "", detail_version: "" });
             return structuredClone(row);
           }
-          if (body.action === "summarize_journal") {
-            const row = window.fixture.entries.find((entry) => entry.id === body.id);
-            Object.assign(row, { summary: "简报：看到了星星。<script>window.briefXss=true</script>", summary_status: "ready" });
-            return structuredClone(row);
+          if (body.action === "memory.update") {
+            const row = window.fixture.memories.find(item => item.id === body.id);
+            if (row) { (window.memoryVersions ||= {})[row.id] ||= []; window.memoryVersions[row.id].push(structuredClone(row)); Object.assign(row, body.patch, { version: row.version + 1 }); return structuredClone(row); }
+            const created = { id: "manual-memory", schema_version: 2, owner: body.person_id ? "person" : "self", persona_name: body.person_id ? "" : "小夏", scope: body.scope, person_id: body.person_id, ...body.patch, version: 1 }; window.fixture.memories.push(created); return structuredClone(created);
           }
+          if (body.action === "memory.history") return { records: structuredClone(window.memoryVersions?.[body.id] || []) };
+          if (body.action === "memory.delete") { window.fixture.memories = window.fixture.memories.filter(row => row.id !== body.id); return { status: "success" }; }
+          if (body.action === "memory.migration.pause" || body.action === "memory.migration.resume") { window.fixture.memory_status.migration.paused = body.action.endsWith("pause"); return structuredClone(window.fixture.memory_status); }
           return { status: "success", action: body.action };
         },
       };

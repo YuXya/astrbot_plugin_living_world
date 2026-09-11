@@ -438,9 +438,13 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
         layout = moved(DEFAULT_LAYOUT, "group_reply", "system", "anchor.system")
         layout = moved(layout, "profile", "user", "anchor.user")
         await runtime.update_settings(
-            {"context_layout": {"order": layout}, "character": {"profile": "FROZEN_PROFILE"}}
+            {
+                "context_layout": {"order": layout},
+                "character": {"profile": "FROZEN_PROFILE"},
+                "context_usage": {"limits": {"memory.related": 0, "memory.recent": 0}},
+            }
         )
-        runtime.memory.remember("数学 FROZEN_MEMORY", scope=scope)
+        runtime.memory.remember("数学 FROZEN_MEMORY", scope=scope, stable=True)
 
     class Executor:
         async def execute(self, **kwargs):
@@ -448,7 +452,7 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
                 await runtime.update_settings(
                     {
                         "context_layout": {"order": DEFAULT_LAYOUT},
-                        "context_usage": {"limits": {"memory.event": 0}},
+                        "context_usage": {"limits": {"memory.self": 0}},
                     }
                 )
             await provider.text_chat(prompt="第三方工具内部秘密", request_max_retries=1)
@@ -487,7 +491,7 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
             )
             assert user.index("FROZEN_PROFILE") < user.index("查数学")
             assert call["request_body"].count("FROZEN_MEMORY") == 1
-            assert user.count("【" + BLOCK_NAMES["memory.event"] + "】") == 1
+            assert user.count("【" + BLOCK_NAMES["memory"] + "】") == 1
             assert "FROZEN_PROFILE" not in system
             assert GROUP_REPLY_HEADING not in user
             assert (GROUP_REPLY_HEADING in system) == (scope == GROUP)
@@ -512,18 +516,17 @@ async def test_ordered_layout_matches_actual_http_and_excludes_saved_history(
     runtime, _, _ = real_world
     task = "chat.group" if scope == GROUP else "chat.private"
     guidance = "group_reply" if scope == GROUP else "private_reply"
-    layout = moved(DEFAULT_LAYOUT, "experiences", "user", "memory.event")
-    layout = moved(layout, "observations", "system", "anchor.system")
+    layout = moved(DEFAULT_LAYOUT, "memory.recent", "user", "memory")
+    layout = moved(layout, "weather", "system", "anchor.system")
     layout = moved(layout, guidance, "system")
     selection = [
-        key
-        for key in runtime.settings["context_layout"]["tasks"][task]
-        if key != "memory.knowledge"
+        key for key in runtime.settings["context_layout"]["tasks"][task] if key != "task.material"
     ]
     await runtime.update_settings(
         {
             "context_layout": {"order": layout, "tasks": {task: selection}},
-            "modules": {"news": True},
+            "modules": {"news": True, "weather": True},
+            "context_usage": {"limits": {"memory.related": 0, "memory.recent": 1}},
             "reply": {
                 "group_prompt": "GROUP_HTTP_RULE",
                 "private_prompt": "PRIVATE_HTTP_RULE",
@@ -531,25 +534,18 @@ async def test_ordered_layout_matches_actual_http_and_excludes_saved_history(
             },
         }
     )
-    runtime.memory.remember("MEMORY_SENTINEL mathematics", scope=scope)
-    hidden = runtime.memory.remember(
-        "UNCHECKED_SENTINEL mathematics", scope=scope, kind="knowledge"
-    )
-    runtime.store.put(
-        "events",
-        "experience",
-        {
-            "id": "experience",
-            "text": "EXPERIENCE_SENTINEL",
-            "scope": scope,
-            "source": "fiction",
-            "occurred_at": runtime.life._now().isoformat(),
-        },
+    runtime.memory.remember("MEMORY_SENTINEL mathematics", scope=scope, stable=True)
+    hidden = runtime.memory.remember("UNCHECKED_SENTINEL mathematics", scope=scope, stable=False)
+    runtime.memory.remember(
+        "EXPERIENCE_SENTINEL",
+        scope=scope,
+        source="fiction",
+        occurred_at=runtime.life._now().isoformat(),
     )
     runtime.store.put(
         "observations",
         "news",
-        {"id": "news", "module": "news", "scope": scope, "text": "NEWS_SENTINEL"},
+        {"id": "news", "module": "weather", "scope": scope, "text": "WEATHER_SENTINEL"},
     )
     runtime.store.put(
         "observations",
@@ -574,9 +570,9 @@ async def test_ordered_layout_matches_actual_http_and_excludes_saved_history(
     user = content_text(
         next(message["content"] for message in reversed(messages) if message.get("role") == "user")
     )
-    assert system.index("NEWS_SENTINEL") < system.index("SYSTEM_ANCHOR")
+    assert system.index("WEATHER_SENTINEL") < system.index("SYSTEM_ANCHOR")
     assert user.index("EXPERIENCE_SENTINEL") < user.index("MEMORY_SENTINEL")
-    assert "NEWS_SENTINEL" not in user and "PRIVATE_SECRET" not in raw
+    assert "WEATHER_SENTINEL" not in user and "PRIVATE_SECRET" not in raw
     assert (GROUP_REPLY_HEADING in system) == (scope == GROUP)
     assert GROUP_REPLY_HEADING not in user
     assert "【" + BLOCK_NAMES[guidance] + "】" in system
@@ -585,7 +581,8 @@ async def test_ordered_layout_matches_actual_http_and_excludes_saved_history(
     assert "PROACTIVE_HTTP_RULE" not in raw and "UNCHECKED_SENTINEL" not in raw
     assert runtime.store.get("memories", hidden["id"])["access_count"] == 0
     assert all(
-        raw.count(text) == 1 for text in ("NEWS_SENTINEL", "MEMORY_SENTINEL", "EXPERIENCE_SENTINEL")
+        raw.count(text) == 1
+        for text in ("WEATHER_SENTINEL", "MEMORY_SENTINEL", "EXPERIENCE_SENTINEL")
     )
     saved = json.dumps(
         dump_messages_with_checkpoints(runner.run_context.messages), ensure_ascii=False
@@ -593,7 +590,7 @@ async def test_ordered_layout_matches_actual_http_and_excludes_saved_history(
     assert all(
         text not in saved
         for text in (
-            "NEWS_SENTINEL",
+            "WEATHER_SENTINEL",
             "MEMORY_SENTINEL",
             "EXPERIENCE_SENTINEL",
             GROUP_REPLY_HEADING,
@@ -616,37 +613,34 @@ async def test_independent_usage_and_selected_target_match_actual_http(
             "sessions": [{"umo": scope, "display_name": "本次目标称呼"}],
             "modules": {"news": True, "search": True, "bilibili": True, "daily_digest": True},
             "context_layout": {"order": layout},
-            "context_usage": {"limits": {"memory.knowledge": 2, "observations": 3}},
+            "context_usage": {
+                "limits": {"memory.self": 2, "memory.related": 0, "memory.recent": 3}
+            },
         }
     )
     for i in range(4):
-        runtime.memory.remember(f"INDEPENDENT_KNOWLEDGE_{i}", kind="knowledge", scope=scope)
+        runtime.memory.remember(f"INDEPENDENT_PROFILE_{i}", stable=True, scope=scope)
     for i, module in enumerate(("news", "search", "bilibili", "daily_digest")):
-        runtime.store.put(
-            "observations",
-            str(i),
-            {
-                "id": str(i),
-                "module": module,
-                "scope": scope,
-                "created_at": 1800000000 + i,
-                "text": f"LATEST_SOURCE_{i}",
-            },
+        runtime.memory.remember(
+            f"LATEST_SOURCE_{i}",
+            scope=scope,
+            source=module,
+            occurred_at=1800000000 + i,
         )
     before = runtime.store.export()
     request = await runtime.build_test_request("social.message", scope)
     assert runtime.store.export() == before
     assert runtime.host.context.send_message.await_count == 0
     sources = {row["block_id"]: row for row in request["sources"]}
-    for identifier, count in (("memory.knowledge", 2), ("observations", 3)):
-        assert sources[identifier]["count"] == sources[identifier]["limit"] == count
+    assert sources["memory"]["count"] == 2
+    assert sources["memory.recent"]["count"] == sources["memory.recent"]["limit"] == 3
     await runtime.update_settings(
-        {"context_usage": {"limits": {"memory.knowledge": 0, "observations": 0}}}
+        {"context_usage": {"limits": {"memory.self": 0, "memory.recent": 0}}}
     )
     trial = await runtime.prepare_trial_request(request)
     await call_background(real_world, prompt=trial["prompt"], system_prompt=trial["system_prompt"])
     raw = wire_server.records[0]["request_body"]
-    assert raw.count("INDEPENDENT_KNOWLEDGE_") == 2
+    assert raw.count("INDEPENDENT_PROFILE_") == 2
     assert raw.count("LATEST_SOURCE_") == 3
     assert "LATEST_SOURCE_0" not in raw
     assert (
@@ -657,11 +651,106 @@ async def test_independent_usage_and_selected_target_match_actual_http(
     assert "目标群号：" not in raw and "目标QQ号：" not in raw
     assert ("整个群" if scope == GROUP else "一对一私聊") in raw
     assert scope not in raw
-    for identifier in ("speaker", "memory.knowledge", "observations"):
+    for identifier in ("speaker", "memory", "memory.recent"):
         assert raw.count("【" + BLOCK_NAMES[identifier] + "】") == 1
     assert BLOCK_NAMES["speaker"] in trial["system_prompt"]
     assert BLOCK_NAMES["speaker"] not in trial["prompt"]
     assert "→" not in raw
+    assert runtime.host.context.send_message.await_count == 0
+
+
+@pytest.mark.parametrize("responses", [False, True])
+async def test_memory_query_and_extraction_use_captured_real_http(
+    real_providers, wire_server, responses
+):
+    runtime, _, provider = real_providers(responses=responses)
+
+    async def generate(*, chat_provider_id, **arguments):
+        assert chat_provider_id == provider.meta().id
+        return await provider.text_chat(**arguments)
+
+    runtime.host.context.llm_generate = generate
+    runtime.chat.install()
+    await runtime.update_settings(
+        {
+            "context_usage": {
+                "limits": {
+                    "memory.self": 0,
+                    "memory.people": 0,
+                    "memory.recent": 0,
+                    "memory.related": 1,
+                }
+            }
+        }
+    )
+    pet = runtime.memory.remember(
+        "养了一只猫，名字叫团子。", tags=["猫", "宠物", "名字"], scope=PRIVATE
+    )
+    runtime.memory.remember("PRIVATE_OTHER_PERSON", scope="qq:FriendMessage:999")
+    material = "今天查到猫咪需要保持饮水充足。"
+
+    async def handler(request, row):
+        value = (
+            {"keywords": ["宠物", "猫", "名字"]}
+            if len(wire_server.records) == 1
+            else {
+                "memories": [
+                    {
+                        "judgment": "知道猫咪需要保持饮水充足。",
+                        "evidence": material,
+                        "attribute": "事实属性",
+                        "tags": ["猫", "饮水"],
+                        "owner": "self",
+                        "stable": False,
+                    }
+                ],
+                "feedback": [],
+            }
+        )
+        text = json.dumps(value, ensure_ascii=False)
+        return wire_server.reply(row, response_api(text) if responses else completion(text))
+
+    wire_server.handler = handler
+    before = runtime.store.get("memories", pet["id"])
+    selected = await runtime.memory.select_context(
+        PRIVATE, query="家里的毛孩子叫什么？", task="chat.private", selection=["memory"]
+    )
+    assert [row["id"] for row in selected["memories"]] == [pet["id"]]
+    assert len(wire_server.records) == 1
+    assert "毛孩子" in wire_server.records[0]["request_body"]
+    assert "PRIVATE_OTHER_PERSON" not in wire_server.records[0]["request_body"]
+    assert runtime.store.get("memories", pet["id"]) == before
+
+    runtime.memory.enqueue_material(
+        material,
+        scope=PRIVATE,
+        source="chat",
+        key="http-extraction-source",
+        occurred_at="2026-09-10T17:00:00+08:00",
+    )
+    result = await runtime.memory.process_pending()
+    assert result["processed"] == 1 and result["failed"] == 0
+    assert len(wire_server.records) == 2, "Extraction does not recursively request query expansion"
+    extracted = next(
+        row for row in runtime.memory.recall("猫 饮水", scope=PRIVATE) if "饮水" in row["text"]
+    )
+    assert extracted["reasoning"] == material
+    assert extracted["occurred_at"].startswith("2026-09-10")
+    assert extracted["scope"] == PRIVATE and extracted["owner"] == "self"
+    assert not runtime.store.list("memory_jobs")
+    captured = [
+        call
+        for record in runtime.store.list("debug_records")
+        for call in record.get("http_calls", [])
+    ]
+    assert len(captured) == 2
+    assert {call["request_body"] for call in captured} == {
+        row["request_body"] for row in wire_server.records
+    }
+    assert {call["response_body"] for call in captured} == {
+        row["response_body"] for row in wire_server.records
+    }
+    assert "PRIVATE_OTHER_PERSON" not in json.dumps(captured, ensure_ascii=False)
     assert runtime.host.context.send_message.await_count == 0
 
 

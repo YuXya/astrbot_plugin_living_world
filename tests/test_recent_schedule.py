@@ -188,7 +188,7 @@ def test_service_schedule_retains_scoped_full_prose_but_no_internal_overrides():
     runtime.store.close()
 
 
-def test_unselected_experiences_and_memory_categories_do_not_suppress_selected_sources():
+def test_historical_unselected_experiences_and_memory_categories_do_not_suppress_selected_sources():
     origin = {"id": "event-a", "text": "同一事件", "source": "news", "kind": "event"}
     memory = {**origin, "id": "memory-a", "source_event_id": origin["id"]}
     other = {**memory, "id": "memory-b", "kind": "knowledge", "text": "实际勾选的知识"}
@@ -196,64 +196,83 @@ def test_unselected_experiences_and_memory_categories_do_not_suppress_selected_s
         experiences=[origin], memories=[memory, other], context_selection=["memory.knowledge"]
     )
     before = copy.deepcopy(data)
-    blocks = projected(data)
+    blocks = projected(data, version=3)
     assert "实际勾选的知识" in blocks["memory.knowledge"]["content"]
     assert blocks["memory.knowledge"]["memory_ids"] == ["memory-b"]
     data["context_selection"] = ["memory.event"]
-    assert "同一事件" in projected(data)["memory.event"]["content"]
+    assert "同一事件" in projected(data, version=3)["memory.event"]["content"]
     data["context_selection"] = ["experiences", "memory.event"]
-    assert "memory.event" not in projected(data)
+    assert "memory.event" not in projected(data, version=3)
     data["context_selection"] = before["context_selection"]
     assert data == before
     assert "memory-b" not in blocks["memory.knowledge"]["content"]
-    assert memory_blocks([other], NOW)[0]["memory_ids"] == ["memory-b"]
+    assert memory_blocks([other], NOW, version=3)[0]["memory_ids"] == ["memory-b"]
 
 
 @pytest.mark.parametrize("task", ["life.plan", "life.revise", "life.detail"])
-def test_life_memory_recall_filters_before_lineage_deduplication_and_does_not_reinforce(task):
+async def test_life_memory_selection_filters_unselected_recent_before_dedup_and_is_pure(task):
     runtime = Runtime()
     runtime.settings["context_layout"] = copy.deepcopy(DEFAULT_SETTINGS)
-    runtime.settings["context_layout"]["tasks"][task] = ["memory.knowledge"]
+    runtime.settings["context_layout"]["tasks"][task] = ["memory"]
+    runtime.settings["context_usage"] = copy.deepcopy(DEFAULT_USAGE)
+    runtime.settings["context_usage"]["limits"].update({"memory.related": 0, "memory.self": 1})
     runtime.memory = MemoryService(runtime)
-    service = fixed_service(runtime, NOW)
-    knowledge = runtime.memory.remember("采用的知识", kind="knowledge", source_event_id="same")
-    runtime.memory.remember("未选情感", kind="emotional", source_event_id="same")
+    fixed_service(runtime, NOW)
+    knowledge = runtime.memory.remember("采用的稳定事实", stable=True, source_event_id="same")
+    runtime.memory.remember("未选近期感想", source_event_id="same", occurred_at=NOW.isoformat())
     before = runtime.store.export()
-    result = service._memories("global", now=NOW, task=task)
-    assert [row["id"] for row in result] == [knowledge["id"]]
+    result = await runtime.memory.select_context(
+        "global", task=task, selection=["memory"], semantic=False
+    )
+    assert [row["id"] for row in result["memories"]] == [knowledge["id"]]
+    assert not result["recent_memories"]
     assert runtime.store.export() == before
     runtime.store.close()
 
 
-def test_detail_unselected_action_records_do_not_remove_selected_memories():
+async def test_detail_action_records_do_not_preselect_or_remove_memory():
     runtime = Runtime()
     runtime.settings["context_layout"] = copy.deepcopy(DEFAULT_SETTINGS)
-    runtime.settings["context_layout"]["tasks"]["life.detail"] = ["memory.event"]
+    runtime.settings["context_layout"]["tasks"]["life.detail"] = ["memory"]
     runtime.memory = MemoryService(runtime)
     service = fixed_service(runtime, NOW)
     runtime.store.put("events", "e", {"id": "e", "text": "已读取的内容", "source": "news"})
     memory = runtime.memory.remember("已读取的内容", source="news", source_event_id="e")
     target = activity("之后的活动", "11:00", "12:00")
     result = service.detail_request(target)["context"]
-    assert [row["id"] for row in result["相关记忆"]] == [memory["id"]]
-    assert result["context_selection"] == ["memory.event"]
+    assert "相关记忆" not in result
+    assert result["context_selection"] == ["memory"]
+    selected = await runtime.memory.select_context("global", selection=["memory"], semantic=False)
+    assert [row["id"] for row in selected["memories"]] == [memory["id"]]
     runtime.settings["context_layout"]["tasks"]["life.detail"].append("task.actions")
-    assert service.detail_request(target)["context"]["相关记忆"] == []
+    assert "相关记忆" not in service.detail_request(target)["context"]
+    assert (
+        await runtime.memory.select_context(
+            "global", selection=["memory", "task.actions"], semantic=False
+        )
+        == selected
+    )
     runtime.store.close()
 
 
-def test_detail_deduplicates_action_memory_before_applying_its_allowance():
+async def test_detail_recent_memory_deduplicates_before_related_allowance():
     runtime = Runtime()
     runtime.settings["context_layout"] = copy.deepcopy(DEFAULT_SETTINGS)
-    runtime.settings["context_layout"]["tasks"]["life.detail"] = ["memory.event", "task.actions"]
+    selection = ["memory", "memory.recent", "task.actions"]
+    runtime.settings["context_layout"]["tasks"]["life.detail"] = selection
     runtime.settings["context_usage"] = copy.deepcopy(DEFAULT_USAGE)
-    runtime.settings["context_usage"]["limits"]["memory.event"] = 1
+    runtime.settings["context_usage"]["limits"].update(
+        {"memory.related": 1, "memory.self": 0, "memory.recent": 1}
+    )
     runtime.memory = MemoryService(runtime)
     service = fixed_service(runtime, NOW)
-    replacement = runtime.memory.remember("另一条可用记忆")
-    runtime.store.put("events", "e", {"id": "e", "text": "已读取的内容", "source": "news"})
-    runtime.memory.remember("已读取的内容", source="news", source_event_id="e", important=True)
+    replacement = runtime.memory.remember("另一条可用记忆", occurred_at="")
+    recent = runtime.memory.remember("已读取的内容", source="news", occurred_at=NOW.isoformat())
     target = activity("之后的活动", "11:00", "12:00")
-    rows = service.detail_request(target)["context"]["相关记忆"]
-    assert [row["id"] for row in rows] == [replacement["id"]]
+    assert "相关记忆" not in service.detail_request(target)["context"]
+    result = await runtime.memory.select_context(
+        "global", task="life.detail", selection=selection, semantic=False
+    )
+    assert [row["id"] for row in result["memories"]] == [replacement["id"]]
+    assert [row["id"] for row in result["recent_memories"]] == [recent["id"]]
     runtime.store.close()

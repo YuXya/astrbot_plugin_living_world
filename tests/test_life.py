@@ -187,7 +187,8 @@ async def test_default_plan_is_outline_only_and_original_json_survives():
     assert all(row["schema_version"] == 3 and not row["detailed"] for row in rows)
     assert all(not action["enabled"] for row in rows for action in row["actions"].values())
     assert service.parameters() == {"daily_plan_time": "06:00", "activity_count": 10}
-    assert "昨天公开约好复习" in runtime.calls[0][1] and "私聊的秘密" not in runtime.calls[0][1]
+    assert "昨天公开约好复习" not in runtime.calls[0][1] and "私聊的秘密" not in runtime.calls[0][1]
+    assert "memories" not in service.plan_request(NOW)["context"]
     assert runtime.events == runtime.actions == []
     assert await service.plan_day(NOW) == rows
     assert await fixed_service(runtime).plan_day(NOW) == rows
@@ -465,7 +466,7 @@ async def test_private_revision_uses_fresh_memory_in_scoped_overlay_only():
     stored = runtime.store.get("activities", "future")
     assert stored["title"] == "数学课无聊，找群聊天"
     assert stored["scope_overrides"]["private-a"]["title"] == "和朋友复习数学"
-    assert "新的约定是复习数学" in runtime.calls[0][1]
+    assert "新的约定是复习数学" not in runtime.calls[0][1]
     assert "其他人的私人约定" not in runtime.calls[0][1]
     for scope in ("global", "private-b"):
         assert "和朋友复习数学" not in json.dumps(service._view(stored, scope), ensure_ascii=False)
@@ -585,7 +586,7 @@ async def test_previous_private_commitment_refines_existing_slots_once_per_day()
     await service.tick(NOW + timedelta(minutes=1))
     await fixed_service(runtime).tick(NOW + timedelta(minutes=2))
     assert len(runtime.calls) == 2
-    assert "昨天约好今天午后一起复习数学" in runtime.calls[-1][1]
+    assert "昨天约好今天午后一起复习数学" not in runtime.calls[-1][1]
     assert runtime.calls[-1][2] == "private-a"
     stored = runtime.store.get("activities", rows[1]["id"])
     assert stored["title"] == "生活活动 1"
@@ -622,7 +623,7 @@ def test_plan_preview_does_not_reinforce_memories_or_write_data():
     before = runtime.store.export()
     request = service.plan_request()
     assert request["context"]["parameters"]["activity_count"] == 10
-    assert memory_calls[0]["reinforce"] is False
+    assert memory_calls == []
     assert runtime.store.export() == before
     assert runtime.calls == runtime.events == runtime.actions == []
 

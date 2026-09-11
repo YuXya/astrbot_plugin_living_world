@@ -1,4 +1,4 @@
-"""Global layout, per-task material selection and frozen version-three requests."""
+"""Global layout, per-task material selection and frozen version-four requests."""
 
 import copy
 import json
@@ -30,6 +30,10 @@ from living_world.runtime import Runtime
 from living_world.store import Store
 
 pytest_plugins = ("test_chat",)
+
+
+def business_state(runtime):
+    return [row for row in runtime.store.export() if row["namespace"] != "debug_records"]
 
 
 def source_ids(request):
@@ -89,45 +93,45 @@ def test_invalid_task_choices_are_rejected(selection):
         validate_selection(selection)
 
 
-@pytest.mark.parametrize("task", ["journal.brief", "life.plan", "social.interject"])
+@pytest.mark.parametrize("task", ["memory.reflect", "life.plan", "social.interject"])
 async def test_arbitrary_task_material_stays_absent_without_explicit_input(world, task):
     runtime, manager, provider = world
     selected = [
-        "task.document",
+        "task.material",
         "task.evidence",
         "task.candidates",
         "task.activity",
         "task.instruction",
     ]
     await runtime.update_settings({"context_layout": {"tasks": {task: selected}}})
-    before = runtime.store.export()
+    before = business_state(runtime)
     request = await runtime.prepare_request(task, "life", "ORIGINAL_TASK", {}, PRIVATE)
     assert source_ids(request) == set()
     assert request["prompt"] == "ORIGINAL_TASK"
-    assert runtime.store.export() == before
+    assert business_state(runtime) == before
     assert not provider.calls and not manager.rows
     runtime.host.context.send_message.assert_not_called()
 
 
 async def test_background_task_can_read_selected_shared_context_without_running_sources(world):
     runtime, manager, provider = world
-    selected = ["time", "memory.knowledge", "observations", "task.thoughts", "private_reply"]
+    selected = ["time", "memory", "memory.recent", "task.thoughts", "private_reply"]
     await runtime.update_settings(
         {
-            "context_layout": {"tasks": {"journal.brief": selected}},
+            "context_layout": {"tasks": {"memory.reflect": selected}},
             "reply": {"private_prompt": "PRIVATE_REQUIREMENT"},
             "modules": {"news": True},
         }
     )
-    runtime.memory.remember("PUBLIC_KNOWLEDGE", kind="knowledge")
-    runtime.memory.remember("PRIVATE_KNOWLEDGE", kind="knowledge", scope=PRIVATE)
+    runtime.memory.remember("PUBLIC_KNOWLEDGE", stable=True, occurred_at="")
+    runtime.memory.remember("PRIVATE_KNOWLEDGE", stable=True, scope=PRIVATE, occurred_at="")
     runtime.memory.remember("OTHER_SCOPE_KNOWLEDGE", kind="knowledge", scope="qq:FriendMessage:99")
-    runtime.store.put(
-        "observations", "known", {"module": "news", "scope": "global", "text": "ALREADY_READ_NEWS"}
+    runtime.memory.remember(
+        "ALREADY_READ_NEWS", source="news", occurred_at=runtime.life._now().isoformat()
     )
     runtime.host.call_tool = AsyncMock(side_effect=AssertionError("Unexpected source execution"))
-    before = runtime.store.export()
-    request = await runtime.prepare_request("journal.brief", "journal", "BRIEF", {}, PRIVATE)
+    before = business_state(runtime)
+    request = await runtime.prepare_request("memory.reflect", "journal", "BRIEF", {}, PRIVATE)
     assert source_ids(request) == set(selected)
     text = request_text(request)
     for expected in (
@@ -138,11 +142,11 @@ async def test_background_task_can_read_selected_shared_context_without_running_
     ):
         assert expected in text
     assert "OTHER_SCOPE_KNOWLEDGE" not in text
-    assert runtime.store.export() == before
+    assert business_state(runtime) == before
     assert not provider.calls and not manager.rows
     runtime.host.call_tool.assert_not_called()
     await runtime.update_settings({"modules": {"news": False, "memory": False, "drives": False}})
-    disabled = await runtime.prepare_request("journal.brief", "journal", "BRIEF", {}, PRIVATE)
+    disabled = await runtime.prepare_request("memory.reflect", "journal", "BRIEF", {}, PRIVATE)
     assert source_ids(disabled) == {"time", "private_reply"}
 
 
@@ -234,8 +238,10 @@ async def test_v2_migration_keeps_global_baseline_and_archives_task_orders_idemp
     migrated = Runtime(path, runtime.host)
     try:
         converted = copy.deepcopy(migrated.settings["context_layout"])
-        assert converted["version"] == 3 and converted["order"] == converted["baseline_order"]
-        assert converted["order"]["system"] == old_order["system"]
+        assert converted["version"] == 4 and converted["order"] == converted["baseline_order"]
+        assert converted["order"]["system"] == [
+            key for key in old_order["system"] if key != "observations"
+        ]
         assert (
             converted["order"]["user"].index("schedule.recent")
             == converted["order"]["user"].index("schedule") + 1
@@ -269,43 +275,46 @@ async def test_v2_migration_keeps_global_baseline_and_archives_task_orders_idemp
         await migrated.stop()
 
 
-async def test_prepare_and_trial_never_reinforce_memories_but_real_call_reinforces_selected_only(
+async def test_preparing_trial_and_calling_do_not_strengthen_without_usefulness_feedback(
     world,
 ):
     runtime, manager, provider = world
     await runtime.update_settings(
-        {"context_layout": {"tasks": {"life.plan": ["memory.knowledge"]}}}
+        {
+            "context_layout": {"tasks": {"life.plan": ["memory"]}},
+            "context_usage": {"limits": {"memory.related": 0, "memory.self": 1}},
+        }
     )
     selected = runtime.memory.remember(
-        "CHOSEN_KNOWLEDGE", kind="knowledge", scope=PRIVATE, source_event_id="same"
+        "CHOSEN_KNOWLEDGE", stable=True, scope=PRIVATE, source_event_id="same"
     )
     excluded = runtime.memory.remember(
         "UNSELECTED_EMOTION", kind="emotional", scope=PRIVATE, source_event_id="same"
     )
-    before = runtime.store.export()
+    before = business_state(runtime)
     request = await runtime.prepare_request("life.plan", "life", "TASK", {}, PRIVATE)
-    assert source_ids(request) == {"memory.knowledge"}
+    assert source_ids(request) == {"memory"}
     assert "CHOSEN_KNOWLEDGE" in request_text(request) and "UNSELECTED_EMOTION" not in request_text(
         request
     )
-    assert runtime.store.export() == before
+    assert business_state(runtime) == before
 
     async def generate(chat_provider_id, **kwargs):
         return await provider.text_chat(**kwargs)
 
     runtime.host.context.llm_generate = generate
     trial = await runtime.prepare_trial_request(request)
-    assert runtime.store.export() == before
+    assert business_state(runtime) == before
     assert trial["context_selection"] == request["context_selection"]
     await runtime.test_request(request)
-    after_trial = runtime.store.export()
+    after_trial = business_state(runtime)
     assert [row for row in after_trial if row["namespace"] != "debug_records"] == [
         row for row in before if row["namespace"] != "debug_records"
     ]
     assert not manager.rows
     runtime.host.context.send_message.assert_not_called()
     await runtime._model_call(request)
-    assert runtime.store.get("memories", selected["id"])["access_count"] == 1
+    assert runtime.store.get("memories", selected["id"])["access_count"] == 0
     assert runtime.store.get("memories", excluded["id"])["access_count"] == 0
 
 
@@ -323,7 +332,7 @@ async def test_tool_followup_freezes_selection_layout_memory_and_reply_without_a
     await runtime.update_settings(
         {
             "reply": {reply_field: "FROZEN_REQUIREMENT"},
-            "context_layout": {"tasks": {task: ["memory.knowledge", reply_id]}},
+            "context_layout": {"tasks": {task: ["memory", reply_id]}},
         }
     )
     memory = runtime.memory.remember("数学 FROZEN_KNOWLEDGE", kind="knowledge", scope=scope)
@@ -376,7 +385,7 @@ async def test_tool_followup_freezes_selection_layout_memory_and_reply_without_a
     )
     assert "FROZEN_REQUIREMENT" not in saved and "FROZEN_KNOWLEDGE" not in saved
     assert "TOOL_RESULT" in saved
-    assert runtime.store.get("memories", memory["id"])["access_count"] == 1
+    assert runtime.store.get("memories", memory["id"])["access_count"] == 0
     await consume(await runner_for(world, Event(scope, "再查数学")))
     fresh = json.dumps(provider.calls[-1], ensure_ascii=False)
     assert "UPDATED_REQUIREMENT" in fresh
@@ -388,21 +397,24 @@ async def test_source_preparation_filters_recall_without_reinforcing_or_running_
     world, task
 ):
     runtime, _, provider = world
-    await runtime.update_settings({"context_layout": {"tasks": {task: ["memory.knowledge"]}}})
+    runtime.memory._complete = AsyncMock(return_value='{"keywords": []}')
+    await runtime.update_settings({"context_layout": {"tasks": {task: ["memory"]}}})
     selected = runtime.memory.remember(
-        "QUERY_SELECTED", kind="knowledge", scope=PRIVATE, source_event_id="shared-source"
+        "QUERY SELECTED", kind="knowledge", scope=PRIVATE, source_event_id="shared-source"
     )
     excluded = runtime.memory.remember(
         "QUERY_EXCLUDED",
         kind="emotional",
-        scope=PRIVATE,
+        scope="qq:FriendMessage:99",
         source_event_id="shared-source",
         important=True,
     )
-    before = runtime.store.export()
+    before = business_state(runtime)
     raw = await runtime.sources._context(PRIVATE, "QUERY", task)
     assert [row["id"] for row in json.loads(raw)["memories"]] == [selected["id"]]
-    assert runtime.store.export() == before and not provider.calls
+    assert business_state(runtime) == before and not provider.calls
+    runtime.memory._complete.assert_awaited_once()
+    assert runtime.memory._complete.await_args.args[0] == "memory.query"
     assert runtime.store.get("memories", excluded["id"])["access_count"] == 0
     await runtime.update_settings({"context_layout": {"tasks": {task: []}}})
     raw = await runtime.sources._context(PRIVATE, "QUERY", task)
@@ -410,25 +422,26 @@ async def test_source_preparation_filters_recall_without_reinforcing_or_running_
     assert runtime.store.get("memories", selected["id"])["access_count"] == 0
 
 
-async def test_explicit_plan_memories_deduplicate_newly_selected_shared_experiences(world):
+async def test_explicit_plan_memories_deduplicate_selected_recent_memory(world):
     runtime, _, _ = world
+    runtime.memory._complete = AsyncMock(return_value='{"keywords": []}')
     await runtime.update_settings(
-        {"context_layout": {"tasks": {"life.plan": ["memory.event", "experiences"]}}}
+        {"context_layout": {"tasks": {"life.plan": ["memory", "memory.recent"]}}}
     )
     now = runtime.life._now()
-    runtime.record_event(
+    saved_memory = runtime.memory.remember(
         "SAME_FICTION_EVENT", source="fiction", key="same-fiction", occurred_at=now.isoformat()
     )
     draft = runtime.life.plan_request(now)
-    before = runtime.store.export()
+    before = business_state(runtime)
     explicit = {
         "now": now.isoformat(),
-        "memories": [runtime.store.get("memories", "event:same-fiction")],
+        "memories": [saved_memory],
     }
     for material in (draft["context"], explicit):
         result = await runtime.prepare_request("life.plan", "life", draft["template"], material)
         assert request_text(result).count("SAME_FICTION_EVENT") == 1
-    assert runtime.store.export() == before
+    assert business_state(runtime) == before
 
 
 @pytest.mark.parametrize("task", ["life.revise", "memory.reflect"])
@@ -436,29 +449,29 @@ async def test_generated_trial_draft_filters_memory_before_cross_category_dedupl
     world, task
 ):
     runtime, _, provider = world
-    await runtime.update_settings({"context_layout": {"tasks": {task: ["memory.knowledge"]}}})
+    await runtime.update_settings({"context_layout": {"tasks": {task: ["memory"]}}})
     runtime.memory.remember(
-        "SELECTED_TRIAL_KNOWLEDGE", kind="knowledge", scope=PRIVATE, source_event_id="trial-shared"
+        "SELECTED_TRIAL_KNOWLEDGE", stable=True, scope=PRIVATE, source_event_id="trial-shared"
     )
     runtime.memory.remember(
         "UNSELECTED_TRIAL_EMOTION",
         kind="emotional",
-        scope=PRIVATE,
+        scope="qq:FriendMessage:99",
         source_event_id="trial-shared",
         important=True,
     )
-    before = runtime.store.export()
+    before = business_state(runtime)
     request = await runtime.build_test_request(task, PRIVATE)
     assert "SELECTED_TRIAL_KNOWLEDGE" in request_text(request)
     assert "UNSELECTED_TRIAL_EMOTION" not in request_text(request)
-    assert runtime.store.export() == before and not provider.calls
+    assert business_state(runtime) == before and not provider.calls
 
 
 @pytest.mark.parametrize("field", ["context", "available_context"])
 async def test_explicit_life_snapshot_empty_categories_are_not_reread_or_filled(world, field):
     runtime, _, _ = world
     await runtime.update_settings(
-        {"context_layout": {"tasks": {"news.select": ["time", "memory.knowledge"]}}}
+        {"context_layout": {"tasks": {"news.select": ["time", "memory"]}}}
     )
     runtime.memory.remember("UNRELATED_KNOWLEDGE", kind="knowledge", scope=PRIVATE)
     raw = await runtime.context_text(
@@ -467,10 +480,10 @@ async def test_explicit_life_snapshot_empty_categories_are_not_reread_or_filled(
     assert json.loads(raw)["memories"] == []
     runtime.memory.remember("MATH_QUERY_LATE_KNOWLEDGE", kind="knowledge", scope=PRIVATE)
     runtime.context_bundle = AsyncMock(side_effect=AssertionError("Snapshot must not be reread"))
-    before = runtime.store.export()
+    before = business_state(runtime)
     request = await runtime.prepare_request("news.select", "news", "TASK", {field: raw}, PRIVATE)
     assert "UNRELATED_KNOWLEDGE" not in request_text(request)
     assert "MATH_QUERY_LATE_KNOWLEDGE" not in request_text(request)
     assert source_ids(request) == {"time"}
     runtime.context_bundle.assert_not_called()
-    assert runtime.store.export() == before
+    assert business_state(runtime) == before

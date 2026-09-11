@@ -15,6 +15,7 @@ from living_world.layout import (
     DEFAULT_LAYOUT,
     DEFAULT_SETTINGS,
     TASK_NAMES,
+    V3_LAYOUT,
     assemble,
     block,
     catalog,
@@ -55,9 +56,9 @@ def test_catalog_covers_templates_and_stable_blocks():
 def test_invalid_layout_rejected(invalid):
     value = copy.deepcopy(DEFAULT_LAYOUT)
     if invalid == "duplicate":
-        value["user"].append("observations")
+        value["user"].append("memory.recent")
     elif invalid == "missing":
-        value["user"].remove("observations")
+        value["user"].remove("memory.recent")
     elif invalid == "unknown":
         value["user"].append("unknown")
     elif invalid == "role":
@@ -72,7 +73,7 @@ def test_invalid_layout_rejected(invalid):
 
 async def test_shared_layout_selection_persistence_restore_and_failed_save(world, tmp_path):
     runtime, _, _ = world
-    general = moved(DEFAULT_LAYOUT, "observations", "system", "anchor.system")
+    general = moved(DEFAULT_LAYOUT, "memory.recent", "system", "anchor.system")
     special = ["time", "speaker", "private_reply"]
     version = runtime.config_version
     await runtime.update_settings(
@@ -82,7 +83,7 @@ async def test_shared_layout_selection_persistence_restore_and_failed_save(world
     assert resolve_layout(runtime.settings, "social.message") == general
     assert set(resolve_selection(runtime.settings, "social.message")) == set(special)
     assert resolve_layout(runtime.settings, "chat.group") == general
-    changed = moved(general, "observations", "user")
+    changed = moved(general, "memory.recent", "user")
     await runtime.update_settings({"context_layout": {"order": changed}})
     assert resolve_layout(runtime.settings, "social.message") == changed
     assert set(resolve_selection(runtime.settings, "social.message")) == set(special)
@@ -107,49 +108,39 @@ async def test_shared_layout_selection_persistence_restore_and_failed_save(world
 
 @pytest.mark.parametrize("role", ["system", "user"])
 def test_anchor_order_and_source_order_match(role):
-    layout = moved(DEFAULT_LAYOUT, "observations", role, "anchor." + role)
+    layout = moved(DEFAULT_LAYOUT, "memory.recent", role, "anchor." + role)
     layout = moved(layout, "weather", role)
     result = assemble(
         layout,
-        [block("observations", "新闻", "FIRST"), block("weather", "天气", "LAST")],
+        [block("memory.recent", "近期记忆", "FIRST"), block("weather", "天气", "LAST")],
         "SYSTEM",
         "USER",
     )
     text = result["system_prompt" if role == "system" else "prompt"]
     assert text.index("FIRST") < text.index(role.upper()) < text.index("LAST")
     sources = [item["block_id"] for item in result["sources"] if item["role"] == role]
-    assert sources == ["observations", "anchor." + role, "weather"]
+    assert sources == ["memory.recent", "anchor." + role, "weather"]
 
 
 @pytest.mark.parametrize("scope", [GROUP, PRIVATE])
 async def test_chat_moves_blocks_across_anchors_without_saving_dynamic_system(world, scope):
     runtime, _, provider = world
-    layout = moved(DEFAULT_LAYOUT, "memory.event", "user", "anchor.user")
-    layout = moved(layout, "observations", "system", "anchor.system")
+    layout = moved(DEFAULT_LAYOUT, "memory", "user", "anchor.user")
+    layout = moved(layout, "memory.recent", "system", "anchor.system")
     layout = moved(layout, "group_reply", "system")
     await runtime.update_settings(
         {
             "context_layout": {"order": layout},
             "modules": {"news": True},
             "reply": {"group_prompt": "SYSTEM_GROUP_RULE"},
+            "context_usage": {"limits": {"memory.recent": 1}},
         }
     )
-    runtime.memory.remember("MEMORY_SENTINEL mathematics", scope=scope)
-    runtime.store.put(
-        "observations",
-        "visible",
-        {"id": "visible", "scope": scope, "module": "news", "text": "NEWS_SENTINEL"},
+    runtime.memory.remember("MEMORY_SENTINEL mathematics", scope=scope, stable=True)
+    runtime.memory.remember(
+        "NEWS_SENTINEL", scope=scope, source="news", occurred_at=runtime.life._now().isoformat()
     )
-    runtime.store.put(
-        "observations",
-        "private",
-        {
-            "id": "private",
-            "scope": "qq:FriendMessage:999",
-            "module": "news",
-            "text": "PRIVATE_SECRET",
-        },
-    )
+    runtime.memory.remember("PRIVATE_SECRET", scope="qq:FriendMessage:999", source="news")
     event = Event(scope, "ORIGINAL_USER mathematics")
     req = ProviderRequest(prompt=event.message_str, system_prompt="ORIGINAL_SYSTEM")
     runner = await runner_for(world, event, req)
@@ -174,9 +165,13 @@ async def test_chat_moves_blocks_across_anchors_without_saving_dynamic_system(wo
     )
     assert "ORIGINAL_SYSTEM" in saved and "ORIGINAL_USER" in saved and "LATE_PLUGIN_DATA" in saved
     assert req.system_prompt == "ORIGINAL_SYSTEM"
-    view = runtime.debug.views()[0]
+    view = next(
+        view
+        for view in runtime.debug.views()
+        if any(row.get("block_id") == "memory.recent" for row in view["sources"])
+    )
     assert (
-        next(row for row in view["sources"] if row.get("block_id") == "observations")["role"]
+        next(row for row in view["sources"] if row.get("block_id") == "memory.recent")["role"]
         == "system"
     )
 
@@ -188,7 +183,12 @@ async def test_concurrent_turns_keep_layout_and_material_snapshot(world):
     first = await runner_for(world, Event(PRIVATE, "first"))
     layout = moved(DEFAULT_LAYOUT, "profile", "user", "anchor.user")
     await runtime.update_settings(
-        {"context_layout": {"order": layout}, "context_usage": {"limits": {"memory.event": 0}}}
+        {
+            "context_layout": {
+                "order": layout,
+                "tasks": {"chat.private": ["profile", "world", "private_reply"]},
+            }
+        }
     )
     second = await runner_for(world, Event(PRIVATE, "second"))
     await asyncio.gather(consume(first), consume(second))
@@ -211,21 +211,23 @@ async def test_concurrent_turns_keep_layout_and_material_snapshot(world):
 @pytest.mark.parametrize("task", list(PROMPTS))
 async def test_all_background_tasks_share_layout_and_frozen_trial_composition(world, task):
     runtime, _, _ = world
-    layout = moved(DEFAULT_LAYOUT, "memory.event", "system", "anchor.system")
-    layout = moved(layout, "task.document", "system")
+    layout = moved(DEFAULT_LAYOUT, "memory", "system", "anchor.system")
+    layout = moved(layout, "task.evidence", "system")
     layout = moved(layout, "task.material", "user", "anchor.user")
     await runtime.update_settings(
         {
             "context_layout": {
                 "order": layout,
-                "tasks": {task: ["memory.event", "task.material", "task.document"]},
+                "tasks": {task: ["memory", "task.material", "task.evidence"]},
             }
         }
     )
     data = {
-        "memories": [{"kind": "event", "text": "MEMORY_INPUT"}],
+        "memories": [
+            {"schema_version": 2, "version": 1, "id": "memory-input", "text": "MEMORY_INPUT"}
+        ],
         "material": "TASK_INPUT",
-        "document": "FULL_DOCUMENT",
+        "external_data": "FULL_DOCUMENT",
     }
     request = await runtime.prepare_request(task, task.split(".")[0], "TASK_TEMPLATE", data)
     assert request["system_prompt"].index("MEMORY_INPUT") < request["system_prompt"].index(
@@ -257,13 +259,13 @@ def test_source_modules_group_separately_without_splitting_evidence():
         ],
     }
     blocks = collect_task_blocks(
-        {"context": json.dumps(snapshot), "external_data": {"raw": ["EVIDENCE"]}}
+        {"context": json.dumps(snapshot), "external_data": {"raw": ["EVIDENCE"]}}, version=3
     )
     for identifier in ("observations", "weather"):
         assert len([row for row in blocks if row["block_id"] == identifier]) == 1
     evidence = next(row for row in blocks if row["block_id"] == "task.evidence")
     assert json.loads(evidence["content"]) == {"external_data": {"raw": ["EVIDENCE"]}}
-    rendered = assemble(DEFAULT_LAYOUT, blocks)
+    rendered = assemble(V3_LAYOUT, blocks, version=3)
     assert rendered["prompt"].count("EVIDENCE") == 1
     for field in ("document", "external_data", "material"):
         original = json.dumps(snapshot)
@@ -323,8 +325,8 @@ async def test_late_host_changes_do_not_duplicate_or_archive_temporary_system(wo
 
 async def test_disabled_modules_and_empty_blocks_remain_absent_after_role_moves(world):
     runtime, _, provider = world
-    layout = moved(DEFAULT_LAYOUT, "observations", "system")
-    layout = moved(layout, "memory.event", "system")
+    layout = moved(DEFAULT_LAYOUT, "memory.recent", "system")
+    layout = moved(layout, "memory", "system")
     await runtime.update_settings(
         {
             "context_layout": {"order": layout},
@@ -345,10 +347,10 @@ async def test_disabled_modules_and_empty_blocks_remain_absent_after_role_moves(
 
 async def test_composed_trial_calls_only_model_with_frozen_layout(world):
     runtime, manager, provider = world
-    layout = moved(DEFAULT_LAYOUT, "task.document", "system", "anchor.system")
+    layout = moved(DEFAULT_LAYOUT, "task.material", "system", "anchor.system")
     await runtime.update_settings({"context_layout": {"order": layout}})
     draft = await runtime.prepare_request(
-        "journal.brief", "journal", "MAKE_BRIEF", {"document": "DOCUMENT_SENTINEL"}, PRIVATE
+        "memory.reflect", "memory", "EXTRACT_MEMORY", {"document": "DOCUMENT_SENTINEL"}, PRIVATE
     )
     await runtime.update_settings({"context_layout": {"order": DEFAULT_LAYOUT}})
 

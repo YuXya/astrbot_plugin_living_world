@@ -13,7 +13,7 @@ module.exports = async (page, go, contract) => {
   const overflow = async (label) => assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true, label);
   await page.evaluate(() => {
     window.fixture.debug.templates.push(...window.fixture.context_layout_catalog.tasks.filter((row) => !row.id.startsWith("chat.")).map((row) => ({ task: row.id, label: row.label, template: "模板：" + row.id, default_template: "默认：" + row.id })));
-    window.fixture.settings.memory = { context_limit: 10, journal_limit: 2, brief_max_chars: 200 };
+    window.fixture.settings.memory ||= {};
     const layout = window.fixture.settings.context_layout;
     layout.baseline_order.user = ["time", ...layout.baseline_order.user.filter(id => id !== "time")];
     layout.order = structuredClone(layout.baseline_order);
@@ -22,7 +22,7 @@ module.exports = async (page, go, contract) => {
     overview: ["current", "recent"], context: ["layout", "usage", "templates", "trial", "calls"],
     character: ["profile", "state", "drives", "events"], schedule: ["timeline", "settings", "archives"],
     chat: ["targets", "reply", "limits", "deliveries"], sources: ["settings", "records", "manual", "runs"],
-    memory: ["records", "journals"], system: ["models", "modules", "backup", "maintenance"],
+    memory: ["records", "settings", "journals"], system: ["models", "modules", "backup", "maintenance"],
   };
   assert.equal(await page.locator("#navigation a").count(), 8);
   assert.equal(await page.evaluate(() => window.calls.some((c) => c.method === "POST")), false);
@@ -41,7 +41,7 @@ module.exports = async (page, go, contract) => {
   assert.equal(await unsaved(), false, "Releasing without a drag does not dirty the page");
   for (const cancel of [true, false]) {
     sourceBox = await handle.boundingBox();
-    const target = await page.locator('[data-block-id="experiences"]').boundingBox();
+    const target = await page.locator('[data-block-id="memory.recent"]').boundingBox();
     await page.mouse.move(sourceBox.x + 5, sourceBox.y + 10); await page.mouse.down();
     await page.mouse.move(target.x + 70, target.y + 2, { steps: 6 });
     if (cancel) await page.keyboard.press("Escape");
@@ -137,19 +137,19 @@ module.exports = async (page, go, contract) => {
   await field("source.manual").selectOption("bilibili"); await field("bilibili.operation").selectOption("bilibili_watch"); await field("query").fill("BV123456");
   await field("source.manual").selectOption("search"); assert.equal(await field("query").inputValue(), "原样保留的搜索草稿");
   await click("搜索并保存见闻"); assert.equal(await page.evaluate(() => window.calls.findLast((c) => c.body?.action === "explore").body.query), "原样保留的搜索草稿");
-  await go("context", "templates", { task: "journal.brief" }); await field("template").fill("未保存的简报模板");
-  assert.match(await field("template.task").locator('option:checked').textContent(), /journal.brief（日记简报）/);
+  await go("context", "templates", { task: "memory.reflect" }); await field("template").fill("未保存的记忆模板");
+  assert.match(await field("template.task").locator('option:checked').textContent(), /memory.reflect（提炼与整理记忆）/);
   await field("template.task").selectOption("life.detail"); await field("template").fill("细化模板草稿");
   await field("template.version").selectOption("0"); assert.match(await page.locator(".template-preview").textContent(), /旧版指令/);
   assert.equal(await page.locator("#section-panel textarea").count(), 0);
   await field("template.version").selectOption("current"); assert.equal(await field("template").inputValue(), "细化模板草稿");
   await click("保存此任务模板"); await page.getByText("操作已完成，请查看执行结果", { exact: true }).waitFor();
-  await go("context", "trial"); await field("task").selectOption("journal.brief"); await field("request_json").fill('{"prompt":"PRIVATE_DRAFT"}');
+  await go("context", "trial"); await field("task").selectOption("memory.reflect"); await field("request_json").fill('{"prompt":"PRIVATE_DRAFT"}');
   await field("task").selectOption("life.detail"); await field("request_json").fill('{"prompt":"DETAIL_DRAFT"}');
   await go("context", "calls"); await field("debug.retain_per_category").fill("23");
-  await go("context", "templates", { task: "journal.brief" }); assert.equal(await field("template").inputValue(), "未保存的简报模板");
-  await refresh(); assert.equal(await field("template").inputValue(), "未保存的简报模板");
-  await go("context", "trial"); await field("task").selectOption("journal.brief"); assert.equal(await field("request_json").inputValue(), '{"prompt":"PRIVATE_DRAFT"}');
+  await go("context", "templates", { task: "memory.reflect" }); assert.equal(await field("template").inputValue(), "未保存的记忆模板");
+  await refresh(); assert.equal(await field("template").inputValue(), "未保存的记忆模板");
+  await go("context", "trial"); await field("task").selectOption("memory.reflect"); assert.equal(await field("request_json").inputValue(), '{"prompt":"PRIVATE_DRAFT"}');
   await go("context", "calls"); assert.equal(await field("debug.retain_per_category").inputValue(), "23"); await save("保存记录数量");
   await go("context", "layout"); await field("layout_task").selectOption("chat.group");
   const row = (id) => page.locator(`.layout-row[data-block-id="${id}"]`);
@@ -174,22 +174,22 @@ module.exports = async (page, go, contract) => {
   const baseUser = await ids("user");
   await drag("time", "time"); assert.deepEqual(await ids("user"), baseUser);
   await drag("time", "invalid"); assert.deepEqual(await ids("user"), baseUser);
-  await drag("time", "experiences", "after", true); assert.deepEqual(await ids("user"), baseUser);
-  assert.ok(await drag("experiences", "memory.event") > 0, "Other rows animate into place");
-  assert.equal((await ids("user")).indexOf("experiences") + 1, (await ids("user")).indexOf("memory.event"));
-  await drag("observations", "anchor.system"); assert.equal((await ids("system"))[0], "observations");
-  await drag("observations", "end:user"); assert.equal((await ids("user")).at(-1), "observations");
-  await row("observations").locator("select").selectOption("system");
+  await drag("time", "memory.recent", "after", true); assert.deepEqual(await ids("user"), baseUser);
+  assert.ok(await drag("memory.recent", "memory") > 0, "Other rows animate into place");
+  assert.equal((await ids("user")).indexOf("memory.recent") + 1, (await ids("user")).indexOf("memory"));
+  await drag("weather", "anchor.system"); assert.equal((await ids("system"))[0], "weather");
+  await drag("weather", "end:user"); assert.equal((await ids("user")).at(-1), "weather");
+  await row("weather").locator("select").selectOption("system");
   await row("group_reply").locator("select").selectOption("system");
   await row("group_reply").getByRole("button", { name: "上移回复与插话：本轮群聊回复要求", exact: true }).focus(); await page.keyboard.press("Enter");
-  assert.ok((await ids("system")).indexOf("group_reply") < (await ids("system")).indexOf("observations"));
+  assert.ok((await ids("system")).indexOf("group_reply") < (await ids("system")).indexOf("weather"));
   const enabled = id => row(id).locator(".layout-enabled");
   const selectedIds = () => page.locator(".layout-row").evaluateAll(nodes => nodes.filter(node => node.querySelector(".layout-enabled:checked")).map(node => node.dataset.blockId).sort());
-  assert.equal(await enabled("task.document").isChecked(), false);
-  await row("task.document").locator("select").selectOption("system");
-  assert.ok((await ids("system")).includes("task.document"), "Unchecked rows remain movable");
-  await row("task.document").locator("select").selectOption("user");
-  assert.equal(await enabled("task.document").isChecked(), false, "Moving a row does not select it");
+  assert.equal(await enabled("task.material").isChecked(), false);
+  await row("task.material").locator("select").selectOption("system");
+  assert.ok((await ids("system")).includes("task.material"), "Unchecked rows remain movable");
+  await row("task.material").locator("select").selectOption("user");
+  assert.equal(await enabled("task.material").isChecked(), false, "Moving a row does not select it");
   const globalOrder = { system: await ids("system"), user: await ids("user") };
   for (const task of contract.context_layout_catalog.tasks) {
     await field("layout_task").selectOption(task.id);
@@ -210,22 +210,22 @@ module.exports = async (page, go, contract) => {
   await field("layout_task").selectOption("chat.private");
   assert.equal(await enabled("private_reply").isChecked(), true);
   assert.equal(await enabled("task.thoughts").isChecked(), false);
-  await row("observations").locator("select").selectOption("user");
-  await field("layout_task").selectOption("chat.group"); assert.ok((await ids("user")).includes("observations"));
+  await row("weather").locator("select").selectOption("user");
+  await field("layout_task").selectOption("chat.group"); assert.ok((await ids("user")).includes("weather"));
   assert.deepEqual(await selectedIds(), groupSelection, "Task selections persist independently through task switches");
   await page.evaluate(() => { window.failNext = true; }); await click("保存上下文设置");
   await page.getByText("测试来源暂时不可用", { exact: true }).waitFor(); await refresh();
-  assert.deepEqual(await selectedIds(), groupSelection); assert.ok((await ids("user")).includes("observations"));
+  assert.deepEqual(await selectedIds(), groupSelection); assert.ok((await ids("user")).includes("weather"));
   await save("保存上下文设置"); const saved = (await posted()).context_layout;
-  assert.equal(saved.version, 3); assert.equal(Object.hasOwn(saved, "default"), false);
-  assert.ok(saved.order.user.includes("observations")); assert.deepEqual([...saved.tasks["chat.group"]].sort(), groupSelection);
+  assert.equal(saved.version, 4); assert.equal(Object.hasOwn(saved, "default"), false);
+  assert.ok(saved.order.user.includes("weather")); assert.deepEqual([...saved.tasks["chat.group"]].sort(), groupSelection);
   assert.ok(saved.tasks["chat.private"].includes("private_reply")); assert.ok(!saved.tasks["chat.private"].includes("task.thoughts"));
   assert.ok(Object.values(saved.tasks).every(selection => Array.isArray(selection) && selection.every(id => !id.startsWith("anchor."))));
   await refresh(); assert.deepEqual(await selectedIds(), groupSelection);
   await click("恢复本任务默认勾选");
   assert.deepEqual(await selectedIds(), [...contract.context_layout_catalog.default_selections["chat.group"]].sort());
   assert.deepEqual((await posted()).context_layout, saved, "Restoring task defaults only forms a draft");
-  assert.ok((await ids("user")).includes("observations"));
+  assert.ok((await ids("user")).includes("weather"));
   await save("保存上下文设置");
   await click("恢复默认排序"); assert.deepEqual(await ids("user"), saved.baseline_order.user);
   assert.deepEqual((await posted()).context_layout.order, saved.order, "Restoring order only forms a draft");
@@ -234,8 +234,8 @@ module.exports = async (page, go, contract) => {
   process.stdout.write("Mouse dragging…\n");
   // Real browser dragging catches native event and DOM-move interactions.
   await row("time").evaluate(node => window.scrollTo(0, window.scrollY + node.getBoundingClientRect().top - 140));
-  await row("experiences").locator(".layout-handle").dragTo(row("time"), { targetPosition: { x: 80, y: 2 } });
-  assert.ok((await ids("user")).indexOf("experiences") < (await ids("user")).indexOf("time"));
+  await row("memory.recent").locator(".layout-handle").dragTo(row("time"), { targetPosition: { x: 80, y: 2 } });
+  assert.ok((await ids("user")).indexOf("memory.recent") < (await ids("user")).indexOf("time"));
   await row("time").locator(".layout-handle").dragTo(row("time"), { targetPosition: { x: 80, y: 16 } });
   const nativeOrder = await ids("user"); assert.notEqual(nativeOrder.at(-1), "time");
   await save("保存上下文设置");
@@ -256,7 +256,7 @@ module.exports = async (page, go, contract) => {
         await page.locator(".index-target").waitFor();
         assert.equal(await field(target.params.field).evaluate((n) => document.activeElement === n), true);
       }
-      if (target.params.category) assert.equal(await field("memory.kind").inputValue(), target.params.category);
+      if (target.params.attribute) assert.equal(await field("memory.attribute").inputValue(), target.params.attribute);
       if (target.params.kind) assert.equal(await field("journals.kind").inputValue(), target.params.kind);
       if (target.params.source) assert.equal(await field("source." + target.tab).inputValue(), target.params.source);
       await click("返回上下文列表"); await row(block.id).waitFor();
@@ -274,12 +274,12 @@ module.exports = async (page, go, contract) => {
   assert.ok(Math.abs(await page.evaluate(() => scrollY) - originalScroll) < 3, "Index return restores scroll");
   await row("group_reply").getByRole("button", { name: /来源$/ }).click(); await click(contract.context_layout_catalog.blocks.find(b => b.id === "group_reply").targets[0].path);
   assert.equal(await field("reply.group_prompt").inputValue(), "索引跳转后草稿"); await click("返回上下文列表");
-  await row("memory.journal").getByRole("button", { name: /来源$/ }).click();
-  await shot("source-desktop"); await field("source_template").selectOption("journal.brief"); await click("打开所选模板");
-  assert.equal(await field("template.task").inputValue(), "journal.brief");
-  assert.equal(await field("template").inputValue(), "未保存的简报模板");
-  await click("返回上下文列表"); await row("memory.journal").waitFor();
-  await page.emulateMedia({ reducedMotion: "reduce" }); assert.equal(await drag("experiences", "memory.journal"), 0); await page.emulateMedia({ reducedMotion: "no-preference" });
+  await row("memory").getByRole("button", { name: /来源$/ }).click();
+  await shot("source-desktop"); await field("source_template").selectOption("memory.reflect"); await click("打开所选模板");
+  assert.equal(await field("template.task").inputValue(), "memory.reflect");
+  assert.equal(await field("template").inputValue(), "未保存的记忆模板");
+  await click("返回上下文列表"); await row("memory").waitFor();
+  await page.emulateMedia({ reducedMotion: "reduce" }); assert.equal(await drag("memory.recent", "memory"), 0); await page.emulateMedia({ reducedMotion: "no-preference" });
   await go("system", "backup");
   await page.getByLabel("选择 Living World 备份文件").setInputFiles({ name: "fixture.json", mimeType: "application/json", buffer: Buffer.from('{"version":1,"settings":{}}') });
   await page.getByText("已读取 fixture.json", { exact: false }).waitFor(); await go("system", "models"); await go("system", "backup");

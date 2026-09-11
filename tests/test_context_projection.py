@@ -78,7 +78,7 @@ def material():
 def test_readable_projection_keeps_evidence_and_excludes_storage_fields():
     data = material()
     before = copy.deepcopy(data)
-    bundle = context_from_data(data)
+    bundle = context_from_data(data, version=3)
     text = bundle["text"]
     assert data == before
     for expected in (
@@ -167,7 +167,7 @@ async def test_chat_uses_chinese_context_and_exact_source_snapshot(world):
     assert "喜欢数学的莉莉" in json.dumps(provider.calls[0], ensure_ascii=False)
     assert "喜欢数学的莉莉" not in part.text
     assert part.text in json.dumps(provider.calls[0], ensure_ascii=False).replace("\\n", "\n")
-    assert runtime.store.get("memories", memory["id"])["access_count"] == 1
+    assert runtime.store.get("memories", memory["id"])["access_count"] == 0
 
 
 async def test_scoped_state_and_schedule_share_projection_without_private_leaks(world):
@@ -230,6 +230,12 @@ async def test_actual_chat_material_cleans_links_without_editing_user_history_or
     raw = f"搜索所得：中文新闻摘要\n阅读依据：search_results\n来源：{source_url}"
     original = runtime.record_event(raw, source="search", scope=PRIVATE, key="source-event")
     runtime.record_event("今天的散步经历", source="fiction", key="today-event")
+    remembered = runtime.memory.remember(
+        "今天的散步经历",
+        source="fiction",
+        occurred_at=now.isoformat(),
+        source_event_id="today-event",
+    )
     observation = {
         "id": "source-observation",
         "scope": PRIVATE,
@@ -257,7 +263,8 @@ async def test_actual_chat_material_cleans_links_without_editing_user_history_or
         p.text for p in req.extra_user_content_parts if p.text.startswith(DYNAMIC_MARKER)
     )
     assert source_url not in injected and "阅读依据：" not in injected
-    assert injected.count("角色经历（19：00）：今天的散步经历") == 1
+    assert injected.count("今天的散步经历") == 1 and "2026-09-09 19：00" in injected
+    assert runtime.store.get("memories", remembered["id"])["access_count"] == 0
     assert user_url in req.prompt and req.contexts == history
     record = next(
         row for row in runtime.store.list("debug_records") if row.get("task") == "chat.context"

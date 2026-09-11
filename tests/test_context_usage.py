@@ -14,7 +14,7 @@ from living_world.context_catalog import (
     PAGES,
     memory_category,
 )
-from living_world.context_usage import DEFAULT_USAGE, legacy_usage
+from living_world.context_usage import DEFAULT_USAGE, historical_usage, legacy_usage
 from living_world.layout import LEGACY_LAYOUT, assemble, collect_task_blocks, validate_settings
 from living_world.runtime import Runtime
 from test_runtime import FakeHost, GROUP, PRIVATE
@@ -35,14 +35,16 @@ def test_names_are_real_menu_names_and_categories_are_disjoint():
 
 
 @pytest.mark.parametrize("total", [0, 1, 3, 10, 17, 50])
-def test_legacy_allowances_are_apportioned_once(total):
+def test_legacy_allowances_remain_interpretable_but_live_usage_uses_new_defaults(total):
     old = {"memory": {"context_limit": total, "journal_limit": 7, "brief_max_chars": 180}}
     migrated = settings_from(old)
-    limits = migrated["context_usage"]["limits"]
+    archived_usage = historical_usage(old)
+    limits = archived_usage["limits"]
     assert sum(limits[key] for key in list(MEMORY_DEFAULTS)[:5]) == total
     assert limits["memory.journal"] + limits["memory.notes"] == min(total, 7)
     assert limits["memory.journal"] >= limits["memory.notes"]
-    assert set(migrated["context_usage"]["brief_max_chars"].values()) == {180}
+    assert set(archived_usage["brief_max_chars"].values()) == {180}
+    assert migrated["context_usage"] == DEFAULT_USAGE
     assert not {"context_limit", "journal_limit", "brief_max_chars"} & migrated["memory"].keys()
     assert settings_from(migrated) == migrated
     assert legacy_usage({}) == DEFAULT_USAGE
@@ -59,9 +61,9 @@ def test_old_roles_and_positions_expand_without_resetting_other_blocks():
     old["user"].remove("news")
     old["system"].append("news")
     value = validate_settings({"version": 1, "default": old, "tasks": {"social.message": old}})
-    assert value["version"] == 3
-    assert value["order"]["system"][:7] == list(MEMORY_DEFAULTS)
-    assert value["order"]["system"][-1] == "observations"
+    assert value["version"] == 4
+    assert value["order"]["system"][0] == "memory"
+    assert "observations" not in value["order"]["system"]
     assert value["baseline_order"] == value["order"]
     assert "schedule.recent" in value["tasks"]["social.message"]
     assert not {"news", "search", "bilibili", "daily_digest", "memories"} & set(
@@ -72,7 +74,7 @@ def test_old_roles_and_positions_expand_without_resetting_other_blocks():
 @pytest.mark.parametrize("value", [-1, 51, 1.2, True, float("nan"), "4"])
 def test_invalid_independent_allowance_is_rejected(value):
     with pytest.raises(ValueError):
-        settings_from({"context_usage": {"limits": {"memory.knowledge": value}}})
+        settings_from({"context_usage": {"limits": {"memory.related": value}}})
 
 
 def test_invalid_catalog_identifiers_and_weather_allowance_are_rejected():
@@ -86,53 +88,40 @@ def test_invalid_catalog_identifiers_and_weather_allowance_are_rejected():
             settings_from({"context_usage": patch})
 
 
-async def test_every_category_has_its_own_budget_without_hidden_total(runtime):
-    await runtime.update_settings(
-        {
-            "modules": {"journal": True, "notes": True},
-            "context_usage": {"limits": dict.fromkeys(MEMORY_DEFAULTS, 50)},
-        }
+async def test_every_unified_allowance_has_its_own_budget_without_hidden_total(runtime):
+    limits = {
+        key: 50 for key in ("memory.self", "memory.people", "memory.related", "memory.recent")
+    }
+    await runtime.update_settings({"context_usage": {"limits": limits, "people_limit": 3}})
+    now = runtime.life._now()
+    for i in range(52):
+        runtime.memory.remember(f"数学自身画像 {i}", scope=PRIVATE, stable=True, occurred_at="")
+        runtime.memory.remember(f"数学相关结论 {i}", scope=PRIVATE, occurred_at="")
+        runtime.memory.remember(
+            f"数学近期经历 {i}", scope=PRIVATE, occurred_at=(now - timedelta(minutes=i)).isoformat()
+        )
+        for person in ("qq:42", "qq:43", "qq:44", "qq:45"):
+            runtime.memory.remember(
+                f"数学人物画像 {person} {i}", scope=PRIVATE, person_id=person, stable=True
+            )
+    selected = await runtime.memory.select_context(
+        PRIVATE, "数学", person_id="qq:42", people=["qq:43", "qq:44", "qq:45"], semantic=False
     )
-    now = runtime.life._now().isoformat()
-    for category in MEMORY_DEFAULTS:
-        for i in range(52):
-            key = f"{category}-{i}"
-            subtype = category.split(".")[1]
-            row = {
-                "id": key,
-                "text": key,
-                "kind": subtype
-                if subtype in {"knowledge", "event", "skill", "emotional"}
-                else "knowledge",
-                "scope": PRIVATE,
-                "active": True,
-                "source": subtype + ":brief" if subtype in {"journal", "notes"} else "chat",
-                "updated_at": now,
-                "created_at": now,
-                "profile": subtype == "profile",
-                "person_id": "qq:42" if subtype == "profile" else "",
-                "access_count": 0,
-            }
-            runtime.store.put("memories", key, row)
-    selected = runtime.memory.recall(scope=PRIVATE, person_id="qq:42")
-    assert len(selected) == 350
-    assert all(
-        sum(memory_category(row) == category for row in selected) == 50
-        for category in MEMORY_DEFAULTS
-    )
-    assert sum(row["access_count"] for row in runtime.store.list("memories")) == 350
-    await runtime.update_settings(
-        {"context_usage": {"limits": {"memory.skill": 0, "memory.notes": 0, "memory.event": 1}}}
-    )
-    selected = runtime.memory.recall(scope=PRIVATE, person_id="qq:42", reinforce=False)
-    assert len(selected) == 201
-    assert not any(memory_category(row) in {"memory.skill", "memory.notes"} for row in selected)
-    await runtime.update_settings({"context_usage": {"limits": dict.fromkeys(MEMORY_DEFAULTS, 0)}})
-    assert runtime.memory.recall() == []
+    assert len(selected["recent_memories"]) == 50
+    assert len(selected["memories"]) == 250
+    all_rows = selected["recent_memories"] + selected["memories"]
+    assert len({row["id"] for row in all_rows}) == 300
+    assert not any(row.get("person_id") == "qq:45" for row in all_rows)
+    assert sum(row["access_count"] for row in runtime.store.list("memories")) == 0
+    await runtime.update_settings({"context_usage": {"limits": dict.fromkeys(limits, 0)}})
+    assert await runtime.memory.select_context(PRIVATE, "数学", semantic=False) == {
+        "memories": [],
+        "recent_memories": [],
+    }
     assert len(runtime.store.list("memories")) == 364
 
 
-async def test_combined_observations_weather_experiences_and_reinforcement(runtime):
+async def test_source_archives_are_not_direct_context_and_weather_is_independent(runtime):
     await runtime.update_settings(
         {
             "modules": {
@@ -142,7 +131,7 @@ async def test_combined_observations_weather_experiences_and_reinforcement(runti
                 "daily_digest": True,
                 "weather": True,
             },
-            "context_usage": {"limits": {"observations": 3, "weather": 1, "experiences": 1}},
+            "context_usage": {"limits": {"memory.recent": 1, "weather": 1}},
         }
     )
     for i, module in enumerate(
@@ -170,29 +159,40 @@ async def test_combined_observations_weather_experiences_and_reinforcement(runti
             "created_at": 100,
         },
     )
-    runtime.record_event("唯一生活经历", source="fiction", key="one")
+    memory = runtime.memory.remember(
+        "唯一生活经历", source="fiction", occurred_at=runtime.life._now().isoformat()
+    )
     request = await runtime.prepare_request(
         "social.message", "social", "写消息", {"context": await runtime.context_text()}
     )
     sources = {row["block_id"]: row for row in request["sources"]}
-    assert sources["observations"]["count"] == sources["observations"]["limit"] == 3
+    assert sources["memory.recent"]["count"] == sources["memory.recent"]["limit"] == 1
     assert sources["weather"]["count"] == 1
-    assert (
-        request["prompt"].index("SOURCE_3")
-        < request["prompt"].index("SOURCE_2")
-        < request["prompt"].index("SOURCE_1")
+    assert "observations" not in sources and "experiences" not in sources
+    assert all(
+        text not in request["prompt"]
+        for text in ("SOURCE_0", "SOURCE_1", "SOURCE_2", "SOURCE_3", "SOURCE_4", "PRIVATE_SECRET")
     )
-    assert all(text not in request["prompt"] for text in ("SOURCE_0", "SOURCE_4", "PRIVATE_SECRET"))
+    assert "SOURCE_5" in request["prompt"]
     assert request["prompt"].count("唯一生活经历") == 1
-    assert runtime.store.get("memories", "event:one")["access_count"] == 0
-    assert sources["experiences"]["limit"] == 1
+    assert runtime.store.get("memories", memory["id"])["access_count"] == 0
     await runtime.update_settings(
-        {"context_usage": {"limits": {"observations": 0, "experiences": 0, "weather": 0}}}
+        {
+            "context_usage": {
+                "limits": {
+                    "memory.recent": 0,
+                    "memory.self": 0,
+                    "memory.people": 0,
+                    "memory.related": 0,
+                    "weather": 0,
+                }
+            }
+        }
     )
     trial = await runtime.prepare_trial_request(request)
     assert trial["prompt"] == request["prompt"]
     raw = json.loads(await runtime.context_text(reinforce=False))
-    assert not raw["observations"] and not raw["experiences"]
+    assert not raw["observations"] and not raw["recent_memories"] and not raw["memories"]
     assert len(runtime.store.list("observations")) == 7
 
 
@@ -259,8 +259,8 @@ async def test_usage_restore_and_conversion_backup_are_persistent(runtime, tmp_p
     await runtime.update_settings(
         {
             "context_usage": {
-                "limits": {"memory.knowledge": 17},
-                "brief_max_chars": {"memory.notes": 321},
+                "limits": {"memory.related": 17},
+                "people_limit": 4,
             }
         }
     )
@@ -273,28 +273,13 @@ async def test_usage_restore_and_conversion_backup_are_persistent(runtime, tmp_p
         old = {**backup, "settings": {**backup["settings"], "memory": {"context_limit": 0}}}
         old["settings"].pop("context_usage")
         await other.restore(old)
-        assert all(other.settings["context_usage"]["limits"][key] == 0 for key in MEMORY_DEFAULTS)
+        assert other.settings["context_usage"] == DEFAULT_USAGE
     finally:
         await other.stop()
 
 
-async def test_reflection_keeps_typed_briefs_and_replacement_identifiers(runtime, monkeypatch):
-    await runtime.update_settings({"modules": {"journal": True}})
+async def test_reflection_keeps_replacement_ids_and_version_history(runtime, monkeypatch):
     remembered = runtime.memory.remember("旧的明确约定", scope=PRIVATE, source="chat")
-    runtime.memory.remember(
-        "独立的日记简报",
-        kind="knowledge",
-        scope=PRIVATE,
-        source="journal:brief",
-        key="journal:typed",
-    )
-    yesterday = runtime.life._now() - timedelta(days=1)
-    runtime.record_event(
-        "昨天的虚构经历不可召回",
-        source="fiction",
-        key="old-fiction",
-        occurred_at=yesterday.isoformat(),
-    )
     captured = []
 
     async def complete(task, module, template, context, scope):
@@ -304,10 +289,11 @@ async def test_reflection_keeps_typed_briefs_and_replacement_identifiers(runtime
             {
                 "memories": [
                     {
-                        "text": "新的明确约定",
-                        "kind": "event",
+                        "judgment": "新的明确约定",
+                        "attribute": "事实属性",
                         "replace_id": remembered["id"],
                         "evidence": "新的明确约定",
+                        "owner": "self",
                     }
                 ]
             },
@@ -318,9 +304,9 @@ async def test_reflection_keeps_typed_briefs_and_replacement_identifiers(runtime
     await runtime.memory.reflect("新的明确约定", scope=PRIVATE)
     request = captured[0]
     sources = {row["block_id"]: row for row in request["sources"]}
-    assert remembered["id"] in sources["memory.event"]["content"]
-    assert "独立的日记简报" in sources["memory.journal"]["content"]
-    assert "memory.knowledge" not in sources
-    assert "昨天的虚构经历不可召回" not in request["prompt"]
+    assert remembered["id"] in sources["memory"]["content"]
+    assert not set(MEMORY_DEFAULTS) & sources.keys()
     assert runtime.store.get("memories", remembered["id"])["text"] == "新的明确约定"
-    assert '"known"' in sources["memory.event"]["content"]
+    assert runtime.store.get("memories", remembered["id"])["version"] == remembered["version"] + 1
+    assert '"known"' in sources["memory"]["content"]
+    assert runtime.store.list("memory_versions")

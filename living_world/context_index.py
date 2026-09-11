@@ -2,11 +2,7 @@
 
 from .context_catalog import (
     BLOCK_NAMES,
-    BRIEF_IDS,
     DEFAULT_LIMITS,
-    MEMORY_DEFAULTS,
-    OWNERS,
-    SOURCE_NAMES,
     navigation_path,
 )
 
@@ -29,7 +25,7 @@ PROFILE = target("角色资料", "character", "profile", field="character.profil
 STATE = target("生活状态", "character", "state", field="mood")
 SCHEDULE = target("日程与执行", "schedule", "timeline")
 LIFE_SETTINGS = target("生成与细化设置", "schedule", "settings")
-MEMORY = target("记忆与人物", "memory", "records")
+MEMORY = target("记忆与画像", "memory", "records")
 JOURNALS = target("日记与笔记", "memory", "journals")
 USAGE = target("上下文用量", "context", "usage")
 TRIAL = target("本次试跑材料", "context", "trial", current_task="1")
@@ -244,43 +240,20 @@ for source, name, template in (
     )
 
 
-for identifier in MEMORY_DEFAULTS:
-    page, tab, detail = OWNERS[identifier]
-    kind = identifier.split(".", 1)[1]
-    INDEX[identifier] = entry(
-        f"提供当前任务可用的{detail}。",
-        "按结构化类型、场合、人物、日期与模块筛选的资料；独立限量，不占用其他类别额度。日记和笔记只取已生成的简报，不回退全文。",
-        target(
-            BLOCK_NAMES[identifier],
-            page,
-            tab,
-            **(
-                {"kind": "journal" if kind == "journal" else "notes"}
-                if identifier in BRIEF_IDS.values()
-                else {"category": identifier}
-            ),
-        ),
-        templates=(
-            ("journal.brief",)
-            if kind == "journal"
-            else ("notes.brief",)
-            if kind == "notes"
-            else ("memory.reflect",)
-        ),
-    )
-INDEX["observations"] = entry(
-    "提供新闻、搜索、B站和AI日报的近期来源记录。",
-    "四类已保存见闻按当前场合和模块过滤后合计取最新记录；天气独立处理。每次读取数量与上下文最多条数分别设置。",
-    target(BLOCK_NAMES["observations"], "sources", "records"),
-    *(
-        item
-        for source, name in SOURCE_NAMES.items()
-        for item in (
-            target(f"近期见闻：{name}", "sources", "records", source=source),
-            target(f"来源设置：{name}", "sources", "settings", source=source),
-        )
-    ),
-    templates=("news.reflect", "search.reflect", "bilibili.reflect", "daily_digest.reflect"),
+INDEX["memory"] = entry(
+    "提供自身稳定画像、当前人物画像和与本轮话题相关的记忆。",
+    "统一记忆库按人格、人物、场合及来源模块筛选；身份画像直接加载，相关检索使用普通模型理解检索词与 BM25。先保留近期记忆，再补画像与相关项，同条记忆只提供一次。",
+    MEMORY,
+    USAGE,
+    target("提炼与遗忘", "memory", "settings"),
+    templates=("memory.reflect", "memory.query", "memory.feedback"),
+)
+INDEX["memory.recent"] = entry(
+    "提供可可最近的经历、交流体会及所学，承接生活连续感。",
+    "统一记忆库中本人格在当前场合可见的近期记录，按实际经历或获知时间跨日排序；不需要话题命中，不额外调用模型。",
+    MEMORY,
+    USAGE,
+    templates=("memory.reflect",),
 )
 INDEX = {identifier: INDEX[identifier] for identifier in BLOCK_NAMES}
 for identifier, metadata in INDEX.items():
@@ -291,15 +264,6 @@ for identifier, metadata in INDEX.items():
                 "context",
                 "usage",
                 field="context_usage.limits." + identifier,
-            )
-        )
-    if identifier in BRIEF_IDS.values():
-        metadata["targets"].append(
-            target(
-                BLOCK_NAMES[identifier] + " · 最长字符",
-                "context",
-                "usage",
-                field="context_usage.brief_max_chars." + identifier,
             )
         )
     for link in metadata["targets"]:

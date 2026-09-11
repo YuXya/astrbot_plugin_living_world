@@ -86,7 +86,8 @@ def test_detail_request_is_read_only_and_filters_private_material(world):
     request = life.detail_request(row, instruction="只考虑自然的行动，不要凑数。")
     text = json.dumps(request["context"], ensure_ascii=False)
     assert request["scope"] == "global" and request["template"]
-    assert "公共兴趣是天文" in text and "公开新闻实际读过" in text
+    assert "公共兴趣是天文" not in text and "公开新闻实际读过" in text
+    assert "相关记忆" not in request["context"]
     assert "今天还要去上课" in text and "只考虑自然的行动" in text
     assert "私人礼物约定" not in text and "私聊消息正文秘密" not in text
     assert "当前想法" in text and "不是很想聊天" in text

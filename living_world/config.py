@@ -6,6 +6,7 @@ import re
 from zoneinfo import ZoneInfo
 
 from .drives import DRIVE_DEFAULTS, validate_drive
+from .memory_config import DEFAULT_MEMORY, memory_settings
 from .context_usage import DEFAULT_USAGE, integer, legacy_usage, validate_usage
 from .layout import (
     DEFAULT_SETTINGS as LAYOUT_DEFAULTS,
@@ -112,16 +113,7 @@ DEFAULTS = {
     "bilibili": {"plugin_name": "astrbot_plugin_bilibili_ai_bot", "recent_limit": 5},
     "daily_digest": {"sources": DIGEST_SOURCES},
     "debug": {"retain_per_category": 10},
-    "memory": {
-        "half_life_days": 30,
-        "forget_after_days": 180,
-        "forget_threshold": 0.15,
-        "recall_boost": 0.2,
-        "reflection_limit": 8,
-        "context_limit": 10,
-        "journal_limit": 2,
-        "brief_max_chars": 200,
-    },
+    "memory": copy.deepcopy(DEFAULT_MEMORY),
     "journal": {"hour": 23},
     "model_timeout_seconds": 90,
 }
@@ -148,9 +140,12 @@ def settings_from(patch=None):
             if key not in saved_reply:
                 result["reply"][key] = saved_reply.get("group_prompt", DEFAULT_GROUP_REPLY_PROMPT)
     saved_layout = (patch or {}).get("context_layout")
-    if isinstance(saved_layout, dict) and saved_layout.get("version") in {1, 2}:
-        # Old layouts are complete objects, not patches to the version-three shape.
+    if isinstance(saved_layout, dict) and saved_layout.get("version") in {1, 2, 3}:
+        # Historical objects must not be merged with newly introduced task keys.
         result["context_layout"] = copy.deepcopy(saved_layout)
+    saved_usage = (patch or {}).get("context_usage")
+    if isinstance(saved_usage, dict) and saved_usage.get("version") == 1:
+        result["context_usage"] = copy.deepcopy(saved_usage)
     for section in (
         "modules",
         "drives",
@@ -176,8 +171,7 @@ def settings_from(patch=None):
     result["context_layout"] = validate_layout_settings(result["context_layout"])
     integer(result["social"]["target_count"], 1, 20, "每轮抽选目标数")
     result["social"]["target_count"] = 1
-    for key in ("context_limit", "journal_limit", "brief_max_chars"):
-        result["memory"].pop(key, None)
+    result["memory"] = memory_settings(result["memory"])
     # Old backup keys remain readable for migration, but never become live controls.
     result["character"].pop("energy", None)
     for key in ("news_count", "search_count", "social_count"):

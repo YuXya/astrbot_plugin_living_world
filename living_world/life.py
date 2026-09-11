@@ -22,7 +22,6 @@ from .context import (
     activity_material,
     activity_text,
     clean_life_text,
-    is_role_experience,
     prepare_life_records,
     record_text,
 )
@@ -291,27 +290,18 @@ class LifeService(ActionLedger):
         now = self._now(now)
         selection = resolve_selection(self.runtime.settings, task) if task else None
         usage = usage_for(self.runtime.settings, selection)
-        if task and hasattr(self.runtime, "context_experience_keys"):
-            exclude_keys = set(exclude_keys or ()) | self.runtime.context_experience_keys(
-                scope, now, usage
+        records = [
+            e
+            for e in self.runtime.memory.recall(
+                query="",
+                scope=scope,
+                reinforce=reinforce,
+                context_now=now,
+                usage=usage,
+                **({"exclude_keys": exclude_keys} if exclude_keys is not None else {}),
             )
-        records = prepare_life_records(
-            [
-                e
-                for e in self.runtime.memory.recall(
-                    query="",
-                    scope=scope,
-                    reinforce=reinforce,
-                    context_now=now,
-                    usage=usage,
-                    **({"exclude_keys": exclude_keys} if exclude_keys is not None else {}),
-                )
-                if e.get("scope", "global") in {"global", scope}
-            ],
-            now,
-            memory=True,
-            event_lookup=lambda key: self.runtime.store.get("events", key),
-        )
+            if e.get("scope", "global") in {"global", scope}
+        ]
         if scope != "global":
             records = [e for e in records if e.get("scope") == scope] + [
                 e for e in records if e.get("scope", "global") == "global"
@@ -359,7 +349,6 @@ class LifeService(ActionLedger):
             "context_selection": selection,
             "now": now.isoformat(),
             "parameters": (marker.get("parameters") if formal else None) or self.parameters(),
-            "memories": self._memories("global", reinforce=False, now=now, task="life.plan"),
             "经历说明": FICTION_NOTICE,
         }
         if self.runtime.enabled("state"):
@@ -705,7 +694,6 @@ class LifeService(ActionLedger):
                 "context_selection": selection,
                 "now": now.isoformat(),
                 "scope": scope,
-                "memories": self._memories(scope, now=now, task="life.revise"),
                 "经历说明": FICTION_NOTICE,
                 "editable": [activity_material(self._view(a, scope)) for a in editable.values()],
                 "parameters": (
@@ -792,12 +780,6 @@ class LifeService(ActionLedger):
         event_rows = prepare_life_records(
             event_rows, now, seen=seen if "task.actions" in selection else None
         )
-        memory_rows = prepare_life_records(
-            self._memories(scope, now=now, task="life.detail", exclude_keys=seen),
-            now,
-            memory=True,
-            seen=seen,
-        )
         events = [record_text(row, now) for row in event_rows]
         outcome_names = {"news": "新闻", "search": "搜索", "social": "主动聊天"}
         for result in self.runtime.store.list("actions"):
@@ -818,7 +800,6 @@ class LifeService(ActionLedger):
             "待细化活动": activity_text(self._view(activity, scope)),
             "活动时间范围": f"{activity['start']} 至 {activity['end']}，结束时间不包含在执行范围内。",
             "当天其他安排": "\n".join(schedule) or "没有其他安排。",
-            "相关记忆": memory_rows,
             "近期实际行动": "\n".join(events) or "没有可见的实际行动结果，不代表已执行计划。",
             "能力与限制": "；".join(
                 f"{names[k]}{'已启用' if self.runtime.enabled('proactive' if k == 'social' else k) else '已关闭，不得安排'}"
@@ -827,8 +808,7 @@ class LifeService(ActionLedger):
             + f"。聊天免打扰 {social.get('quiet_start', '23:00')}—{social.get('quiet_end', '08:00')}；"
             "对象在实际执行时由白名单抽取，并再次检查冷却及发送限制。",
         }
-        if any(is_role_experience(row) for row in memory_rows):
-            context["经历说明"] = FICTION_NOTICE
+        context["经历说明"] = FICTION_NOTICE
         if self.runtime.enabled("state"):
             state = self.state()
             context["角色状态与作息"] = f"心情：{state['mood']}；作息：{state['routine']}"

@@ -5,7 +5,14 @@ import json
 from datetime import datetime
 
 from .context_index import INDEX
-from .context_catalog import BLOCK_NAMES, DEFAULT_LIMITS, MEMORY_DEFAULTS, OWNERS, menu_catalog
+from .context_catalog import (
+    BLOCK_NAMES,
+    DEFAULT_LIMITS,
+    MEMORY_DEFAULTS,
+    OWNERS,
+    V3_BLOCK_NAMES,
+    menu_catalog,
+)
 from .context_usage import DEFAULT_USAGE
 
 TASK_NAMES = {
@@ -87,7 +94,7 @@ def expanded(rows):
 V2_LAYOUT = {role: expanded(rows) for role, rows in LEGACY_LAYOUT.items()}
 V2_BLOCK_NAMES = {
     key: ("日程与执行：今日日程" if key == "schedule" else value)
-    for key, value in BLOCK_NAMES.items()
+    for key, value in V3_BLOCK_NAMES.items()
     if key not in {"schedule.recent", "private_reply", "proactive_reply"}
 }
 
@@ -179,9 +186,63 @@ for _task in TASK_NAMES:
             "memory.emotional",
             "memory.profile",
         }
-    DEFAULT_SELECTIONS[_task] = [key for key in BLOCK_NAMES if key in _selected]
+    DEFAULT_SELECTIONS[_task] = [key for key in V3_BLOCK_NAMES if key in _selected]
+V3_TASK_NAMES = copy.deepcopy(TASK_NAMES)
+V3_DEFAULT_SELECTIONS = copy.deepcopy(DEFAULT_SELECTIONS)
+V3_LAYOUT = copy.deepcopy(DEFAULT_LAYOUT)
+
+
+def unified_identifier(identifier):
+    if identifier in {*MEMORY_DEFAULTS, "observations", "memories"}:
+        return "memory"
+    if identifier == "experiences":
+        return "memory.recent"
+    if identifier in {"task.events", "task.document"}:
+        return "task.material"
+    if identifier == "task.brief_limit":
+        return None
+    return identifier
+
+
+def unified_order(layout):
+    """Place unified memory at the first old memory slot, retaining role and baseline."""
+    result, seen = {}, set()
+    for role, rows in layout.items():
+        result[role] = []
+        for key in rows:
+            if key in {"observations", "task.events", "task.document", "task.brief_limit"}:
+                continue
+            identifier = unified_identifier(key)
+            if identifier and identifier not in seen:
+                result[role].append(identifier)
+                seen.add(identifier)
+    return result
+
+
+def unified_selection(rows):
+    selected = {unified_identifier(key) for key in rows}
+    return [key for key in BLOCK_NAMES if key in selected and not key.startswith("anchor.")]
+
+
+TASK_NAMES = {
+    key: ("提炼与整理记忆" if key == "memory.reflect" else name)
+    for key, name in V3_TASK_NAMES.items()
+    if key not in {"journal.brief", "notes.brief"}
+}
+TASK_NAMES["memory.query"] = "理解记忆检索词"
+TASK_NAMES["memory.feedback"] = "判断记忆有用性"
+DEFAULT_LAYOUT = unified_order(V3_LAYOUT)
+DEFAULT_SELECTIONS = {
+    task: unified_selection(rows)
+    for task, rows in V3_DEFAULT_SELECTIONS.items()
+    if task in TASK_NAMES
+}
+for _task in ("journal.write", "notes.write"):
+    DEFAULT_SELECTIONS[_task] = [key for key in DEFAULT_SELECTIONS[_task] if key != "task.material"]
+DEFAULT_SELECTIONS["memory.query"] = ["profile", "world", "task.material", "task.other"]
+DEFAULT_SELECTIONS["memory.feedback"] = ["task.material", "task.other"]
 DEFAULT_SETTINGS = {
-    "version": 3,
+    "version": 4,
     "order": DEFAULT_LAYOUT,
     "baseline_order": copy.deepcopy(DEFAULT_LAYOUT),
     "tasks": DEFAULT_SELECTIONS,
@@ -235,11 +296,16 @@ def task_label(task):
 
 
 def names_for(version):
-    return LEGACY_BLOCK_NAMES if version == 1 else V2_BLOCK_NAMES if version == 2 else BLOCK_NAMES
+    return {
+        1: LEGACY_BLOCK_NAMES,
+        2: V2_BLOCK_NAMES,
+        3: V3_BLOCK_NAMES,
+        4: BLOCK_NAMES,
+    }[version]
 
 
-def validate_layout(value, *, legacy=False, version=3):
-    if type(version) is not int or version not in {1, 2, 3}:
+def validate_layout(value, *, legacy=False, version=4):
+    if type(version) is not int or version not in {1, 2, 3, 4}:
         raise ValueError("不支持的上下文布局版本")
     names = names_for(1 if legacy else version)
     if not isinstance(value, dict) or set(value) != {"system", "user"}:
@@ -261,17 +327,17 @@ def validate_layout(value, *, legacy=False, version=3):
     return copy.deepcopy(value)
 
 
-def validate_selection(value):
+def validate_selection(value, *, version=4):
+    names = names_for(version)
     if not isinstance(value, list) or any(
-        not isinstance(key, str) or key not in BLOCK_NAMES or key.startswith("anchor.")
-        for key in value
+        not isinstance(key, str) or key not in names or key.startswith("anchor.") for key in value
     ):
         raise ValueError("任务勾选包含未知资料或只读定位行")
     if len(value) != len(set(value)):
         raise ValueError("任务勾选不能重复")
     if {"schedule", "schedule.recent"} <= set(value):
         raise ValueError("同一任务只能选择一种今日日程")
-    return [key for key in BLOCK_NAMES if key in value]
+    return [key for key in names if key in value]
 
 
 def validate_settings(value):
@@ -279,9 +345,10 @@ def validate_settings(value):
         raise ValueError("上下文布局配置格式无效")
     version = value["version"]
     fields = {"version", "default", "tasks"} if version in {1, 2} else set(DEFAULT_SETTINGS)
-    if version not in {1, 2, 3} or set(value) != fields or not isinstance(value["tasks"], dict):
+    if version not in {1, 2, 3, 4} or set(value) != fields or not isinstance(value["tasks"], dict):
         raise ValueError("上下文布局配置格式无效")
-    if set(value["tasks"]) - set(TASK_NAMES):
+    tasks = TASK_NAMES if version == 4 else V3_TASK_NAMES
+    if set(value["tasks"]) - set(tasks):
         raise ValueError("上下文布局包含未知任务")
     if version in {1, 2}:
         order = validate_layout(value["default"], version=version)
@@ -292,15 +359,29 @@ def validate_settings(value):
             order = {role: expanded(rows) for role, rows in order.items()}
         order = extend_order(order)
         return {
-            "version": 3,
-            "order": order,
-            "baseline_order": copy.deepcopy(order),
+            "version": 4,
+            "order": unified_order(order),
+            "baseline_order": unified_order(order),
             "tasks": copy.deepcopy(DEFAULT_SELECTIONS),
         }
-    if set(value["tasks"]) != set(TASK_NAMES):
+    if set(value["tasks"]) != set(tasks):
         raise ValueError("上下文勾选缺少任务")
+    if version == 3:
+        selections = {
+            task: unified_selection(validate_selection(rows, version=3))
+            for task, rows in value["tasks"].items()
+            if task in TASK_NAMES
+        }
+        for task in ("memory.query", "memory.feedback"):
+            selections[task] = copy.deepcopy(DEFAULT_SELECTIONS[task])
+        return {
+            "version": 4,
+            "order": unified_order(validate_layout(value["order"], version=3)),
+            "baseline_order": unified_order(validate_layout(value["baseline_order"], version=3)),
+            "tasks": selections,
+        }
     return {
-        "version": 3,
+        "version": 4,
         "order": validate_layout(value["order"]),
         "baseline_order": validate_layout(value["baseline_order"]),
         "tasks": {task: validate_selection(rows) for task, rows in value["tasks"].items()},
@@ -337,7 +418,7 @@ def reply_blocks(settings):
 
 def catalog():
     return {
-        "version": 3,
+        "version": 4,
         "menus": menu_catalog(),
         "default": copy.deepcopy(DEFAULT_LAYOUT),
         "default_selections": copy.deepcopy(DEFAULT_SELECTIONS),
@@ -350,15 +431,16 @@ def catalog():
                 "usage": {
                     "default": DEFAULT_LIMITS[key],
                     "max": 1 if key == "weather" else 50,
-                    "brief": {
-                        "default": DEFAULT_USAGE["brief_max_chars"][key],
-                        "min": 50,
-                        "max": 1000,
-                    }
-                    if key in DEFAULT_USAGE["brief_max_chars"]
-                    else None,
                 }
                 if key in DEFAULT_LIMITS
+                else {
+                    "limits": {
+                        key: DEFAULT_LIMITS[key]
+                        for key in ("memory.self", "memory.people", "memory.related")
+                    },
+                    "people_limit": DEFAULT_USAGE["people_limit"],
+                }
+                if key == "memory"
                 else None,
                 **copy.deepcopy(INDEX[key]),
             }
@@ -389,7 +471,7 @@ def text_value(value):
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
 
 
-def collect_task_blocks(context, *, legacy=False, version=3):
+def collect_task_blocks(context, *, legacy=False, version=4):
     """Extract structured life snapshots without parsing rendered prompt headings."""
     from .context import context_from_data, is_life_snapshot, memory_blocks
 
@@ -409,10 +491,16 @@ def collect_task_blocks(context, *, legacy=False, version=3):
                 visit(item, name)
         elif value is not None:
             identifier = FIELD_BLOCKS.get(key, "task.other")
+            if version >= 4 and not legacy:
+                identifier = unified_identifier(identifier)
+                if identifier is None:
+                    return
+                if key == "recent_memories":
+                    identifier = "memory.recent"
             if key in {"经历说明", "context_usage", "context_selection"}:
                 # Attach the provenance explanation to every relevant material block below.
                 return
-            if identifier == "memories" and not legacy:
+            if identifier in {"memories", "memory", "memory.recent"} and not legacy:
                 if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
                     raise ValueError("记忆资料必须保留结构化类别；不能用正文猜测记忆类型")
                 moment = (
@@ -428,6 +516,8 @@ def collect_task_blocks(context, *, legacy=False, version=3):
                         now=moment,
                         usage=context.get("context_usage"),
                         include_identifiers=key == "known",
+                        version=version,
+                        identifier="memory.recent" if key == "recent_memories" else "memory",
                     )
                 )
                 return
@@ -442,6 +532,8 @@ def collect_task_blocks(context, *, legacy=False, version=3):
             for item in blocks:
                 if item["block_id"] in {
                     "memories",
+                    "memory",
+                    "memory.recent",
                     "task.events",
                     "task.activity",
                     *MEMORY_DEFAULTS,
@@ -452,11 +544,13 @@ def collect_task_blocks(context, *, legacy=False, version=3):
     return blocks
 
 
-def assemble(layout, blocks, system="", user="", *, legacy=False, version=3, selection=None):
+def assemble(layout, blocks, system="", user="", *, legacy=False, version=4, selection=None):
     """Return ordered sources and four insertion segments around untouched anchors."""
     layout = validate_layout(layout, legacy=legacy, version=version)
     names = names_for(1 if legacy else version)
-    selected = set(validate_selection(selection)) if selection is not None else None
+    selected = (
+        set(validate_selection(selection, version=version)) if selection is not None else None
+    )
     grouped = {}
     for item in blocks:
         identifier = item.get("block_id", "task.other")
@@ -469,6 +563,44 @@ def assemble(layout, blocks, system="", user="", *, legacy=False, version=3, sel
         ):
             continue
         grouped.setdefault(identifier, []).append(copy.deepcopy(item))
+    if not legacy and version >= 4:
+        from .context import memory_blocks, unified_memory_rows
+
+        seen = set()
+        for identifier in ("memory.recent", "memory"):
+            retained = []
+            for item in grouped.get(identifier, []):
+                records = item.get("memory_snapshots")
+                if not isinstance(records, list):
+                    retained.append(item)
+                    continue
+                rows = unified_memory_rows(records, seen=seen)
+                if not rows:
+                    continue
+                if len(rows) != len(records):
+                    try:
+                        now = datetime.fromisoformat(item.get("memory_projection_time", ""))
+                    except (TypeError, ValueError):
+                        now = None
+                    replacement = memory_blocks(
+                        rows,
+                        now,
+                        identifier=identifier,
+                        include_identifiers=bool(item.get("include_memory_identifiers")),
+                    )[0]
+                    for key in (
+                        "content",
+                        "count",
+                        "memory_ids",
+                        "memory_versions",
+                        "memory_snapshots",
+                    ):
+                        item[key] = replacement[key]
+                retained.append(item)
+            if retained:
+                grouped[identifier] = retained
+            else:
+                grouped.pop(identifier, None)
     if not legacy:
         for identifier, items in grouped.items():
             merged = {**items[0], "title": names[identifier]}
@@ -484,6 +616,15 @@ def assemble(layout, blocks, system="", user="", *, legacy=False, version=3, sel
                 merged["memory_ids"] = list(
                     dict.fromkeys(key for item in items for key in item.get("memory_ids", []))
                 )
+                merged["memory_versions"] = {
+                    key: value
+                    for item in items
+                    for key, value in item.get("memory_versions", {}).items()
+                }
+                if version >= 4:
+                    merged["memory_snapshots"] = [
+                        row for item in items for row in item.get("memory_snapshots", [])
+                    ]
             grouped[identifier] = [merged]
     sources, segments = [], {}
 
