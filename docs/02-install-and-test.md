@@ -1,4 +1,4 @@
-# 0.2.5 安装与测试说明
+# 0.2.6 安装与测试说明
 
 > 2026-09-11 最新规则：当前仅使用已保存的现行格式：布局 v4、用量 v2、统一记忆 v2；新安装缺失项使用当前默认值，不执行旧配置、旧日程、内在状态或旧记忆迁移。备份格式为 v2，旧备份直接拒绝，不转换或重放旧任务。
 本插件支持 **Python 3.12、AstrBot `>=4.27.5,<5`**，使用 OneBot QQ / `aiocqhttp`。当前本地自动化环境为 Python 3.12.14、AstrBot 4.28.0，版本以实际导入的宿主源码为准；4.27.5 已核对官方发布标签源码，真实环境联调另记。
@@ -7,7 +7,7 @@
 
 ## 安装与升级
 
-1. 在 AstrBot 插件管理导入 `astrbot_plugin_living_world-0.2.5.zip`；或将目录放到 `data/plugins/astrbot_plugin_living_world`，根目录直接包含 `main.py`、`metadata.yaml`、`requirements.txt`、`living_world/`、`pages/`。
+1. 在 AstrBot 插件管理导入 `astrbot_plugin_living_world-0.2.6.zip`；或将目录放到 `data/plugins/astrbot_plugin_living_world`，根目录直接包含 `main.py`、`metadata.yaml`、`requirements.txt`、`living_world/`、`pages/`。
 2. 使用 **AstrBot 实际运行的 Python 环境**安装 `requirements.txt` 中尚未安装的依赖，再加载或重载插件。
 3. 在插件卡片打开 **Plugin Pages**。`/living_world` 只显示插件运行状态；配置、白名单和调试均在页面操作。
 4. 更新前可在「08 系统与数据 → 备份恢复」下载当前格式备份。当前不再迁移、归档或重置旧日程、内在数值、模板与记忆；缺失配置使用当前默认值，无 SQLite 业务表迁移。旧备份直接拒绝，不执行转换。
