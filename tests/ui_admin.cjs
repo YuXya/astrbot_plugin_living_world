@@ -14,6 +14,9 @@ module.exports = async (page, go, contract) => {
   await page.evaluate(() => {
     window.fixture.debug.templates.push(...window.fixture.context_layout_catalog.tasks.filter((row) => !row.id.startsWith("chat.")).map((row) => ({ task: row.id, label: row.label, template: "模板：" + row.id, default_template: "默认：" + row.id })));
     window.fixture.settings.memory = { context_limit: 10, journal_limit: 2, brief_max_chars: 200 };
+    const layout = window.fixture.settings.context_layout;
+    layout.baseline_order.user = ["time", ...layout.baseline_order.user.filter(id => id !== "time")];
+    layout.order = structuredClone(layout.baseline_order);
   }); await refresh();
   const menus = {
     overview: ["current", "recent"], context: ["layout", "usage", "templates", "trial", "calls"],
@@ -24,6 +27,10 @@ module.exports = async (page, go, contract) => {
   assert.equal(await page.locator("#navigation a").count(), 8);
   assert.equal(await page.evaluate(() => window.calls.some((c) => c.method === "POST")), false);
   await go("context", "layout");
+  assert.equal(await field("layout_task").inputValue(), "chat.group");
+  assert.equal(await field("layout_task").locator('option[value=""]').count(), 0);
+  assert.equal(await page.locator(".layout-row").count(), contract.context_layout_catalog.blocks.length);
+  assert.equal(await page.locator(".layout-anchor input[type=checkbox]").count(), 0);
   const cleanOrder = await page.locator('.layout-row').evaluateAll(nodes => nodes.map(node => node.dataset.blockId));
   const unsaved = () => page.evaluate(() => { const e = new Event("beforeunload", { cancelable: true }); dispatchEvent(e); return e.defaultPrevented; });
   assert.equal(await unsaved(), false);
@@ -64,7 +71,8 @@ module.exports = async (page, go, contract) => {
     await page.locator(`#section-panel[data-page="${name}"][data-section="${tab}"]`).waitFor();
   }
   await go("character", "profile"); await field("character.profile").fill("角色资料草稿 <img src=x onerror=window.profileXss=1>");
-  await go("chat", "reply"); await field("reply.group_prompt").fill("回复草稿"); await field("social.interjection_interval_minutes").fill("45");
+  await go("chat", "reply"); await field("reply.group_prompt").fill("回复草稿"); await field("reply.private_prompt").fill("私聊草稿"); await field("reply.proactive_prompt").fill("主动聊天草稿"); await field("social.interjection_interval_minutes").fill("45");
+  for (const key of ["group_prompt", "private_prompt", "proactive_prompt"]) assert.equal(await field(`reply.${key}`).getAttribute("maxlength"), "8000");
   await go("chat", "limits"); await field("social.cooldown_minutes").fill("75");
   await save("保存发送限制");
   let patch = await posted(); assert.deepEqual(Object.keys(patch), ["social"]); assert.equal(Object.hasOwn(patch.social, "interjection_interval_minutes"), false);
@@ -72,9 +80,23 @@ module.exports = async (page, go, contract) => {
   await page.evaluate(() => { window.failNext = true; }); await click("保存回复与插话设置");
   await page.getByText("测试来源暂时不可用", { exact: true }).waitFor(); await refresh();
   assert.equal(await field("reply.group_prompt").inputValue(), "回复草稿");
+  assert.equal(await field("reply.private_prompt").inputValue(), "私聊草稿");
+  assert.equal(await field("reply.proactive_prompt").inputValue(), "主动聊天草稿");
   await save("保存回复与插话设置"); patch = await posted();
+  assert.deepEqual(patch.reply, { group_prompt: "回复草稿", private_prompt: "私聊草稿", proactive_prompt: "主动聊天草稿" });
   assert.deepEqual(Object.keys(patch.social), ["interjection_interval_minutes"]);
   assert.equal(await page.evaluate(() => window.fixture.settings.social.cooldown_minutes), 75);
+  for (const [key, resetLabel] of [["group_prompt", "恢复群聊默认文案"], ["private_prompt", "恢复私聊默认文案"], ["proactive_prompt", "恢复主动聊天默认文案"]]) {
+    const before = await posted();
+    await click(resetLabel);
+    assert.equal(await field(`reply.${key}`).inputValue(), contract.group_reply_default);
+    assert.deepEqual(await posted(), before, "Restore only edits the draft");
+    const others = ["group_prompt", "private_prompt", "proactive_prompt"].filter(item => item !== key);
+    const otherValues = await Promise.all(others.map(item => field(`reply.${item}`).inputValue()));
+    await field(`reply.${key}`).fill(""); await save("保存回复与插话设置");
+    assert.equal((await posted()).reply[key], "", "An empty requirement stays empty");
+    assert.deepEqual(await Promise.all(others.map(item => field(`reply.${item}`).inputValue())), otherValues);
+  }
   await go("character", "profile"); assert.match(await field("character.profile").inputValue(), /^角色资料草稿/);
   await save("保存角色与世界"); assert.deepEqual(Object.keys(await posted()).sort(), ["character", "persona_id"]);
   assert.equal(await page.evaluate(() => window.profileXss), undefined);
@@ -129,7 +151,7 @@ module.exports = async (page, go, contract) => {
   await refresh(); assert.equal(await field("template").inputValue(), "未保存的简报模板");
   await go("context", "trial"); await field("task").selectOption("journal.brief"); assert.equal(await field("request_json").inputValue(), '{"prompt":"PRIVATE_DRAFT"}');
   await go("context", "calls"); assert.equal(await field("debug.retain_per_category").inputValue(), "23"); await save("保存记录数量");
-  await go("context", "layout"); await field("layout_task").selectOption("");
+  await go("context", "layout"); await field("layout_task").selectOption("chat.group");
   const row = (id) => page.locator(`.layout-row[data-block-id="${id}"]`);
   const ids = (role) => page.locator(`.layout-lane[data-role="${role}"] .layout-row`).evaluateAll((nodes) => nodes.map((n) => n.dataset.blockId));
   assert.equal(await row("time").evaluate((n) => n.getBoundingClientRect().height), 32);
@@ -161,27 +183,67 @@ module.exports = async (page, go, contract) => {
   await row("group_reply").locator("select").selectOption("system");
   await row("group_reply").getByRole("button", { name: "上移回复与插话：本轮群聊回复要求", exact: true }).focus(); await page.keyboard.press("Enter");
   assert.ok((await ids("system")).indexOf("group_reply") < (await ids("system")).indexOf("observations"));
-  await field("layout_task").selectOption("chat.group"); assert.equal(await row("time").locator("select").isDisabled(), true);
-  await click("为本任务单独设置"); await row("observations").locator("select").selectOption("user");
-  await field("layout_task").selectOption(""); assert.ok((await ids("system")).includes("observations"));
-  await save("保存上下文位置"); const saved = (await posted()).context_layout;
-  assert.ok(saved.default.system.includes("observations")); assert.ok(saved.tasks["chat.group"].user.includes("observations"));
-  await field("layout_task").selectOption("chat.group"); await click("恢复继承全局"); await save("保存上下文位置");
-  assert.equal((await posted()).context_layout.tasks["chat.group"], null);
-  await field("layout_task").selectOption(""); await click("恢复全局初始位置"); await save("保存上下文位置");
+  const enabled = id => row(id).locator(".layout-enabled");
+  const selectedIds = () => page.locator(".layout-row").evaluateAll(nodes => nodes.filter(node => node.querySelector(".layout-enabled:checked")).map(node => node.dataset.blockId).sort());
+  assert.equal(await enabled("task.document").isChecked(), false);
+  await row("task.document").locator("select").selectOption("system");
+  assert.ok((await ids("system")).includes("task.document"), "Unchecked rows remain movable");
+  await row("task.document").locator("select").selectOption("user");
+  assert.equal(await enabled("task.document").isChecked(), false, "Moving a row does not select it");
+  const globalOrder = { system: await ids("system"), user: await ids("user") };
+  for (const task of contract.context_layout_catalog.tasks) {
+    await field("layout_task").selectOption(task.id);
+    assert.equal(await page.locator(".layout-row").count(), contract.context_layout_catalog.blocks.length, "Every task shows the full catalog");
+    assert.equal(await row("time").locator("select").isDisabled(), false);
+    assert.deepEqual({ system: await ids("system"), user: await ids("user") }, globalOrder, "Task selection never changes global order");
+    assert.deepEqual(await selectedIds(), [...contract.context_layout_catalog.default_selections[task.id]].sort());
+  }
+  await field("layout_task").selectOption("chat.group");
+  assert.equal(await enabled("schedule.recent").isChecked(), true);
+  assert.equal(await enabled("schedule").isChecked(), false);
+  await enabled("schedule").check(); assert.equal(await enabled("schedule.recent").isChecked(), false);
+  await enabled("schedule").uncheck(); assert.equal(await enabled("schedule.recent").isChecked(), false);
+  await enabled("schedule.recent").check();
+  await enabled("private_reply").check(); await enabled("group_reply").uncheck();
+  await enabled("task.thoughts").check();
+  const groupSelection = await selectedIds();
+  await field("layout_task").selectOption("chat.private");
+  assert.equal(await enabled("private_reply").isChecked(), true);
+  assert.equal(await enabled("task.thoughts").isChecked(), false);
+  await row("observations").locator("select").selectOption("user");
+  await field("layout_task").selectOption("chat.group"); assert.ok((await ids("user")).includes("observations"));
+  assert.deepEqual(await selectedIds(), groupSelection, "Task selections persist independently through task switches");
+  await page.evaluate(() => { window.failNext = true; }); await click("保存上下文设置");
+  await page.getByText("测试来源暂时不可用", { exact: true }).waitFor(); await refresh();
+  assert.deepEqual(await selectedIds(), groupSelection); assert.ok((await ids("user")).includes("observations"));
+  await save("保存上下文设置"); const saved = (await posted()).context_layout;
+  assert.equal(saved.version, 3); assert.equal(Object.hasOwn(saved, "default"), false);
+  assert.ok(saved.order.user.includes("observations")); assert.deepEqual([...saved.tasks["chat.group"]].sort(), groupSelection);
+  assert.ok(saved.tasks["chat.private"].includes("private_reply")); assert.ok(!saved.tasks["chat.private"].includes("task.thoughts"));
+  assert.ok(Object.values(saved.tasks).every(selection => Array.isArray(selection) && selection.every(id => !id.startsWith("anchor."))));
+  await refresh(); assert.deepEqual(await selectedIds(), groupSelection);
+  await click("恢复本任务默认勾选");
+  assert.deepEqual(await selectedIds(), [...contract.context_layout_catalog.default_selections["chat.group"]].sort());
+  assert.deepEqual((await posted()).context_layout, saved, "Restoring task defaults only forms a draft");
+  assert.ok((await ids("user")).includes("observations"));
+  await save("保存上下文设置");
+  await click("恢复默认排序"); assert.deepEqual(await ids("user"), saved.baseline_order.user);
+  assert.deepEqual((await posted()).context_layout.order, saved.order, "Restoring order only forms a draft");
+  await save("保存上下文设置");
   assert.deepEqual(await ids("user"), baseUser);
   process.stdout.write("Mouse dragging…\n");
   // Real browser dragging catches native event and DOM-move interactions.
+  await row("time").evaluate(node => window.scrollTo(0, window.scrollY + node.getBoundingClientRect().top - 140));
   await row("experiences").locator(".layout-handle").dragTo(row("time"), { targetPosition: { x: 80, y: 2 } });
   assert.ok((await ids("user")).indexOf("experiences") < (await ids("user")).indexOf("time"));
   await row("time").locator(".layout-handle").dragTo(row("time"), { targetPosition: { x: 80, y: 16 } });
   const nativeOrder = await ids("user"); assert.notEqual(nativeOrder.at(-1), "time");
-  await save("保存上下文位置");
-  await click("恢复全局初始位置"); await save("保存上下文位置");
+  await save("保存上下文设置");
+  await click("恢复默认排序"); await save("保存上下文设置");
   process.stdout.write("Source targets…\n");
   // Every catalog entry resolves through stable IDs and every management link is reachable.
   for (const block of contract.context_layout_catalog.blocks) {
-    await go("context", "layout"); await field("layout_task").selectOption("");
+    await go("context", "layout"); await field("layout_task").selectOption("chat.group");
     await row(block.id).getByRole("button", { name: /来源$/ }).click();
     assert.equal(await page.locator("#source-index-title").textContent(), block.label);
     assert.ok((await page.locator("#source-index-body").textContent()).includes(block.purpose));
@@ -198,13 +260,17 @@ module.exports = async (page, go, contract) => {
       if (target.params.kind) assert.equal(await field("journals.kind").inputValue(), target.params.kind);
       if (target.params.source) assert.equal(await field("source." + target.tab).inputValue(), target.params.source);
       await click("返回上下文列表"); await row(block.id).waitFor();
-      assert.equal(await field("layout_task").inputValue(), "");
+      assert.equal(await field("layout_task").inputValue(), "chat.group");
     }
   }
+  await enabled("private_reply").check(); const sourceSelection = await selectedIds();
+  const sourceOrder = { system: await ids("system"), user: await ids("user") };
   await row("group_reply").scrollIntoViewIfNeeded(); const originalScroll = await page.evaluate(() => scrollY);
   await row("group_reply").getByRole("button", { name: /来源$/ }).click();
   await click(contract.context_layout_catalog.blocks.find(b => b.id === "group_reply").targets[0].path); await field("reply.group_prompt").fill("索引跳转后草稿"); await click("返回上下文列表");
   await row("group_reply").waitFor(); await page.waitForTimeout(180);
+  assert.deepEqual(await selectedIds(), sourceSelection, "Source navigation preserves the selection draft");
+  assert.deepEqual({ system: await ids("system"), user: await ids("user") }, sourceOrder);
   assert.ok(Math.abs(await page.evaluate(() => scrollY) - originalScroll) < 3, "Index return restores scroll");
   await row("group_reply").getByRole("button", { name: /来源$/ }).click(); await click(contract.context_layout_catalog.blocks.find(b => b.id === "group_reply").targets[0].path);
   assert.equal(await field("reply.group_prompt").inputValue(), "索引跳转后草稿"); await click("返回上下文列表");

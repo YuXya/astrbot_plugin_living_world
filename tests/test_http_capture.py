@@ -438,7 +438,7 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
         layout = moved(DEFAULT_LAYOUT, "group_reply", "system", "anchor.system")
         layout = moved(layout, "profile", "user", "anchor.user")
         await runtime.update_settings(
-            {"context_layout": {"default": layout}, "character": {"profile": "FROZEN_PROFILE"}}
+            {"context_layout": {"order": layout}, "character": {"profile": "FROZEN_PROFILE"}}
         )
         runtime.memory.remember("数学 FROZEN_MEMORY", scope=scope)
 
@@ -447,7 +447,7 @@ async def test_tool_followup_captures_wire_calls_but_not_third_party_inner_call(
             if custom_layout:
                 await runtime.update_settings(
                     {
-                        "context_layout": {"default": DEFAULT_LAYOUT},
+                        "context_layout": {"order": DEFAULT_LAYOUT},
                         "context_usage": {"limits": {"memory.event": 0}},
                     }
                 )
@@ -510,13 +510,31 @@ async def test_ordered_layout_matches_actual_http_and_excludes_saved_history(
 ):
     real_world = real_providers(responses=responses)
     runtime, _, _ = real_world
+    task = "chat.group" if scope == GROUP else "chat.private"
+    guidance = "group_reply" if scope == GROUP else "private_reply"
     layout = moved(DEFAULT_LAYOUT, "experiences", "user", "memory.event")
     layout = moved(layout, "observations", "system", "anchor.system")
-    layout = moved(layout, "group_reply", "system")
+    layout = moved(layout, guidance, "system")
+    selection = [
+        key
+        for key in runtime.settings["context_layout"]["tasks"][task]
+        if key != "memory.knowledge"
+    ]
     await runtime.update_settings(
-        {"context_layout": {"default": layout}, "modules": {"news": True}}
+        {
+            "context_layout": {"order": layout, "tasks": {task: selection}},
+            "modules": {"news": True},
+            "reply": {
+                "group_prompt": "GROUP_HTTP_RULE",
+                "private_prompt": "PRIVATE_HTTP_RULE",
+                "proactive_prompt": "PROACTIVE_HTTP_RULE",
+            },
+        }
     )
     runtime.memory.remember("MEMORY_SENTINEL mathematics", scope=scope)
+    hidden = runtime.memory.remember(
+        "UNCHECKED_SENTINEL mathematics", scope=scope, kind="knowledge"
+    )
     runtime.store.put(
         "events",
         "experience",
@@ -561,6 +579,11 @@ async def test_ordered_layout_matches_actual_http_and_excludes_saved_history(
     assert "NEWS_SENTINEL" not in user and "PRIVATE_SECRET" not in raw
     assert (GROUP_REPLY_HEADING in system) == (scope == GROUP)
     assert GROUP_REPLY_HEADING not in user
+    assert "【" + BLOCK_NAMES[guidance] + "】" in system
+    expected_rule = "GROUP_HTTP_RULE" if scope == GROUP else "PRIVATE_HTTP_RULE"
+    assert expected_rule in system and expected_rule not in user
+    assert "PROACTIVE_HTTP_RULE" not in raw and "UNCHECKED_SENTINEL" not in raw
+    assert runtime.store.get("memories", hidden["id"])["access_count"] == 0
     assert all(
         raw.count(text) == 1 for text in ("NEWS_SENTINEL", "MEMORY_SENTINEL", "EXPERIENCE_SENTINEL")
     )
@@ -569,7 +592,13 @@ async def test_ordered_layout_matches_actual_http_and_excludes_saved_history(
     )
     assert all(
         text not in saved
-        for text in ("NEWS_SENTINEL", "MEMORY_SENTINEL", "EXPERIENCE_SENTINEL", GROUP_REPLY_HEADING)
+        for text in (
+            "NEWS_SENTINEL",
+            "MEMORY_SENTINEL",
+            "EXPERIENCE_SENTINEL",
+            GROUP_REPLY_HEADING,
+            expected_rule,
+        )
     )
     assert req.system_prompt == "SYSTEM_ANCHOR"
 
@@ -586,7 +615,7 @@ async def test_independent_usage_and_selected_target_match_actual_http(
         {
             "sessions": [{"umo": scope, "display_name": "本次目标称呼"}],
             "modules": {"news": True, "search": True, "bilibili": True, "daily_digest": True},
-            "context_layout": {"default": layout},
+            "context_layout": {"order": layout},
             "context_usage": {"limits": {"memory.knowledge": 2, "observations": 3}},
         }
     )
@@ -624,7 +653,8 @@ async def test_independent_usage_and_selected_target_match_actual_http(
         raw.index("LATEST_SOURCE_3") < raw.index("LATEST_SOURCE_2") < raw.index("LATEST_SOURCE_1")
     )
     assert "本次目标称呼" in raw
-    assert ("目标群号：" if scope == GROUP else "目标QQ号：") in raw
+    assert ("群聊名字：" if scope == GROUP else "目标名字：") in raw
+    assert "目标群号：" not in raw and "目标QQ号：" not in raw
     assert ("整个群" if scope == GROUP else "一对一私聊") in raw
     assert scope not in raw
     for identifier in ("speaker", "memory.knowledge", "observations"):

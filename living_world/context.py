@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .context_catalog import BLOCK_NAMES, MEMORY_DEFAULTS, SOURCE_NAMES, memory_category
@@ -282,6 +282,49 @@ def activity_material(row):
     }
 
 
+def recent_schedule_rows(schedule, now):
+    """Select nearby activities from a single already scoped, character-day snapshot."""
+    if schedule.get("status") == "disabled":
+        return []
+    day = now.date()
+    if schedule.get("date") and schedule["date"] != day.isoformat():
+        return []
+
+    def moment(value):
+        try:
+            return material_time(datetime.combine(day, time.fromisoformat(value)).isoformat(), now)
+        except (TypeError, ValueError):
+            return material_time(value, now)
+
+    rows = []
+    for row in schedule.get("activities", []):
+        if (
+            not isinstance(row, dict)
+            or row.get("status") in {"cancelled", "canceled", "retired"}
+            or row.get("retired")
+            or (row.get("date") and row["date"] != day.isoformat())
+        ):
+            continue
+        start, end = moment(row.get("start")), moment(row.get("end"))
+        if start is None or end is None or start.date() != day:
+            continue
+        if end <= start:
+            try:
+                time.fromisoformat(row.get("end"))
+            except (TypeError, ValueError):
+                continue
+            end += timedelta(days=1)
+        rows.append((start, end, row))
+    rows.sort(key=lambda item: (item[0], item[1]))
+    current = [index for index, (start, end, _) in enumerate(rows) if start <= now < end]
+    if current:
+        index = current[-1]
+        return [row for _, _, row in rows[max(0, index - 1) : index + 2]]
+    past = [row for _, end, row in rows if end <= now]
+    future = [row for start, _, row in rows if start > now]
+    return past[-2:] + future[:1]
+
+
 def observation_text(row):
     basis = BASIS.get(row.get("reading_basis"), "")
     if row.get("from_memory"):
@@ -334,6 +377,7 @@ def memory_blocks(records, now=None, usage=None, *, include_identifiers=False):
             block_id=identifier,
         )
         item["count"] = len(rows)
+        item["memory_ids"] = [str(row["id"]) for row in rows if row.get("id")]
         if usage:
             item["limit"] = usage["limits"][identifier]
         if any(is_role_experience(row) or is_fiction_journal(row) for row in rows):
@@ -342,11 +386,13 @@ def memory_blocks(records, now=None, usage=None, *, include_identifiers=False):
     return blocks
 
 
-def context_from_data(data, *, legacy=False):
+def context_from_data(data, *, legacy=False, version=3):
     """Create readable content and its source list without re-reading any business data."""
     if not isinstance(data, dict):
         raise TypeError("Living World context must be an object")
     sources = []
+    version = 1 if legacy else version
+    legacy = version == 1
     try:
         now = datetime.fromisoformat(data.get("current_time", ""))
     except (ValueError, TypeError):
@@ -368,11 +414,10 @@ def context_from_data(data, *, legacy=False):
 
     def add(title, source, content, identifier=None):
         identifier = identifier or identifiers[title]
-        sources.append(
-            source_item(
-                title if legacy else BLOCK_NAMES[identifier], source, content, block_id=identifier
-            )
-        )
+        display_title = title if legacy else BLOCK_NAMES[identifier]
+        if version == 2 and identifier == "schedule":
+            display_title = "日程与执行：今日日程"
+        sources.append(source_item(display_title, source, content, block_id=identifier))
 
     add("当前时间", "角色设置中的时区与当前时钟", _text(data.get("current_time")))
     state = data.get("state")
@@ -402,17 +447,48 @@ def context_from_data(data, *, legacy=False):
         "\n".join(filter(None, [notice, *(f"- {activity_text(row)}" for row in rows)]))
         or "今天尚未生成可用日程，不代表角色没有日程能力。",
     )
+    if version >= 3:
+        recent = recent_schedule_rows(schedule, now)
+        add(
+            "今日日程（简版）",
+            "同次今日正式日程快照中当前场合可见的附近活动",
+            "\n".join(filter(None, [notice, *(f"- {activity_text(row)}" for row in recent)]))
+            or "今天尚未生成可用日程，不代表角色没有日程能力。",
+            identifier="schedule.recent",
+        )
     seen = set()
+    selection = data.get("context_selection") if version >= 3 else None
+    selection = set(selection) if isinstance(selection, list) else None
     events = {str(row.get("id", "")): row for row in data.get("experiences", [])}
-    experiences = prepare_life_records(data.get("experiences", []), now, seen=seen, legacy=legacy)
+    experiences = prepare_life_records(
+        data.get("experiences", []),
+        now,
+        seen=seen if selection is None or "experiences" in selection else None,
+        legacy=legacy,
+    )
+    selected_memories = [
+        row
+        for row in data.get("memories", [])
+        if selection is None or memory_category(row) in selection
+    ]
     memories = prepare_life_records(
-        data.get("memories", []),
+        selected_memories,
         now,
         memory=True,
         event_lookup=events.get,
         seen=seen,
         legacy=legacy,
     )
+    if selection is not None:
+        # Unselected sources remain available to the caller without affecting selected deduplication.
+        memories.extend(
+            prepare_life_records(
+                [row for row in data.get("memories", []) if memory_category(row) not in selection],
+                now,
+                memory=True,
+                event_lookup=events.get,
+            )
+        )
     memory_lines = [f"- {record_text(row, now, memory=True)}" for row in memories]
     if legacy:
         add(
@@ -427,6 +503,9 @@ def context_from_data(data, *, legacy=False):
         add("近期经历", "生活记录中当前场合可见的经历", "\n".join(experience_lines))
         if not legacy:
             sources[-1]["count"] = len(experiences)
+            sources[-1]["record_keys"] = [
+                list(key) for row in experiences for key in record_keys(row, now)
+            ]
     for identifier, rows in (("memories", memories), ("experiences", experiences)):
         if any(is_role_experience(row) or is_fiction_journal(row) for row in rows):
             for item in sources:

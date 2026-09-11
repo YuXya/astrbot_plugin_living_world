@@ -190,7 +190,7 @@ async def test_background_state_is_dynamic_and_life_snapshot_has_readable_source
     request = await runtime.prepare_request(
         "search.topic", "search", "选择选题", {"available_context": context}
     )
-    assert "【日程与执行：今日日程】" in request["prompt"]
+    assert "【日程与执行：今日日程（完整）】" in request["prompt"]
     assert "history_count" not in request["prompt"]
     assert "轻量状态" not in request["system_prompt"]
     assert any(row.get("block_id") == "schedule" for row in request["sources"])

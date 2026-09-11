@@ -82,7 +82,7 @@ class Runtime:
             self.during_scope_allowed()
         return self.allowed
 
-    async def context_text(self, scope, person_id="", query=""):
+    async def context_text(self, scope, person_id="", query="", *, task=None, reinforce=True):
         self.context_calls.append((scope, person_id, query))
         return f"仅供 {scope} 使用的记忆"
 

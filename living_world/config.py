@@ -83,7 +83,11 @@ DEFAULTS = {
         "location": "",
         "sleep_state": "未知",
     },
-    "reply": {"group_prompt": DEFAULT_GROUP_REPLY_PROMPT},
+    "reply": {
+        "group_prompt": DEFAULT_GROUP_REPLY_PROMPT,
+        "private_prompt": DEFAULT_GROUP_REPLY_PROMPT,
+        "proactive_prompt": DEFAULT_GROUP_REPLY_PROMPT,
+    },
     "context_layout": copy.deepcopy(LAYOUT_DEFAULTS),
     "context_usage": copy.deepcopy(DEFAULT_USAGE),
     "life": {
@@ -138,6 +142,15 @@ def settings_from(patch=None):
     if patch is not None and not isinstance(patch, dict):
         raise ValueError("配置必须是对象")
     result = merge(DEFAULTS, patch or {})
+    saved_reply = (patch or {}).get("reply", {})
+    if isinstance(saved_reply, dict):
+        for key in ("private_prompt", "proactive_prompt"):
+            if key not in saved_reply:
+                result["reply"][key] = saved_reply.get("group_prompt", DEFAULT_GROUP_REPLY_PROMPT)
+    saved_layout = (patch or {}).get("context_layout")
+    if isinstance(saved_layout, dict) and saved_layout.get("version") in {1, 2}:
+        # Old layouts are complete objects, not patches to the version-three shape.
+        result["context_layout"] = copy.deepcopy(saved_layout)
     for section in (
         "modules",
         "drives",
@@ -299,8 +312,11 @@ def settings_from(patch=None):
     }.items():
         if any(not isinstance(result[section].get(key), str) for key in keys):
             raise TypeError(f"{section} 的文本字段无效")
-    if len(result["reply"]["group_prompt"]) > 8000:
-        raise ValueError("本轮群聊回复要求不能超过 8000 字符")
+    for key in ("group_prompt", "private_prompt", "proactive_prompt"):
+        if not isinstance(result["reply"].get(key), str):
+            raise TypeError("聊天回复要求必须为文本")
+        if len(result["reply"][key]) > 8000:
+            raise ValueError("聊天回复要求不能超过 8000 字符")
     if result["weather"]["auth_mode"] not in {"api_key", "jwt"}:
         raise ValueError("和风认证方式必须为 API Key 或 JWT")
     result["bilibili"]["plugin_name"] = "astrbot_plugin_bilibili_ai_bot"

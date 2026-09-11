@@ -54,8 +54,8 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       };
       window.fixture.version = "0.2.3-test";
       delete window.fixture.settings.character.energy; delete window.fixture.state.energy;
-      window.fixture.settings.reply = { group_prompt: groupReplyDefault };
-      window.fixture.reply_defaults = { group_prompt: groupReplyDefault };
+      window.fixture.settings.reply = { group_prompt: groupReplyDefault, private_prompt: groupReplyDefault, proactive_prompt: groupReplyDefault };
+      window.fixture.reply_defaults = { group_prompt: groupReplyDefault, private_prompt: groupReplyDefault, proactive_prompt: groupReplyDefault };
       for (const kind of ["news", "search", "social"]) delete window.fixture.settings.life[`${kind}_count`];
       window.fixture.settings.modules.drives = true;
       window.fixture.drives = { enabled: true, meters: {

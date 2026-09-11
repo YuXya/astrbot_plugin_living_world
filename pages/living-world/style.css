@@ -50,7 +50,9 @@
 .context-layout .layout-lane{padding:12px;border-radius:9px}
 .context-layout .layout-lane h3{font-size:13px;margin-bottom:8px}
 .context-layout .layout-list{gap:4px;min-height:32px}
-.context-layout .layout-row{display:grid;grid-template-columns:18px minmax(0,1fr) 40px 70px 24px 24px;height:32px;min-height:32px;gap:4px;padding:0 6px;border-radius:5px;flex-wrap:nowrap}
+.context-layout .layout-row{display:grid;grid-template-columns:18px 18px minmax(0,1fr) 40px 70px 24px 24px;height:32px;min-height:32px;gap:4px;padding:0 6px;border-radius:5px;flex-wrap:nowrap}
+.context-layout .layout-enabled{width:14px;height:14px;min-height:14px;margin:0;accent-color:var(--accent);cursor:pointer}
+.context-layout .layout-unselected .layout-name{color:var(--muted);font-weight:400}
 .context-layout .layout-name{display:block;min-width:0;width:auto;font-size:12px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;overflow-wrap:normal}
 .context-layout .layout-row>.field{margin:0;min-width:0;gap:0}
 .context-layout .layout-row .field-label{position:absolute;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;white-space:nowrap}
@@ -61,8 +63,8 @@
 .context-layout .layout-anchor .layout-source{grid-column:3}
 .context-layout .layout-row:focus-within{outline-offset:0;outline-width:1px}
 .layout-status,.layout-help{font-size:11px;color:var(--muted);margin:0}.layout-help p{padding:8px 0}
-.layout-end{display:none;height:32px;border:1px dashed var(--accent);border-radius:4px;text-align:center;font-size:11px;line-height:30px;color:var(--accent)}
-.is-sorting .layout-end{display:block}.context-layout .layout-row.is-dragging{position:relative;background:var(--accent-soft);border:2px dashed var(--accent);opacity:.65}
+.layout-end{visibility:hidden;height:32px;border:1px dashed var(--accent);border-radius:4px;text-align:center;font-size:11px;line-height:30px;color:var(--accent)}
+.is-sorting .layout-end{visibility:visible}.context-layout .layout-row.is-dragging{position:relative;background:var(--accent-soft);border:2px dashed var(--accent);opacity:.65}
 .context-layout .layout-row.is-dragging::before{content:"";position:absolute;top:-4px;left:-2px;right:-2px;height:2px;background:var(--accent);border-radius:2px}
 .context-layout .layout-row.is-dragging .layout-handle{cursor:grabbing}
 .source-drawer{position:fixed;inset:0 0 0 auto;margin:0;width:min(450px,100vw);max-width:100vw;height:100dvh;max-height:100dvh;border-radius:12px 0 0 12px;padding:22px;overscroll-behavior:contain}
@@ -81,7 +83,7 @@ dialog .dialog-header h2{min-width:0;overflow-wrap:anywhere}dialog .icon-button{
   .secondary-tabs{grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;padding-top:6px;margin-bottom:12px}
   .secondary-tabs .button{font-size:12px;min-height:36px;padding:5px 8px}
   .section-panel .card{padding:12px}.section-panel .form-grid{gap:10px}
-  .context-layout .layout-lane{padding:8px}.context-layout .layout-row{grid-template-columns:14px minmax(0,1fr) 32px 59px 28px 28px;height:44px;min-height:44px;padding:0 3px;gap:3px}
+  .context-layout .layout-lane{padding:8px}.context-layout .layout-row{grid-template-columns:14px 16px minmax(0,1fr) 32px 59px 28px 28px;height:44px;min-height:44px;padding:0 3px;gap:3px}
   .context-layout .layout-row .button,.context-layout .layout-row select{height:34px;min-height:34px;font-size:10px;padding:0 2px}
   .context-layout .layout-name{font-size:11px}.context-layout .layout-handle{height:40px;width:14px}
   .context-layout .layout-anchor{grid-template-columns:14px minmax(0,1fr) 32px}.layout-end{height:44px;line-height:42px}

@@ -19,7 +19,7 @@ let debugScope = "global";
 let debugMode = "structured";
 let retentionDraft = null;
 let layoutDraft = null;
-let layoutTask = "";
+let layoutTask = "chat.group";
 const templateDrafts = new Map();
 const trialDrafts = new Map();
 const formDrafts = new Map();
@@ -589,7 +589,7 @@ function whitelistFields(value, original) {
   const known = [...new Set([...rows("platforms").map((item) => item.id), ...(snapshot.settings.sessions || []).map((item) => (typeof item === "string" ? item : item.umo || "").split(":")[0])].filter(Boolean))];
   const box = el("div", "stack whitelist-entry");
   const fields = append(el("div", "form-grid"), field("QQ 连接", "connection", value.connection, { options: known, required: true }), field("聊天类型", "type", value.type, { options: [{ value: "GroupMessage", label: "群聊" }, { value: "FriendMessage", label: "私聊" }] }),
-    field("群号 / QQ 号", "number", value.number, { required: true }), field("对话称呼（提供给 AI）", "display_name", value.display_name, { hint: "可选。这个称呼会明确提供给 AI；留空使用群号或 QQ 号。" }), field("抽选权重", "weight", value.weight, { type: "number", min: 0, step: 0.1 }), checkField("启用此对象", "enabled", value.enabled));
+    field("群号 / QQ 号", "number", value.number, { required: true }), field("对话称呼（提供给 AI）", "display_name", value.display_name, { hint: "可选，优先使用此称呼；留空自动读取昵称或群名，读取失败显示未设置名字。" }), field("抽选权重", "weight", value.weight, { type: "number", min: 0, step: 0.1 }), checkField("启用此对象", "enabled", value.enabled));
   const scope = () => serializeWhitelist(readFields(fields), original).umo;
   const status = el("div"), preview = el("p", "session-line");
   const update = () => { preview.textContent = `会话标识：${scope()}`; status.replaceChildren(sessionStatus(scope())); };
@@ -612,12 +612,15 @@ function renderWhitelist(tab = "targets") {
   const f = (label, key, options, fallback) => field(label, `social.${key}`, valueAt(settings, `social.${key}`, fallback), options);
   if (tab === "deliveries") return compactRecords("deliveries", byRecordScope("deliveries", rows("deliveries")), { filter: recordScopeFilter("deliveries"), title: (row) => `${scopeLabel(row.umo || row.target || row.scope)} · ${recordTitle(row)}` });
   if (tab === "reply") {
-    const form = settingsForm("保存回复与插话设置", "群聊回复要求只用于普通群聊；模块开关统一在系统与数据管理。");
-    const group = field("本轮群聊回复要求", "reply.group_prompt", settings.reply?.group_prompt ?? snapshot.reply_defaults?.group_prompt ?? "", { type: "textarea", rows: 5 }); group.querySelector("textarea").maxLength = 8000;
-    const reset = button("恢复极短默认文案", () => { const input = group.querySelector("textarea"); input.value = snapshot.reply_defaults?.group_prompt || ""; input.dispatchEvent(new Event("input", { bubbles: true })); notice("已填入默认文案，保存后生效"); }, "secondary");
-    form.querySelector(".section-toolbar").append(reset);
-    form.append(group, f("群聊插话间隔（分钟）", "interjection_interval_minutes", { type: "number", min: 1, max: 1440 }, 30),
-      el("p", "hint", "默认在本轮 user 最后，作为独立指令；位置可调整，留空不注入。"), linkButton("调整上下文位置", "context?tab=layout"), linkButton("回复／插话模块开关", "system?tab=modules"));
+    const form = settingsForm("保存回复与插话设置", "三份要求独立保存；默认分别用于普通群聊、普通私聊和主动聊天正文（含插话正文）。");
+    for (const [key, label, resetLabel] of [["group_prompt", "本轮群聊回复要求", "恢复群聊默认文案"], ["private_prompt", "本轮私聊回复要求", "恢复私聊默认文案"], ["proactive_prompt", "本轮主动聊天要求", "恢复主动聊天默认文案"]]) {
+      const item = field(label, `reply.${key}`, settings.reply?.[key] ?? snapshot.reply_defaults?.[key] ?? "", { type: "textarea", rows: 4 });
+      const input = item.querySelector("textarea"); input.maxLength = 8000;
+      const reset = button(resetLabel, () => { input.value = snapshot.reply_defaults?.[key] ?? ""; input.dispatchEvent(new Event("input", { bubbles: true })); notice("已填入默认文案，保存后生效"); }, "secondary");
+      form.append(item, append(el("div", "actions"), reset));
+    }
+    form.append(f("群聊插话间隔（分钟）", "interjection_interval_minutes", { type: "number", min: 1, max: 1440 }, 30),
+      el("p", "hint", "作为独立指令，留空不注入，每份最多 8000 字符。可在上下文排序选择各任务使用的要求并调整位置；保存后下一轮生效，工具后的调用沿用本轮快照，不写入聊天历史。"), linkButton("调整上下文位置", "context?tab=layout"), linkButton("回复／插话模块开关", "system?tab=modules"));
     form.id = "group-reply-settings"; return finishForm(form, "chat.reply");
   }
   if (tab === "limits") {
@@ -1521,22 +1524,21 @@ function renderContextLayout() {
   const catalog = snapshot.context_layout_catalog;
   if (!catalog || !snapshot.settings?.context_layout) return empty("请更新并重载插件以取得上下文目录");
   const config = layoutDraft || snapshot.settings.context_layout;
-  const task = catalog.tasks.find((item) => item.id === layoutTask);
-  const override = Boolean(layoutTask && config.tasks[layoutTask]);
-  const current = (layoutTask && config.tasks[layoutTask]) || config.default;
-  const available = new Set(task?.blocks || catalog.blocks.map((item) => item.id));
+  if (!catalog.tasks.some((item) => item.id === layoutTask)) layoutTask = catalog.tasks.find((item) => item.id === "chat.group")?.id || catalog.tasks[0]?.id;
+  const current = config.order;
+  const selected = new Set(config.tasks[layoutTask] || catalog.default_selections?.[layoutTask] || []);
   const blockNames = new Map(catalog.blocks.map((item) => [item.id, item]));
   const mark = () => { layoutDraft ||= clone(snapshot.settings.context_layout); return layoutDraft; };
-  const editable = !layoutTask || override;
-  const heading = field("调整范围", "layout_task", layoutTask, { options: [{ value: "", label: "全局默认" }, ...catalog.tasks.map((item) => ({ value: item.id, label: item.label }))] });
+  const heading = field("调整范围", "layout_task", layoutTask, { options: catalog.tasks.map((item) => ({ value: item.id, label: item.label })) });
   heading.querySelector("select").dataset.skip = "1";
   heading.querySelector("select").addEventListener("change", (event) => { layoutTask = event.target.value; render(); });
   const save = async () => { const value = clone(layoutDraft || config); const result = await saveSettings({ context_layout: value }); if (result !== false) { if (JSON.stringify(layoutDraft || config) === JSON.stringify(value)) layoutDraft = null; render(); } };
-  const controls = append(el("div", "actions"), button("保存上下文位置", save, "primary"), button(layoutTask ? "重置本任务为初始位置" : "恢复全局初始位置", () => { const value = mark(); if (layoutTask) value.tasks[layoutTask] = clone(catalog.default); else value.default = clone(catalog.default); render(); }, "secondary"));
-  if (layoutTask) controls.append(override ? button("恢复继承全局", () => { mark().tasks[layoutTask] = null; render(); }, "secondary") : button("为本任务单独设置", () => { mark().tasks[layoutTask] = clone(current); render(); }, "secondary"));
+  const controls = append(el("div", "actions"), button("保存上下文设置", save, "primary"),
+    button("恢复本任务默认勾选", () => { mark().tasks[layoutTask] = clone(catalog.default_selections?.[layoutTask] || []); render(); }, "secondary"),
+    button("恢复默认排序", () => { mark().order = clone(config.baseline_order || catalog.default); render(); }, "secondary"));
   root.append(controls, heading);
-  if (layoutTask) root.append(el("p", "layout-status", override ? "本任务独立设置；全局排序修改不影响此任务。" : "继承全局默认；仅显示适用资料，单独设置后可修改。"));
-  root.append(append(el("details", "layout-help"), el("summary", "", "排序与生效说明"), el("p", "", "同一角色内从上到下就是实际注入顺序。拖动左侧手柄，或使用角色下拉框、上下按钮。定位行只读，资料可放到它的前后。保存后下一轮生效；在途工具调用沿用快照。没有材料的行不注入，不增加召回、不改变场合过滤，临时资料不入历史。")));
+  root.append(el("p", "layout-status", "仅切换本任务的勾选项，排序全局共用。所有资料行均可调整位置；未勾选的资料不参与本任务注入。"));
+  root.append(append(el("details", "layout-help"), el("summary", "", "排序与生效说明"), el("p", "", "同一角色内从上到下就是实际注入顺序。在任意任务拖动左侧手柄、使用角色下拉框或上下按钮，都会修改所有任务共用的排序。定位行只读，资料可放到它的前后。日程完整与简版最多勾选一种，也可都不选。恢复操作先形成草稿，保存后下一轮生效；在途工具调用沿用快照。勾选不触发来源读取或其他任务，没有本次材料的行不注入，场合、日期、模块及用量限制继续生效，临时资料不入历史。")));
   const nodes = new Map(), lists = {}, ends = {};
   let drag = null;
   let pointer = null;
@@ -1559,8 +1561,8 @@ function renderContextLayout() {
     }
   };
   const commit = (next, id) => {
-    if (!editable || busy || next === current || JSON.stringify(next) === JSON.stringify(current)) return;
-    const value = mark(); if (layoutTask) value.tasks[layoutTask] = next; else value.default = next;
+    if (busy || next === current || JSON.stringify(next) === JSON.stringify(current)) return;
+    mark().order = next;
     drag = null; cancelLayoutDrag = null; render();
     [...content.querySelectorAll("[data-block-id]")].find((node) => node.dataset.blockId === id)?.querySelector(".layout-up:not(:disabled),select,button")?.focus();
   };
@@ -1624,38 +1626,53 @@ function renderContextLayout() {
     lane.append(el("h3", "", role === "system" ? "system · 系统上下文" : "user · 本轮用户上下文"));
     const list = el("ol", "layout-list"); lists[role] = list; list.setAttribute("aria-label", `${role} 注入顺序`);
     const end = el("li", "layout-end", "放到本组末尾"); end.dataset.endRole = role; ends[role] = end;
-    const visible = current[role].filter((id) => available.has(id));
+    const visible = current[role].filter((id) => blockNames.has(id));
     visible.forEach((id, index) => {
       const info = blockNames.get(id), row = el("li", `layout-row${info.anchor ? " layout-anchor" : ""}`); row.dataset.blockId = id; nodes.set(id, row);
       const handle = el("span", "layout-handle", info.anchor ? "▪" : "⠿"); handle.draggable = false; handle.title = info.anchor ? "只读定位行" : "拖动调整顺序";
       if (!info.anchor) handle.addEventListener("pointerdown", (event) => {
-        if (!editable || busy || event.button !== 0) return;
+        if (busy || event.button !== 0) return;
         event.preventDefault(); handle.closest(".layout-row").querySelector(".layout-source")?.focus({ preventScroll: true });
         pointer = { id: event.pointerId, block: id, x: event.clientX, y: event.clientY }; cancelLayoutDrag = clearDrag; root.setPointerCapture(event.pointerId);
       });
       const name = el("strong", "layout-name", info.label); name.title = info.label;
-      row.append(handle, name, sourceIndexButton(id));
+      row.append(handle);
+      if (!info.anchor) {
+        const checkbox = el("input", "layout-enabled"); checkbox.type = "checkbox"; checkbox.checked = selected.has(id); checkbox.dataset.skip = "1";
+        checkbox.setAttribute("aria-label", `本任务使用${info.label}`);
+        row.classList.toggle("layout-unselected", !checkbox.checked);
+        checkbox.addEventListener("change", () => {
+          if (busy) return;
+          const next = new Set(selected);
+          if (checkbox.checked) { next.add(id); if (id === "schedule") next.delete("schedule.recent"); else if (id === "schedule.recent") next.delete("schedule"); }
+          else next.delete(id);
+          mark().tasks[layoutTask] = catalog.blocks.filter((item) => !item.anchor && next.has(item.id)).map((item) => item.id);
+          render(); content.querySelector(`[data-block-id="${id}"] .layout-enabled`)?.focus({ preventScroll: true });
+        });
+        row.append(checkbox);
+      }
+      row.append(name, sourceIndexButton(id));
       if (!info.anchor) {
         const destination = field("注入角色", "layout_role", role, { options: ["system", "user"] });
-        const select = destination.querySelector("select"); select.dataset.skip = "1"; select.disabled = !editable; select.setAttribute("aria-label", `${info.label}的注入角色`);
+        const select = destination.querySelector("select"); select.dataset.skip = "1"; select.setAttribute("aria-label", `${info.label}的注入角色`);
         select.addEventListener("change", () => commit(reorderedLayout(current, id, select.value), id));
         const up = button("↑", () => commit(reorderedLayout(current, id, role, visible[index - 1]), id), "secondary layout-up");
         const down = button("↓", () => commit(reorderedLayout(current, id, role, visible[index + 1], true), id), "secondary");
         up.setAttribute("aria-label", `上移${info.label}`); down.setAttribute("aria-label", `下移${info.label}`);
-        up.dataset.disabled = String(!editable || index === 0); down.dataset.disabled = String(!editable || index === visible.length - 1);
+        up.dataset.disabled = String(index === 0); down.dataset.disabled = String(index === visible.length - 1);
         row.append(destination, up, down);
-        handle.addEventListener("dragstart", (event) => { if (busy || !editable) { event.preventDefault(); return; } drag = { id, preview: current }; row.classList.add("is-dragging"); root.classList.add("is-sorting"); event.dataTransfer.setData("text/plain", id); event.dataTransfer.effectAllowed = "move"; });
+        handle.addEventListener("dragstart", (event) => { if (busy) { event.preventDefault(); return; } drag = { id, preview: current }; row.classList.add("is-dragging"); root.classList.add("is-sorting"); event.dataTransfer.setData("text/plain", id); event.dataTransfer.effectAllowed = "move"; });
         handle.addEventListener("dragend", () => { if (drag) { drag = null; animateOrder(current); } root.classList.remove("is-sorting"); row.classList.remove("is-dragging"); });
       }
       row.addEventListener("dragover", (event) => {
-        if (!drag || !editable || busy) return;
+        if (!drag || busy) return;
         event.preventDefault(); event.stopPropagation();
         if (drag.id !== id) { const bounds = row.getBoundingClientRect(); preview(drag.id, role, id, event.clientY > bounds.top + bounds.height / 2); }
       });
       row.addEventListener("drop", (event) => { if (!drag) return; event.preventDefault(); event.stopPropagation(); const pending = drag; commit(pending.preview, pending.id); });
       list.append(row);
     });
-    end.addEventListener("dragover", (event) => { if (drag && editable && !busy) { event.preventDefault(); event.stopPropagation(); preview(drag.id, role); } });
+    end.addEventListener("dragover", (event) => { if (drag && !busy) { event.preventDefault(); event.stopPropagation(); preview(drag.id, role); } });
     end.addEventListener("drop", (event) => { if (!drag) return; event.preventDefault(); event.stopPropagation(); const pending = drag; commit(reorderedLayout(current, pending.id, role), pending.id); });
     list.append(end); lane.append(list); root.append(lane);
   }

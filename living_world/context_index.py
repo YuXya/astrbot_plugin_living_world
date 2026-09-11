@@ -81,6 +81,11 @@ INDEX = {
         LIFE_SETTINGS,
         templates=("life.plan", "life.revise"),
     ),
+    "schedule.recent": entry(
+        "提供当前活动附近最多三条完整安排。",
+        "与完整日程共用本轮场合快照；有当前活动取上一条、当前条、下一条，空档取过去两条和未来一条，不跨日补齐。",
+        SCHEDULE,
+    ),
     "memories": entry(
         "提供相关知识、约定、人物认知及日记简报。",
         "按查询、场合、日期、模块及上下文用量筛选后的记忆；只使用简报，不回退日记全文。",
@@ -104,6 +109,16 @@ INDEX = {
         "控制本轮普通群聊的表达方式与回复长度倾向。",
         "回复与插话中已保存的本轮群聊回复要求；独立于生活资料说明。",
         target("本轮群聊回复要求", "chat", "reply", field="reply.group_prompt"),
+    ),
+    "private_reply": entry(
+        "控制本轮私聊的表达方式与回复长度倾向。",
+        "回复与插话中独立保存的私聊文案；作为临时指令，不进入聊天历史。",
+        target("本轮私聊回复要求", "chat", "reply", field="reply.private_prompt"),
+    ),
+    "proactive_reply": entry(
+        "控制主动聊天及插话正文的表达方式。",
+        "回复与插话中独立保存的主动聊天文案；可在各任务勾选，不影响发送目标。",
+        target("本轮主动聊天要求", "chat", "reply", field="reply.proactive_prompt"),
     ),
     "task.date": entry(
         "限定本次生成或回顾的日期。",

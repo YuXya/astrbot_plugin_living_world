@@ -11,7 +11,7 @@ import weakref
 from .context import group_messages_text, source_item
 from .debug import diagnostic_write, json_value, response_value
 from .instrumentation import ProviderAudit, pause_tools, resume_tools
-from .layout import assemble, block, resolve_layout
+from .layout import assemble, block, resolve_layout, resolve_selection, reply_blocks
 from .context_catalog import BLOCK_NAMES
 from .context_usage import usage_for
 from .social import destination
@@ -428,13 +428,14 @@ class ChatService:
                 status="skipped",
             )
             return
-        layout = resolve_layout(
-            self.runtime.settings, "chat.group" if event.get_group_id() else "chat.private"
-        )
+        task = "chat.group" if event.get_group_id() else "chat.private"
+        layout = resolve_layout(self.runtime.settings, task)
+        selection = resolve_selection(self.runtime.settings, task)
         character = copy.deepcopy(self.runtime.settings["character"])
-        usage = usage_for(self.runtime.settings)
-        recipient = self.runtime.social.recipient_context(event.unified_msg_origin)
-        group_prompt = self.runtime.settings["reply"]["group_prompt"].strip()
+        usage = usage_for(self.runtime.settings, selection)
+        guidance = reply_blocks(self.runtime.settings)
+        thoughts = self.runtime.drives.thoughts() if "task.thoughts" in selection else ""
+        recipient = await self.runtime.social.recipient_context(event.unified_msg_origin)
         original = {
             key: copy.deepcopy(getattr(req, key, None))
             for key in ("contexts", "system_prompt", "prompt", "extra_user_content_parts")
@@ -446,6 +447,8 @@ class ChatService:
                 "qq:" + event.get_sender_id(),
                 event.message_str,
                 usage=usage,
+                selection=selection,
+                reinforce=False,
             )
             speaker = event.get_sender_name() or "当前聊天对象"
             blocks = [
@@ -458,6 +461,8 @@ class ChatService:
                     "本轮 QQ 会话与发送者称呼",
                 ),
                 *context["sources"],
+                *guidance,
+                block("task.thoughts", "当前阶段想法", thoughts),
             ]
             if event.get_group_id():
                 blocks.append(
@@ -477,18 +482,16 @@ class ChatService:
                     for part in (req.extra_user_content_parts or [])
                     if not self._native_group_part(part)
                 ]
-                if group_prompt:
-                    blocks.append(
-                        block(
-                            "group_reply",
-                            "本轮群聊回复要求",
-                            GROUP_REPLY_HEADING + "\n" + group_prompt,
-                            "05 聊天与对象 → 回复与插话（本轮开始时的已保存文案）",
-                            instruction=True,
-                        )
-                    )
+            elif "group_history" in selection:
+                blocks.append(
+                    block("group_history", "近期会话消息", history["text"], history["source"])
+                )
             assembled = assemble(
-                layout, blocks, original["system_prompt"] or "", original["prompt"] or ""
+                layout,
+                blocks,
+                original["system_prompt"] or "",
+                original["prompt"] or "",
+                selection=selection,
             )
             # System additions are attached as no-save parts at agent start, never to the request.
             parts = {}
@@ -508,9 +511,11 @@ class ChatService:
                 layout_segments=assembled["segments"],
                 layout_system_initial=assembled["system_prompt"],
                 layout_snapshot=layout,
+                selection_snapshot=selection,
                 system_restored=False,
             )
             sources = assembled["sources"]
+            self.runtime.memory.reinforce_sources(sources, event.unified_msg_origin)
             if not event.get_group_id():
                 sources.append(
                     source_item(
@@ -532,7 +537,8 @@ class ChatService:
                     "sources": sources,
                     "injected_text": assembled["injected_text"],
                     "context_layout": layout,
-                    "context_layout_version": 2,
+                    "context_layout_version": 3,
+                    "context_selection": selection,
                     "context_usage": usage,
                     "injection_segments": assembled["segments"],
                     "group_history_replaced": bool(event.get_group_id()),

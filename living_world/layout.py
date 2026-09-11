@@ -84,8 +84,28 @@ def expanded(rows):
     return result
 
 
-DEFAULT_LAYOUT = {role: expanded(rows) for role, rows in LEGACY_LAYOUT.items()}
-DEFAULT_SETTINGS = {"version": 2, "default": DEFAULT_LAYOUT, "tasks": {}}
+V2_LAYOUT = {role: expanded(rows) for role, rows in LEGACY_LAYOUT.items()}
+V2_BLOCK_NAMES = {
+    key: ("日程与执行：今日日程" if key == "schedule" else value)
+    for key, value in BLOCK_NAMES.items()
+    if key not in {"schedule.recent", "private_reply", "proactive_reply"}
+}
+
+
+def extend_order(layout):
+    result = copy.deepcopy(layout)
+    for rows in result.values():
+        for predecessor, additions in (
+            ("schedule", ["schedule.recent"]),
+            ("group_reply", ["private_reply", "proactive_reply"]),
+        ):
+            if predecessor in rows:
+                at = rows.index(predecessor) + 1
+                rows[at:at] = additions
+    return result
+
+
+DEFAULT_LAYOUT = extend_order(V2_LAYOUT)
 COMMON = {"profile", "world", "anchor.system", "anchor.user", "time", "state"}
 LIFE_BLOCKS = {
     "activity",
@@ -141,6 +161,32 @@ TASK_BLOCKS = {task: set(expanded(rows)) for task, rows in TASK_BLOCKS.items()}
 for _task in ("social.message", "social.interject"):
     TASK_BLOCKS[_task].add("speaker")
 
+DEFAULT_SELECTIONS = {}
+for _task in TASK_NAMES:
+    _selected = (COMMON | TASK_BLOCKS[_task]) - {"anchor.system", "anchor.user"}
+    if not _task.startswith("chat."):
+        _selected.add("task.other")
+    if _task in {"chat.group", "chat.private", "social.message"}:
+        _selected.discard("schedule")
+        _selected.add("schedule.recent")
+    if _task == "chat.private":
+        _selected.add("private_reply")
+    if _task == "social.message":
+        _selected.add("proactive_reply")
+    if _task in {"journal.write", "notes.write"}:
+        _selected -= set(MEMORY_DEFAULTS) - {
+            "memory.knowledge",
+            "memory.emotional",
+            "memory.profile",
+        }
+    DEFAULT_SELECTIONS[_task] = [key for key in BLOCK_NAMES if key in _selected]
+DEFAULT_SETTINGS = {
+    "version": 3,
+    "order": DEFAULT_LAYOUT,
+    "baseline_order": copy.deepcopy(DEFAULT_LAYOUT),
+    "tasks": DEFAULT_SELECTIONS,
+}
+
 FIELD_BLOCKS = {
     "recipient": "speaker",
     "current_time": "time",
@@ -188,8 +234,14 @@ def task_label(task):
     return f"{task}（{TASK_NAMES[task]}）" if task in TASK_NAMES else task
 
 
-def validate_layout(value, *, legacy=False):
-    names = LEGACY_BLOCK_NAMES if legacy else BLOCK_NAMES
+def names_for(version):
+    return LEGACY_BLOCK_NAMES if version == 1 else V2_BLOCK_NAMES if version == 2 else BLOCK_NAMES
+
+
+def validate_layout(value, *, legacy=False, version=3):
+    if type(version) is not int or version not in {1, 2, 3}:
+        raise ValueError("不支持的上下文布局版本")
+    names = names_for(1 if legacy else version)
     if not isinstance(value, dict) or set(value) != {"system", "user"}:
         raise ValueError("上下文列表只允许 system 和 user 两组")
     seen = set()
@@ -205,46 +257,90 @@ def validate_layout(value, *, legacy=False):
                 raise ValueError("原始消息定位行不能更换角色")
             seen.add(identifier)
     if seen != set(names):
-        raise ValueError("上下文列表缺少资料块；启停请使用各模块设置")
+        raise ValueError("上下文顺序缺少资料块；请选择本任务需要注入的资料")
     return copy.deepcopy(value)
 
 
-def validate_settings(value):
-    if (
-        not isinstance(value, dict)
-        or set(value) != {"version", "default", "tasks"}
-        or type(value["version"]) is not int
-        or value["version"] not in {1, 2}
-        or not isinstance(value["tasks"], dict)
+def validate_selection(value):
+    if not isinstance(value, list) or any(
+        not isinstance(key, str) or key not in BLOCK_NAMES or key.startswith("anchor.")
+        for key in value
     ):
+        raise ValueError("任务勾选包含未知资料或只读定位行")
+    if len(value) != len(set(value)):
+        raise ValueError("任务勾选不能重复")
+    if {"schedule", "schedule.recent"} <= set(value):
+        raise ValueError("同一任务只能选择一种今日日程")
+    return [key for key in BLOCK_NAMES if key in value]
+
+
+def validate_settings(value):
+    if not isinstance(value, dict) or type(value.get("version")) is not int:
         raise ValueError("上下文布局配置格式无效")
-
-    def convert(layout):
-        checked = validate_layout(layout, legacy=value["version"] == 1)
-        return (
-            {role: expanded(rows) for role, rows in checked.items()}
-            if value["version"] == 1
-            else checked
-        )
-
-    tasks = {}
-    for task, layout in value["tasks"].items():
-        if task not in TASK_NAMES:
-            raise ValueError("上下文布局包含未知任务")
-        tasks[task] = None if layout is None else convert(layout)
-    return {"version": 2, "default": convert(value["default"]), "tasks": tasks}
+    version = value["version"]
+    fields = {"version", "default", "tasks"} if version in {1, 2} else set(DEFAULT_SETTINGS)
+    if version not in {1, 2, 3} or set(value) != fields or not isinstance(value["tasks"], dict):
+        raise ValueError("上下文布局配置格式无效")
+    if set(value["tasks"]) - set(TASK_NAMES):
+        raise ValueError("上下文布局包含未知任务")
+    if version in {1, 2}:
+        order = validate_layout(value["default"], version=version)
+        for old in value["tasks"].values():
+            if old is not None:
+                validate_layout(old, version=version)
+        if version == 1:
+            order = {role: expanded(rows) for role, rows in order.items()}
+        order = extend_order(order)
+        return {
+            "version": 3,
+            "order": order,
+            "baseline_order": copy.deepcopy(order),
+            "tasks": copy.deepcopy(DEFAULT_SELECTIONS),
+        }
+    if set(value["tasks"]) != set(TASK_NAMES):
+        raise ValueError("上下文勾选缺少任务")
+    return {
+        "version": 3,
+        "order": validate_layout(value["order"]),
+        "baseline_order": validate_layout(value["baseline_order"]),
+        "tasks": {task: validate_selection(rows) for task, rows in value["tasks"].items()},
+    }
 
 
 def resolve_layout(settings, task):
     config = settings.get("context_layout", DEFAULT_SETTINGS)
-    return copy.deepcopy(config["tasks"].get(task) or config["default"])
+    return copy.deepcopy(config["order"])
+
+
+def resolve_selection(settings, task):
+    config = settings.get("context_layout", DEFAULT_SETTINGS)
+    return copy.deepcopy(config["tasks"].get(task, DEFAULT_SELECTIONS.get(task, [])))
+
+
+def reply_blocks(settings):
+    return [
+        block(
+            identifier,
+            BLOCK_NAMES[identifier],
+            f"【{BLOCK_NAMES[identifier]}】\n{text.strip()}",
+            "05 聊天与对象 → 回复与插话（本轮开始时的已保存文案）",
+            instruction=True,
+        )
+        for identifier, key in (
+            ("group_reply", "group_prompt"),
+            ("private_reply", "private_prompt"),
+            ("proactive_reply", "proactive_prompt"),
+        )
+        if (text := settings.get("reply", {}).get(key, "")).strip()
+    ]
 
 
 def catalog():
     return {
-        "version": 2,
+        "version": 3,
         "menus": menu_catalog(),
         "default": copy.deepcopy(DEFAULT_LAYOUT),
+        "default_selections": copy.deepcopy(DEFAULT_SELECTIONS),
         "blocks": [
             {
                 "id": key,
@@ -272,9 +368,7 @@ def catalog():
             {
                 "id": task,
                 "label": task_label(task),
-                "blocks": [
-                    key for key in BLOCK_NAMES if key in COMMON | TASK_BLOCKS.get(task, set())
-                ],
+                "blocks": list(BLOCK_NAMES),
             }
             for task in TASK_NAMES
         ],
@@ -295,7 +389,7 @@ def text_value(value):
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
 
 
-def collect_task_blocks(context, *, legacy=False):
+def collect_task_blocks(context, *, legacy=False, version=3):
     """Extract structured life snapshots without parsing rendered prompt headings."""
     from .context import context_from_data, is_life_snapshot, memory_blocks
 
@@ -309,13 +403,13 @@ def collect_task_blocks(context, *, legacy=False):
             except ValueError:
                 pass
         if key in {"context", "available_context"} and is_life_snapshot(candidate):
-            blocks.extend(context_from_data(candidate, legacy=legacy)["sources"])
+            blocks.extend(context_from_data(candidate, legacy=legacy, version=version)["sources"])
         elif key in {"context", "available_context"} and isinstance(value, dict):
             for name, item in value.items():
                 visit(item, name)
         elif value is not None:
             identifier = FIELD_BLOCKS.get(key, "task.other")
-            if key in {"经历说明", "context_usage"}:
+            if key in {"经历说明", "context_usage", "context_selection"}:
                 # Attach the provenance explanation to every relevant material block below.
                 return
             if identifier == "memories" and not legacy:
@@ -358,15 +452,18 @@ def collect_task_blocks(context, *, legacy=False):
     return blocks
 
 
-def assemble(layout, blocks, system="", user="", *, legacy=False):
+def assemble(layout, blocks, system="", user="", *, legacy=False, version=3, selection=None):
     """Return ordered sources and four insertion segments around untouched anchors."""
-    layout = validate_layout(layout, legacy=legacy)
-    names = LEGACY_BLOCK_NAMES if legacy else BLOCK_NAMES
+    layout = validate_layout(layout, legacy=legacy, version=version)
+    names = names_for(1 if legacy else version)
+    selected = set(validate_selection(selection)) if selection is not None else None
     grouped = {}
     for item in blocks:
         identifier = item.get("block_id", "task.other")
         if identifier not in names or identifier.startswith("anchor."):
             raise ValueError("请求包含无效上下文资料块")
+        if selected is not None and identifier not in selected:
+            continue
         if item.get("content") is None or (
             isinstance(item["content"], str) and not item["content"].strip()
         ):
@@ -383,6 +480,9 @@ def assemble(layout, blocks, system="", user="", *, legacy=False):
                 )
                 merged["notice"] = "\n".join(
                     dict.fromkeys(item["notice"] for item in items if item.get("notice"))
+                )
+                merged["memory_ids"] = list(
+                    dict.fromkeys(key for item in items for key in item.get("memory_ids", []))
                 )
             grouped[identifier] = [merged]
     sources, segments = [], {}
@@ -449,6 +549,7 @@ def assemble(layout, blocks, system="", user="", *, legacy=False):
         "segments": segments,
         "sources": sources,
         "context_layout": layout,
+        **({"context_selection": list(selection)} if selection is not None else {}),
         "injected_text": "\n\n".join(
             segments[role][side]
             for role in ("system", "user")

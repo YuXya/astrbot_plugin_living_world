@@ -11,6 +11,8 @@ from datetime import UTC, date, datetime
 from .life import character_timezone, scope_allowed
 from .context import brief_text
 from .context_usage import brief_limit, usage_for
+from .context_catalog import memory_category
+from .layout import resolve_selection
 from .prompts import PROMPTS
 
 logger = logging.getLogger(__name__)
@@ -175,25 +177,32 @@ class JournalService:
                 return {"status": "skipped", "reason": "no_events"}
             events = events[:80]
             memories = []
-            usage = usage_for(self.runtime.settings)
+            usage = usage_for(
+                self.runtime.settings, resolve_selection(self.runtime.settings, kind + ".write")
+            )
             now = datetime.now(character_timezone(self.runtime.settings))
             if self.runtime.enabled("memory"):
-                selected_usage = usage_for(self.runtime.settings)
-                for category in selected_usage["limits"]:
-                    if category not in {"memory.knowledge", "memory.emotional", "memory.profile"}:
-                        selected_usage["limits"][category] = 0
+                selected_usage = usage
                 memories = [
                     entry
                     for entry in self.runtime.memory.recall(
                         query="",
                         scope=scope,
-                        include_journals=False,
+                        reinforce=False,
                         usage=selected_usage,
                         context_now=now,
+                        **(
+                            {
+                                "exclude_keys": self.runtime.context_experience_keys(
+                                    scope, now, usage
+                                )
+                            }
+                            if hasattr(self.runtime, "context_experience_keys")
+                            else {}
+                        ),
                     )
                     if entry.get("scope", "global") in {"global", scope}
-                    and (entry.get("profile") or entry.get("kind") in {"knowledge", "emotional"})
-                    and not str(entry.get("source", "")).startswith("journal")
+                    and usage["limits"].get(memory_category(entry), 0) > 0
                 ]
             data = {
                 "date": day,

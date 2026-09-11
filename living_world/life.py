@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .prompts import PROMPTS
 from .context_usage import usage_for
 from .life_actions import ActionLedger
+from .layout import resolve_selection
 from .context import (
     FICTION_NOTICE,
     activity_material,
@@ -174,10 +175,13 @@ class LifeService(ActionLedger):
         day = str(self._now().date())
         fields = (
             "id",
+            "date",
             "start",
             "end",
             "title",
+            "content",
             "description",
+            "incident",
             "location",
             "sleep_state",
             "status",
@@ -279,10 +283,18 @@ class LifeService(ActionLedger):
             }
         return actions
 
-    def _memories(self, scope: str, *, reinforce=False, now=None) -> list[dict]:
+    def _memories(
+        self, scope: str, *, reinforce=False, now=None, task=None, exclude_keys=None
+    ) -> list[dict]:
         if not self.runtime.enabled("memory"):
             return []
         now = self._now(now)
+        selection = resolve_selection(self.runtime.settings, task) if task else None
+        usage = usage_for(self.runtime.settings, selection)
+        if task and hasattr(self.runtime, "context_experience_keys"):
+            exclude_keys = set(exclude_keys or ()) | self.runtime.context_experience_keys(
+                scope, now, usage
+            )
         records = prepare_life_records(
             [
                 e
@@ -291,6 +303,8 @@ class LifeService(ActionLedger):
                     scope=scope,
                     reinforce=reinforce,
                     context_now=now,
+                    usage=usage,
+                    **({"exclude_keys": exclude_keys} if exclude_keys is not None else {}),
                 )
                 if e.get("scope", "global") in {"global", scope}
             ],
@@ -337,13 +351,15 @@ class LifeService(ActionLedger):
 
     def plan_request(self, now: datetime | None = None, *, formal=False) -> dict:
         now = self._now(now)
+        selection = resolve_selection(self.runtime.settings, "life.plan")
         marker = self.runtime.store.get("life_days", f"{now.date()}:global", {}) or {}
         context = {
             "date": str(now.date()),
-            "context_usage": usage_for(self.runtime.settings),
+            "context_usage": usage_for(self.runtime.settings, selection),
+            "context_selection": selection,
             "now": now.isoformat(),
             "parameters": (marker.get("parameters") if formal else None) or self.parameters(),
-            "memories": self._memories("global", reinforce=False, now=now),
+            "memories": self._memories("global", reinforce=False, now=now, task="life.plan"),
             "经历说明": FICTION_NOTICE,
         }
         if self.runtime.enabled("state"):
@@ -682,12 +698,14 @@ class LifeService(ActionLedger):
             }
             if not editable:
                 return result
+            selection = resolve_selection(self.runtime.settings, "life.revise")
             context = {
                 "reason": reason,
-                "context_usage": usage_for(self.runtime.settings),
+                "context_usage": usage_for(self.runtime.settings, selection),
+                "context_selection": selection,
                 "now": now.isoformat(),
                 "scope": scope,
-                "memories": self._memories(scope, now=now),
+                "memories": self._memories(scope, now=now, task="life.revise"),
                 "经历说明": FICTION_NOTICE,
                 "editable": [activity_material(self._view(a, scope)) for a in editable.values()],
                 "parameters": (
@@ -751,6 +769,7 @@ class LifeService(ActionLedger):
     def detail_request(self, activity, instruction="", now=None):
         """Build the same read-only, scope-filtered material for production and dry runs."""
         now, scope = self._now(now), activity["scope"]
+        selection = resolve_selection(self.runtime.settings, "life.detail")
         day = date.fromisoformat(activity["date"])
         names = {"news": "新闻", "search": "搜索", "social": "主动聊天（轮）"}
         schedule = [
@@ -770,9 +789,14 @@ class LifeService(ActionLedger):
             ],
             now,
         )[:12]
-        event_rows = prepare_life_records(event_rows, now, seen=seen)
+        event_rows = prepare_life_records(
+            event_rows, now, seen=seen if "task.actions" in selection else None
+        )
         memory_rows = prepare_life_records(
-            self._memories(scope, now=now), now, memory=True, seen=seen
+            self._memories(scope, now=now, task="life.detail", exclude_keys=seen),
+            now,
+            memory=True,
+            seen=seen,
         )
         events = [record_text(row, now) for row in event_rows]
         outcome_names = {"news": "新闻", "search": "搜索", "social": "主动聊天"}
@@ -789,7 +813,8 @@ class LifeService(ActionLedger):
         social = self.runtime.settings.get("social", {})
         context = {
             "当前时间": now.isoformat(),
-            "context_usage": usage_for(self.runtime.settings),
+            "context_usage": usage_for(self.runtime.settings, selection),
+            "context_selection": selection,
             "待细化活动": activity_text(self._view(activity, scope)),
             "活动时间范围": f"{activity['start']} 至 {activity['end']}，结束时间不包含在执行范围内。",
             "当天其他安排": "\n".join(schedule) or "没有其他安排。",

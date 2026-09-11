@@ -143,9 +143,9 @@ class SourceService:
             module, template + "\n" + json.dumps(context, ensure_ascii=False), scope=scope
         )
 
-    async def _context(self, scope, query):
+    async def _context(self, scope, query, task):
         get_context = getattr(self.runtime, "context_text", None)
-        result = get_context(scope, query=query) if get_context else ""
+        result = get_context(scope, query=query, task=task, reinforce=False) if get_context else ""
         return await result if inspect.isawaitable(result) else result
 
     async def _allowed(self, module, scope):
@@ -307,7 +307,7 @@ class SourceService:
                 PROMPTS["news.select"],
                 {
                     "activity": query,
-                    "context": await self._context(scope, query),
+                    "context": await self._context(scope, query, "news.select"),
                     "candidates": articles,
                 },
                 scope,
@@ -366,7 +366,10 @@ class SourceService:
                 "search.topic",
                 "search",
                 PROMPTS["search.topic"],
-                {"activity_or_question": query, "context": await self._context(scope, query)},
+                {
+                    "activity_or_question": query,
+                    "context": await self._context(scope, query, "search.topic"),
+                },
                 scope,
             )
         )
@@ -668,7 +671,9 @@ class SourceService:
                     "external_data": raw,
                     "sources": data["sources"],
                     "selection_reason": data.get("selection_reason", ""),
-                    "context": await self._context(scope, data.get("title", "")),
+                    "context": await self._context(
+                        scope, data.get("title", ""), f"{module}.reflect"
+                    ),
                 },
                 scope,
             )

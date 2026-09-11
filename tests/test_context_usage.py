@@ -59,12 +59,13 @@ def test_old_roles_and_positions_expand_without_resetting_other_blocks():
     old["user"].remove("news")
     old["system"].append("news")
     value = validate_settings({"version": 1, "default": old, "tasks": {"social.message": old}})
-    assert value["version"] == 2
-    assert value["default"]["system"][:7] == list(MEMORY_DEFAULTS)
-    assert value["default"]["system"][-1] == "observations"
-    assert value["tasks"]["social.message"] == value["default"]
+    assert value["version"] == 3
+    assert value["order"]["system"][:7] == list(MEMORY_DEFAULTS)
+    assert value["order"]["system"][-1] == "observations"
+    assert value["baseline_order"] == value["order"]
+    assert "schedule.recent" in value["tasks"]["social.message"]
     assert not {"news", "search", "bilibili", "daily_digest", "memories"} & set(
-        value["default"]["user"]
+        value["order"]["user"]
     )
 
 

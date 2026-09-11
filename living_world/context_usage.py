@@ -66,8 +66,13 @@ def legacy_usage(settings):
     return result
 
 
-def usage_for(settings):
-    return copy.deepcopy(settings.get("context_usage") or legacy_usage(settings))
+def usage_for(settings, selection=None):
+    result = copy.deepcopy(settings.get("context_usage") or legacy_usage(settings))
+    if selection is not None:
+        for key in result["limits"]:
+            if key not in selection:
+                result["limits"][key] = 0
+    return result
 
 
 def brief_limit(settings, kind):
@@ -75,7 +80,7 @@ def brief_limit(settings, kind):
 
 
 def archive_conversion(store, settings):
-    if "context_usage" not in settings or settings.get("context_layout", {}).get("version", 1) == 1:
+    if "context_usage" not in settings or settings.get("context_layout", {}).get("version", 1) < 3:
         import hashlib
         import json
 

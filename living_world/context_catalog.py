@@ -65,7 +65,8 @@ OWNERS = {
     "time": ("character", "profile", "当前时间"),
     "state": ("character", "state", "心情、地点与作息"),
     "activity": ("schedule", "timeline", "当前活动"),
-    "schedule": ("schedule", "timeline", "今日日程"),
+    "schedule": ("schedule", "timeline", "今日日程（完整）"),
+    "schedule.recent": ("schedule", "timeline", "今日日程（简版）"),
     "memory.knowledge": ("memory", "records", "知识记忆"),
     "memory.event": ("memory", "records", "事件与约定记忆"),
     "memory.skill": ("memory", "records", "技能记忆"),
@@ -96,6 +97,8 @@ OWNERS = {
     "task.material": ("context", "trial", "本次任务材料"),
     "task.other": ("context", "trial", "其他任务资料"),
     "group_reply": ("chat", "reply", "本轮群聊回复要求"),
+    "private_reply": ("chat", "reply", "本轮私聊回复要求"),
+    "proactive_reply": ("chat", "reply", "本轮主动聊天要求"),
 }
 BLOCK_NAMES = {
     "anchor.system": "宿主：原有系统提示词与人格",

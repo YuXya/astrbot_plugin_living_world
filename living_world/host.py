@@ -18,6 +18,25 @@ class AstrBotHost:
         platform_id = scope.split(":", 1)[0]
         return self.context.get_platform_inst(platform_id)
 
+    async def target_name(self, scope):
+        """Read the destination's own name from its OneBot connection."""
+        from .social import destination
+
+        target = destination(scope)
+        platform = self.platform(target)
+        if platform is None or platform.meta().name != "aiocqhttp":
+            return ""
+        client = platform.get_client()
+        target_id = int(target.split(":", 2)[2])
+        if ":GroupMessage:" in target:
+            result = await client.call_action("get_group_info", group_id=target_id)
+            field = "group_name"
+        else:
+            result = await client.call_action("get_stranger_info", user_id=target_id)
+            field = "nickname"
+        name = result.get(field) if isinstance(result, dict) else None
+        return name.strip() if isinstance(name, str) else ""
+
     async def session_persona(self, scope):
         result = await self.resolve_session(scope)
         return result["persona_id"] if result["reason_code"] == "resolved" else ""

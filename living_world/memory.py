@@ -18,6 +18,7 @@ from .prompts import PROMPTS
 from .context import brief_text, is_journal_memory, prepare_life_record, record_keys
 from .context_catalog import MEMORY_DEFAULTS, memory_category
 from .context_usage import usage_for
+from .layout import resolve_selection
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,19 @@ class MemoryService:
         record["access_count"] = int(record.get("access_count", 0)) + 1
         self.runtime.store.put(self.namespace, record["id"], record)
         return record
+
+    def reinforce_sources(self, sources, scope):
+        """Reinforce only the adopted rows, once per assembled request."""
+        if not self.runtime.enabled("memory"):
+            return
+        identifiers = {
+            identifier for source in sources for identifier in source.get("memory_ids", [])
+        }
+        now = _now()
+        for identifier in identifiers:
+            row = self.runtime.store.get(self.namespace, identifier)
+            if row and row.get("active", True) and row.get("scope") in {"global", scope}:
+                self._reinforce(row, now)
 
     def remember(
         self,
@@ -516,12 +530,23 @@ class MemoryService:
         if not self.runtime.enabled("memory") or not isinstance(text, str) or not text.strip():
             return []
         original = text[:16000]
-        usage = usage_for(self.runtime.settings)
+        usage = usage_for(
+            self.runtime.settings, resolve_selection(self.runtime.settings, "memory.reflect")
+        )
         now = _now().astimezone(
             ZoneInfo(self.runtime.settings.get("character", {}).get("timezone", "Asia/Shanghai"))
         )
         known = self.recall(
-            scope=scope, person_id=person_id, reinforce=False, usage=usage, context_now=now
+            scope=scope,
+            person_id=person_id,
+            reinforce=False,
+            usage=usage,
+            context_now=now,
+            **(
+                {"exclude_keys": self.runtime.context_experience_keys(scope, now, usage)}
+                if hasattr(self.runtime, "context_experience_keys")
+                else {}
+            ),
         )
         template = PROMPTS["memory.reflect"]
         data = {

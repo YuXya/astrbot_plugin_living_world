@@ -9,6 +9,7 @@ import math
 import random
 import re
 from datetime import UTC, datetime, timedelta, timezone
+from time import monotonic
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -41,6 +42,7 @@ class SocialService:
     def __init__(self, runtime):
         self.runtime = runtime
         self._lock = asyncio.Lock()
+        self._target_names = {}
         self.rng = random.Random()
 
     def _now(self) -> datetime:
@@ -89,28 +91,43 @@ class SocialService:
                 )
         return result
 
-    def recipient_context(self, scope, display_name=None):
+    async def _target_name(self, target):
+        """Cache successful and failed lookups without delaying chat indefinitely."""
+        cached = self._target_names.get(target)
+        if cached and cached[0] > monotonic():
+            return cached[1]
+        name = ""
+        try:
+            lookup = getattr(self.runtime.host, "target_name", None)
+            if lookup is not None:
+                result = await asyncio.wait_for(lookup(target), timeout=2)
+                name = result.strip() if isinstance(result, str) else ""
+        except Exception:  # noqa: BLE001 - Optional name lookup must never prevent chatting.
+            pass
+        self._target_names[target] = (monotonic() + (3600 if name else 60), name)
+        return name
+
+    async def recipient_context(self, scope, display_name=None):
         """Describe the actual destination without exposing transport identifiers."""
         if scope == "global":
             return "尚未选择聊天对象。请在模型试跑中选择具体群聊或私聊场合。"
         target = destination(scope)
         if display_name is None:
-            display_name = next(
-                (
-                    item.get("display_name", "")
-                    for item in self.runtime.settings.get("sessions", [])
-                    if destination(item.get("umo", "")) == target
-                ),
-                "",
-            )
-        number = target.split(":", 2)[2]
+            for item in self.runtime.settings.get("sessions", []):
+                try:
+                    if destination(item.get("umo", "")) != target:
+                        continue
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                display_name = item.get("display_name", "")
+                if isinstance(display_name, str) and display_name.strip():
+                    break
+        name = display_name.strip() if isinstance(display_name, str) else ""
+        name = name or await self._target_name(target) or "未设置名字"
         if ":GroupMessage:" in target:
-            text = f"会话类型：QQ群聊\n目标群号：{number}\n接收范围：整个群。这条消息发到群里，不是发给最近发言成员的私聊。"
+            return f"会话类型：QQ群聊\n群聊名字：{name}\n接收范围：整个群。这条消息发到群里，不是发给最近发言成员的私聊。"
         else:
-            text = f"会话类型：一对一私聊\n目标QQ号：{number}\n接收范围：这位私聊对象。"
-        if display_name:
-            text += "\n对话称呼：" + str(display_name)
-        return text
+            return f"会话类型：一对一私聊\n目标名字：{name}\n接收范围：这位私聊对象。"
 
     def _quiet(self, now: datetime) -> bool:
         config = self.runtime.settings.get("social", {})
@@ -233,7 +250,7 @@ class SocialService:
         before_start=None,
     ) -> dict:
         scope = target["scope"]
-        recipient = self.recipient_context(scope, target.get("display_name", ""))
+        recipient = await self.recipient_context(scope, target.get("display_name", ""))
         key = _digest(f"{action_id}\0{target['destination']}")
         previous = self.runtime.store.get("deliveries", key)
         if previous:
@@ -266,7 +283,11 @@ class SocialService:
                 else await self.runtime.host.history(scope)
             )
             context = await self.runtime.context_text(
-                scope, person_id=person_id or self._person_id(scope), query=reason
+                scope,
+                person_id=person_id or self._person_id(scope),
+                query=reason,
+                task="social.message",
+                reinforce=False,
             )
             blocked = await self._control_reason(scope, interjection)
             if blocked:
@@ -484,13 +505,19 @@ class SocialService:
                     if hasattr(self.runtime, "chat")
                     else await self.runtime.host.history(scope)
                 )
-                context = await self.runtime.context_text(scope, person_id=person_id, query=message)
+                context = await self.runtime.context_text(
+                    scope,
+                    person_id=person_id,
+                    query=message,
+                    task="social.interject",
+                    reinforce=False,
+                )
                 blocked = await self._control_reason(scope, True)
                 if blocked:
                     return self._result(reason=blocked)
                 template = PROMPTS["social.interject"]
                 data = {
-                    "recipient": self.recipient_context(scope),
+                    "recipient": await self.recipient_context(scope),
                     "message": str(message)[-4000:],
                     "recent_messages": str(history)[-12000:],
                     "context": context,

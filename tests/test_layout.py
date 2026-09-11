@@ -20,6 +20,7 @@ from living_world.layout import (
     catalog,
     collect_task_blocks,
     resolve_layout,
+    resolve_selection,
     validate_layout,
 )
 from living_world.prompts import PROMPTS
@@ -69,20 +70,22 @@ def test_invalid_layout_rejected(invalid):
         validate_layout(value)
 
 
-async def test_layout_inheritance_persistence_restore_and_failed_save(world, tmp_path):
+async def test_shared_layout_selection_persistence_restore_and_failed_save(world, tmp_path):
     runtime, _, _ = world
     general = moved(DEFAULT_LAYOUT, "observations", "system", "anchor.system")
-    special = moved(general, "memory.event", "user", "anchor.user")
+    special = ["time", "speaker", "private_reply"]
     version = runtime.config_version
     await runtime.update_settings(
-        {"context_layout": {"default": general, "tasks": {"social.message": special}}}
+        {"context_layout": {"order": general, "tasks": {"social.message": special}}}
     )
     assert runtime.config_version == version
-    assert resolve_layout(runtime.settings, "social.message") == special
+    assert resolve_layout(runtime.settings, "social.message") == general
+    assert set(resolve_selection(runtime.settings, "social.message")) == set(special)
     assert resolve_layout(runtime.settings, "chat.group") == general
     changed = moved(general, "observations", "user")
-    await runtime.update_settings({"context_layout": {"default": changed}})
-    assert resolve_layout(runtime.settings, "social.message") == special
+    await runtime.update_settings({"context_layout": {"order": changed}})
+    assert resolve_layout(runtime.settings, "social.message") == changed
+    assert set(resolve_selection(runtime.settings, "social.message")) == set(special)
     previous = copy.deepcopy(runtime.settings)
     with pytest.raises(ValueError):
         await runtime.update_settings({"context_layout": {"tasks": {"unknown": special}}})
@@ -91,11 +94,12 @@ async def test_layout_inheritance_persistence_restore_and_failed_save(world, tmp
     await runtime.stop()
     reopened = Runtime(tmp_path / "world.sqlite", runtime.host)
     try:
-        assert resolve_layout(reopened.settings, "social.message") == special
-        await reopened.update_settings({"context_layout": {"tasks": {"social.message": None}}})
+        assert resolve_layout(reopened.settings, "social.message") == changed
+        await reopened.update_settings({"context_layout": {"tasks": {"social.message": []}}})
         assert resolve_layout(reopened.settings, "social.message") == changed
         await reopened.restore(backup)
-        assert resolve_layout(reopened.settings, "social.message") == special
+        assert resolve_layout(reopened.settings, "social.message") == changed
+        assert set(resolve_selection(reopened.settings, "social.message")) == set(special)
         assert not reopened.enabled("debug")
     finally:
         await reopened.stop()
@@ -125,7 +129,7 @@ async def test_chat_moves_blocks_across_anchors_without_saving_dynamic_system(wo
     layout = moved(layout, "group_reply", "system")
     await runtime.update_settings(
         {
-            "context_layout": {"default": layout},
+            "context_layout": {"order": layout},
             "modules": {"news": True},
             "reply": {"group_prompt": "SYSTEM_GROUP_RULE"},
         }
@@ -184,7 +188,7 @@ async def test_concurrent_turns_keep_layout_and_material_snapshot(world):
     first = await runner_for(world, Event(PRIVATE, "first"))
     layout = moved(DEFAULT_LAYOUT, "profile", "user", "anchor.user")
     await runtime.update_settings(
-        {"context_layout": {"default": layout}, "context_usage": {"limits": {"memory.event": 0}}}
+        {"context_layout": {"order": layout}, "context_usage": {"limits": {"memory.event": 0}}}
     )
     second = await runner_for(world, Event(PRIVATE, "second"))
     await asyncio.gather(consume(first), consume(second))
@@ -210,7 +214,14 @@ async def test_all_background_tasks_share_layout_and_frozen_trial_composition(wo
     layout = moved(DEFAULT_LAYOUT, "memory.event", "system", "anchor.system")
     layout = moved(layout, "task.document", "system")
     layout = moved(layout, "task.material", "user", "anchor.user")
-    await runtime.update_settings({"context_layout": {"default": layout}})
+    await runtime.update_settings(
+        {
+            "context_layout": {
+                "order": layout,
+                "tasks": {task: ["memory.event", "task.material", "task.document"]},
+            }
+        }
+    )
     data = {
         "memories": [{"kind": "event", "text": "MEMORY_INPUT"}],
         "material": "TASK_INPUT",
@@ -222,7 +233,7 @@ async def test_all_background_tasks_share_layout_and_frozen_trial_composition(wo
     )
     assert "FULL_DOCUMENT" in request["system_prompt"] and "FULL_DOCUMENT" not in request["prompt"]
     assert request["prompt"].index("TASK_INPUT") < request["prompt"].index("TASK_TEMPLATE")
-    await runtime.update_settings({"context_layout": {"default": DEFAULT_LAYOUT}})
+    await runtime.update_settings({"context_layout": {"order": DEFAULT_LAYOUT}})
     before = runtime.store.export()
     trial = await runtime.prepare_trial_request(request)
     assert (
@@ -266,7 +277,7 @@ async def test_late_host_changes_do_not_duplicate_or_archive_temporary_system(wo
     layout = moved(DEFAULT_LAYOUT, "group_reply", "system", "anchor.system")
     await runtime.update_settings(
         {
-            "context_layout": {"default": layout},
+            "context_layout": {"order": layout},
             "character": {"profile": "PRIVATE_PROFILE"},
             "reply": {"group_prompt": "PRIVATE_GUIDANCE"},
         }
@@ -316,7 +327,7 @@ async def test_disabled_modules_and_empty_blocks_remain_absent_after_role_moves(
     layout = moved(layout, "memory.event", "system")
     await runtime.update_settings(
         {
-            "context_layout": {"default": layout},
+            "context_layout": {"order": layout},
             "modules": {"news": False, "memory": False, "life": False, "state": False},
             "character": {"profile": "", "world": ""},
         }
@@ -335,11 +346,11 @@ async def test_disabled_modules_and_empty_blocks_remain_absent_after_role_moves(
 async def test_composed_trial_calls_only_model_with_frozen_layout(world):
     runtime, manager, provider = world
     layout = moved(DEFAULT_LAYOUT, "task.document", "system", "anchor.system")
-    await runtime.update_settings({"context_layout": {"default": layout}})
+    await runtime.update_settings({"context_layout": {"order": layout}})
     draft = await runtime.prepare_request(
         "journal.brief", "journal", "MAKE_BRIEF", {"document": "DOCUMENT_SENTINEL"}, PRIVATE
     )
-    await runtime.update_settings({"context_layout": {"default": DEFAULT_LAYOUT}})
+    await runtime.update_settings({"context_layout": {"order": DEFAULT_LAYOUT}})
 
     async def generate(chat_provider_id, **kwargs):
         return await provider.text_chat(**kwargs)
@@ -363,7 +374,7 @@ async def test_unload_never_leaves_temporary_system_in_history(world, begin, sco
     runtime, _, _ = world
     layout = moved(DEFAULT_LAYOUT, "speaker", "system")
     await runtime.update_settings(
-        {"context_layout": {"default": layout}, "character": {"profile": "PRIVATE_PROFILE"}}
+        {"context_layout": {"order": layout}, "character": {"profile": "PRIVATE_PROFILE"}}
     )
     event = Event(scope)
     req = ProviderRequest(
