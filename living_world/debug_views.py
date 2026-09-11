@@ -55,6 +55,10 @@ def build_views(records, life_days=()):
             "adopted": [],
             "sends": [],
             "record_ids": [r["id"] for r in rows],
+            "memory_processing": [
+                {**r["memory_processing"], "model_status": r.get("status"), "record_id": r["id"]}
+                for r in rows if r.get("memory_processing")
+            ],
         }
         for row in rows:
             request, task = row.get("request") or {}, row.get("task", "")

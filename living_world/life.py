@@ -18,7 +18,6 @@ from .context_usage import usage_for
 from .life_actions import ActionLedger
 from .layout import resolve_selection
 from .context import (
-    FICTION_NOTICE,
     activity_material,
     activity_text,
     clean_life_text,
@@ -194,7 +193,7 @@ class LifeService(ActionLedger):
         return {
             "date": day,
             "status": "available" if rows else "missing",
-            "notice": "这是角色今天的生活日程；计划不代表已发生。"
+            "notice": ""
             if rows
             else "今天尚未生成可用日程，不代表角色没有日程能力。",
             "activities": [{key: row[key] for key in fields if key in row} for row in rows],
@@ -349,7 +348,6 @@ class LifeService(ActionLedger):
             "context_selection": selection,
             "now": now.isoformat(),
             "parameters": (marker.get("parameters") if formal else None) or self.parameters(),
-            "经历说明": FICTION_NOTICE,
         }
         if self.runtime.enabled("state"):
             context["state"] = self.state()
@@ -694,7 +692,6 @@ class LifeService(ActionLedger):
                 "context_selection": selection,
                 "now": now.isoformat(),
                 "scope": scope,
-                "经历说明": FICTION_NOTICE,
                 "editable": [activity_material(self._view(a, scope)) for a in editable.values()],
                 "parameters": (
                     self.runtime.store.get("life_days", f"{now.date()}:global", {}) or {}
@@ -808,7 +805,6 @@ class LifeService(ActionLedger):
             + f"。聊天免打扰 {social.get('quiet_start', '23:00')}—{social.get('quiet_end', '08:00')}；"
             "对象在实际执行时由白名单抽取，并再次检查冷却及发送限制。",
         }
-        context["经历说明"] = FICTION_NOTICE
         if self.runtime.enabled("state"):
             state = self.state()
             context["角色状态与作息"] = f"心情：{state['mood']}；作息：{state['routine']}"

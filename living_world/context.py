@@ -37,7 +37,6 @@ BASIS = {
     "video_search_results": "视频搜索结果，不代表观看",
     "video_analysis": "依赖插件本次视频分析结果",
 }
-FICTION_NOTICE = "角色经历属于角色虚构日常，不是真实网络事实；计划不代表已经发生。"
 _URL = re.compile(r"(?:https?://|www\.)[^\s<>\"'`【】\u3000-\u303f\uff00-\uffef]+", re.I)
 _LINK_START = re.compile(r"!?\[([^\]\n]*)\]\(")
 _PREFIX = re.compile(
@@ -368,8 +367,6 @@ def unified_memory_text(row, now):
     if row.get("stable"):
         label = "稳定画像，" + label
     parts = [f"{heading + '：' if heading else ''}{label}：{judgment}"]
-    if row.get("source") == "fiction" or row.get("fiction"):
-        parts.append("角色虚构经历，不是真实网络事实")
     if basis := BASIS.get(row.get("reading_basis")):
         parts.append(basis)
     if reasoning := clean_life_text(row.get("reasoning")):
@@ -454,8 +451,6 @@ def memory_blocks(
         )
         if usage and identifier == "memory.recent":
             item["limit"] = usage.get("limits", {}).get(identifier, 5)
-        if any(row.get("source") == "fiction" or row.get("fiction") for row in rows):
-            item["notice"] = FICTION_NOTICE
         return [item]
     grouped = {identifier: [] for identifier in MEMORY_DEFAULTS}
     for row in records:
@@ -490,8 +485,6 @@ def memory_blocks(
         item["memory_ids"] = [str(row["id"]) for row in rows if row.get("id")]
         if usage:
             item["limit"] = usage["limits"][identifier]
-        if any(is_role_experience(row) or is_fiction_journal(row) for row in rows):
-            item["notice"] = FICTION_NOTICE
         blocks.append(item)
     return blocks
 
@@ -655,11 +648,6 @@ def context_from_data(data, *, legacy=False, version=4):
             sources[-1]["record_keys"] = [
                 list(key) for row in experiences for key in record_keys(row, now)
             ]
-    for identifier, rows in (("memories", memories), ("experiences", experiences)):
-        if any(is_role_experience(row) or is_fiction_journal(row) for row in rows):
-            for item in sources:
-                if item["block_id"] == identifier:
-                    item["notice"] = FICTION_NOTICE
     for row in data.get("observations", []):
         module = row.get("module")
         identifier = (

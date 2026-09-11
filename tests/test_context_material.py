@@ -90,7 +90,7 @@ def test_today_events_deduplicate_memory_lineage_without_rewriting_records():
     before = copy.deepcopy(data)
     bundle = historical_context(data)
     assert bundle["text"].count("角色经历（18：00）：自由活动与准备休息。") == 1
-    assert "角色虚构日常" in bundle["text"]
+    assert "角色虚构日常" not in bundle["text"]
     assert "昨晚散步" not in bundle["text"] and "日期未知" not in bundle["text"]
     assert "角色虚构经历：" not in bundle["text"]
     assert data == before

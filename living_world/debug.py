@@ -136,6 +136,7 @@ class DebugService:
             "status",
             "capture_version",
             "error",
+            "memory_processing",
         )
         project = getattr(self.runtime.store, "project", None)
         if project is not None:
@@ -194,6 +195,8 @@ class DebugService:
             "turn_id": turn_id,
             "parent_id": parent_id,
         }
+        if task == "memory.reflect" and request.get("memory_processing"):
+            record["memory_processing"] = {**request["memory_processing"], "status": "processing"}
         record = compact_record(record)
         self.runtime.store.put("debug_records", record["id"], record)
         self.trim()
@@ -216,6 +219,20 @@ class DebugService:
         }
         self.runtime.store.put("debug_records", record["id"], record)
         self.trim()
+
+    @diagnostic_write
+    def memory_result(self, batch_id, attempt, result):
+        """Attach the business outcome without changing model/HTTP success or raw bodies."""
+        if not self.runtime.enabled("debug"):
+            return
+        for meta in self.metadata():
+            processing = meta.get("memory_processing") or {}
+            if processing.get("batch_id") != batch_id or processing.get("attempt") != attempt:
+                continue
+            row = self.runtime.store.get("debug_records", meta["id"])
+            if row:
+                row["memory_processing"] = {**processing, **result, "batch_id": batch_id}
+                self.runtime.store.put("debug_records", row["id"], row)
 
     def trim(self):
         limit = int(self.runtime.settings["debug"]["retain_per_category"])

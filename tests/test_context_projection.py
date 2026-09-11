@@ -38,7 +38,7 @@ def material():
         },
         "schedule": {
             "status": "available",
-            "notice": "计划不代表已经发生",
+            "notice": "",
             "activities": [activity],
         },
         "activity": activity,

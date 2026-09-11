@@ -1,5 +1,6 @@
 import { PAGES, resolveRoute, routeHash, reorderedLayout } from "./navigation.js";
 import { createMemoryBrowser } from "./memory-browser.js";
+import { createMemoryProgress } from "./memory-progress.js";
 const bridge = window.AstrBotPluginPage;
 const $ = (selector) => document.querySelector(selector);
 const content = $("#content");
@@ -949,14 +950,12 @@ function renderContextUsage() {
   }, "secondary"));
   form.addEventListener("input", updateTotal); updateTotal(); return form;
 }
-function memoryProgress() {
-  const status = snapshot.memory_status || {};
-  const queue = status.queue || {};
-  const root = el("div", "memory-progress stack");
-  root.append(el("p", "hint", `材料提炼：待处理 ${queue.pending || 0}，失败 ${queue.failed || 0}${queue.processing ? " · 正在处理" : ""}。只在所属场合内整理。`));
-  root.append(button("处理待提炼材料", () => action("memory.process"), "secondary"), el("p", "hint", "处理材料可能调用记忆模型；不执行搜索或发送 QQ。原始经历、见闻和日记继续保留。"));
-  return root;
-}
+const extractionProgress = createMemoryProgress({
+  el, append, button, field, scopeLabel, notice,
+  settings: () => snapshot.settings,
+  api: (action, data = {}) => bridge.apiPost("action", { action, ...data }),
+});
+function memoryProgress() { return extractionProgress.render(); }
 function renderMemorySettings() {
   const data = snapshot.settings.memory || {};
   const form = settingsForm("保存提炼与遗忘设置", "保存本面板参数，下一次处理采用新设置。模型在系统与数据 → 模型分配设置。");
@@ -979,7 +978,7 @@ function renderMemorySettings() {
     const { chat_idle_minutes, low_decay_days, ...values } = memory;
     return saveSettings({ memory: { ...values, chat_idle_seconds: Math.round(chat_idle_minutes * 60), low_decay_seconds: Math.round(low_decay_days * 86400) } });
   });
-  return append(el("div", "stack"), form, card("后台提炼", "队列与进度持久化，重启后继续；失败材料保留待重试。", memoryProgress()));
+  return append(el("div", "stack"), form, card("后台提炼", "队列与进度持久化，重启不重置重试次数；合格项先保存，失败项最多自动重试一次。", memoryProgress()));
 }
 const memoryBrowser = createMemoryBrowser({
   el, append, button, field, badge, empty, scopeLabel, scopeOptions,
@@ -1298,6 +1297,14 @@ function renderDebugView(view, initiallyOpen) {
   const body = el("div", "debug-round-body");
   if (view.legacy) body.append(el("p", "hint warning", "旧版快照，非 API 原文。升级前没有捕获实际 HTTP 正文，不能补成原始请求或返回。"));
   if (view.error) body.append(el("p", "danger-copy", stringify(view.error)));
+  for (const item of view.memory_processing || []) {
+    const box = el("div", "memory-processing-result stack");
+    box.append(el("strong", "", `模型调用结果：${statusNames[item.model_status] || item.model_status || "未确认"}；记忆处理结果：${item.status_label || "处理中"}`),
+      el("p", "muted", `批次 ${item.batch_id} · 第 ${item.attempt} 次调用 · 已保存 ${item.saved_count || 0} 条 · 未通过 ${item.failed_count || 0} 条`));
+    if (item.error) box.append(el("p", "danger-copy", item.error));
+    if (item.retry_at) box.append(el("p", "hint", `等待重试，最早 ${stamp(item.retry_at)}`));
+    body.append(box);
+  }
   const controls = el("div", "debug-call-controls");
   const callSelector = field("查看第几次请求", "debug_call", String(selected.call), { options: calls.length ? calls.map((call, index) => ({ value: String(index), label: `第 ${index + 1} 次 · ${call.model || call.provider_id || "模型"} · ${statusNames[call.status] || call.status || "等待返回"}` })) : [{ value: "0", label: "没有可查看的 API 请求" }] });
   callSelector.querySelector("select").disabled = calls.length < 2;

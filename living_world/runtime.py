@@ -221,6 +221,10 @@ class Runtime:
             self.memory_worker = self.spawn("memory", self.memory.process_pending())
 
     async def prepare_request(self, task, module, template, context, scope="global"):
+        memory_processing = None
+        if task == "memory.reflect" and isinstance(context, dict):
+            context = copy.deepcopy(context)
+            memory_processing = context.pop("_memory_processing", None)
         persona_id = self.settings["persona_id"]
         models = copy.deepcopy(self.settings["models"])
         config_version = self.config_version
@@ -361,6 +365,7 @@ class Runtime:
             "contexts": [],
             "parameters": {},
             "tools": [],
+            **({"memory_processing": memory_processing} if memory_processing else {}),
         }
 
     async def complete(
@@ -1137,6 +1142,12 @@ class Runtime:
     async def _action(self, data):
         action = data.get("action")
         scope = str(data.get("scope", "global"))
+        if action == "memory.progress":
+            return self.memory.extraction.page(data)
+        if action == "memory.progress_detail":
+            return self.memory.extraction.detail(str(data.get("id", "")))
+        if action == "memory.retry":
+            return self.memory.extraction.retry(str(data.get("id", "")))
         if action in READ_ACTIONS:
             return await self.memory_admin.handle(action, data)
         if action == "set_drive_value":

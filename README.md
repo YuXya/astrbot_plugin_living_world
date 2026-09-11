@@ -75,3 +75,5 @@ Living World 组织角色资料、生活状态、日程和相关记忆，模型�
 完整步骤见[安装与测试说明](docs/02-install-and-test.md)，验证范围见[交付与验收记录](docs/03-delivery-and-validation.md)。开发安排见[总计划](docs/01-lead-plan.md)、[任务索引](docs/README.md)及[协作规则](AGENTS.md)。
 
 当前为单角色轻量生活与记忆插件，不包含饥饿系统、其他居民、人格自我改写、梦境或复杂技能成长。能力参考 [private_companion](https://github.com/menglimi/astrbot_plugin_private_companion) 与 [Angel Memory](https://github.com/kawayiYokami/astrbot_plugin_angel_memory)，代码、提示词、页面和测试独立编写；许可证为 [MIT](LICENSE)。公开发布和插件市场上架另行安排。
+
+记忆提炼已采用逐条保存和有限重试，最多一次自动重试，进度与调用记录区分模型返回和保存结果；上下文保留原始人格与旧记忆对照，默认取消其他生活资料，已有设置需恢复该任务默认勾选后保存。详见[提炼状态、重试与精简上下文](docs/07-memory-system.md#提炼状态重试与精简上下文)。

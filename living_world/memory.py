@@ -96,6 +96,9 @@ class MemoryService:
     def __init__(self, runtime):
         self.runtime = runtime
         self._processing = False
+        from .memory_extraction import ExtractionQueue
+
+        self.extraction = ExtractionQueue(self)
         self._clock = time.monotonic()
         self._clock_enabled = self._decay_enabled()
 
@@ -890,6 +893,12 @@ class MemoryService:
         )
         chats, batches = {}, []
         for job in jobs:
+            # A merged backup may contain an older queue entry alongside its newer receipt.
+            if self.runtime.store.get("memory_materials", job["id"], {}).get("completed_at"):
+                self.runtime.store.delete("memory_jobs", job["id"])
+                continue
+            if job.get("batch_id"):
+                continue
             if job.get("retry_at", 0) > time.time():
                 continue
             if not self._sources_enabled(job):
@@ -921,29 +930,7 @@ class MemoryService:
             return result
         self._processing = True
         try:
-            for batch in self._eligible_batches()[:20]:
-                if not self.runtime.enabled("memory"):
-                    break
-                try:
-                    rows = await self._extract_batch(batch)
-                    if rows is None:
-                        continue
-                    result["processed"] += len(batch)
-                    result["memories"] += len(rows)
-                except Exception:
-                    logger.warning(
-                        "Memory extraction batch failed; preserving material", exc_info=True
-                    )
-                    result["failed"] += len(batch)
-                    for job in batch:
-                        current = self.runtime.store.get("memory_jobs", job["id"])
-                        if current:
-                            current.update(
-                                status="failed",
-                                attempts=int(current.get("attempts", 0)) + 1,
-                                retry_at=time.time() + 60,
-                            )
-                            self.runtime.store.put("memory_jobs", current["id"], current)
+            result = await self.extraction.process()
             # Chat usefulness is judged with its summary. Background calls need no chat material.
             pending = [
                 row
@@ -967,185 +954,155 @@ class MemoryService:
             self._processing = False
         return result
 
-    async def _extract_batch(self, batch):
-        scope, name = batch[0]["scope"], batch[0]["persona_name"]
-        people = list(
-            dict.fromkeys(
-                person
-                for job in batch
-                for person in ([job["person_id"]] if job.get("person_id") else [])
-                + self._people(job.get("people"))
-            )
-        )
-        material = "\n".join(job["text"] for job in batch)
-        known = self.recall(material, scope=scope, people=people, persona_name=name, limit=30)
-        round_ids = {job.get("round_id") for job in batch if job.get("round_id")}
-        feedback = [
-            row
-            for row in self.runtime.store.list("memory_feedback")
-            if row.get("scope") == scope and row.get("round_id") in round_ids
-        ]
-        data = {
-            "persona_name": name,
-            "people": people,
-            "materials": copy.deepcopy(batch),
-            "material": material,
-            "known": known,
-            "rounds": feedback,
-            "memories": known,
-            "recent_memories": [],
-            "memory_internal": True,
-        }
-        payload = _payload(await self._complete("memory.reflect", data, scope))
-        if not self.runtime.enabled("memory") or any(
-            not self._sources_enabled(job) for job in batch
+    def _plan_extracted(self, candidate, batch, known):
+        if not isinstance(candidate, dict):
+            raise ValueError("记忆条目必须是 JSON 对象")
+        source_ids = candidate.get("source_ids")
+        indexed = {f"m{index + 1}": job for index, job in enumerate(batch)}
+        if (
+            not isinstance(source_ids, list)
+            or not source_ids
+            or any(not isinstance(key, str) or key not in indexed for key in source_ids)
+            or len(set(source_ids)) != len(source_ids)
         ):
-            return None
-        candidates = payload.get("memories")
-        if not isinstance(candidates, list):
-            raise ValueError("Memory extraction omitted memories array")
-        plans = []
-        for candidate in candidates[: self.config["reflection_limit"]]:
-            if not isinstance(candidate, dict):
-                raise ValueError("Invalid extracted memory")
-            evidence = candidate.get("evidence", candidate.get("reasoning", ""))
-            if not isinstance(evidence, str) or not evidence.strip() or evidence not in material:
-                raise ValueError("Extracted memory is missing a verbatim source basis")
-            content = self._validate_text(candidate.get("judgment", candidate.get("text")))
-            attribute = candidate.get("attribute", "事实属性")
-            if attribute not in ATTRIBUTES:
-                raise ValueError("Invalid profile attribute")
-            person = (
-                _person(candidate.get("person_id", ""))
-                if candidate.get("owner") == "person"
-                else ""
-            )
-            if candidate.get("owner") == "person" and not person:
-                raise ValueError("Person memory is missing a provided identity")
-            if person and person not in people:
-                raise ValueError("Extracted memory names an unprovided identity")
-            supporting = [job for job in batch if evidence in job["text"]]
-            source = supporting[0]
-            stable = candidate.get("stable") is True
-            global_profile = (
-                person
-                and stable
-                and source.get("person_id") == person
-                and not candidate.get("inferred")
-                and self._cross_scope_profile(candidate, evidence, material, person)
-            )
-            if global_profile:
-                content = global_profile
-            row_scope = "global" if global_profile else scope
-            # Attribution and occurrence times come from evidence, never model inventions.
-            occurred = source.get("occurred_at") or ""
-            old_ids = candidate.get("merge_ids", [])
-            if candidate.get("replace_id"):
-                old_ids = [candidate["replace_id"]]
-            if not isinstance(old_ids, list) or any(not isinstance(key, str) for key in old_ids):
-                raise ValueError("Invalid replacement identifiers")
-            old = {row["id"]: row for row in known}
-            for key in old_ids:
-                if (
-                    key not in old
-                    or old[key].get("scope") != row_scope
-                    or old[key].get("person_id", "") != person
-                ):
-                    raise ValueError("Replacement changes ownership or scope")
-                current = self.runtime.store.get(self.namespace, key)
-                if not current or current.get("version") != old[key].get("version"):
-                    raise ValueError("Memory changed during extraction")
-            plans.append(
-                {
-                    "candidate": candidate,
-                    "text": content,
-                    "evidence": evidence,
-                    "attribute": attribute,
-                    "person": person,
-                    "scope": row_scope,
-                    "stable": stable,
-                    "occurred": occurred,
-                    "source": source,
-                    "supporting": supporting,
-                    "old_ids": old_ids,
-                }
-            )
-        results = []
-        with self._transaction():
-            for job in batch:
-                if not self.runtime.store.get("memory_jobs", job["id"]):
-                    raise ValueError("Source was removed during extraction")
-            for plan in plans:
-                candidate, source = plan["candidate"], plan["source"]
-                key = plan["old_ids"][0] if plan["old_ids"] else None
-                row = self.remember(
-                    plan["text"],
-                    key=key,
-                    scope=plan["scope"],
-                    person_id=plan["person"],
-                    persona_name=name,
-                    source=source["source"],
-                    sources=source.get("sources", []),
-                    source_keys=list(
-                        dict.fromkeys(
-                            key for job in plan["supporting"] for key in job["source_keys"]
-                        )
-                    ),
-                    occurred_at=plan["occurred"],
-                    attribute=plan["attribute"],
-                    reasoning=plan["evidence"],
-                    tags=candidate.get("tags", []),
-                    stable=plan["stable"],
-                    inferred=candidate.get("inferred") is True,
-                    important=source.get("important", False),
-                    protected=source.get("protected", False),
-                    evidence_type=source.get("evidence_type"),
-                    reading_basis=source.get("reading_basis"),
-                    journal_day=source.get("journal_day"),
+            raise ValueError("source_ids 必须引用本批明确提供的材料编号，且不能重复")
+        supporting = [indexed[key] for key in source_ids]
+        source = supporting[0]
+        scope, name = source["scope"], source["persona_name"]
+        if any(job["scope"] != scope or job["persona_name"] != name for job in supporting):
+            raise ValueError("关联来源不能跨场合或人格")
+        evidence = candidate.get("evidence")
+        if not isinstance(evidence, str) or not evidence.strip() or len(evidence) > 8000:
+            raise ValueError("事实依据必须为 1—8000 字符，可概括但不能添加来源没有的事实")
+        content = self._validate_text(candidate.get("judgment"))
+        attribute = candidate.get("attribute")
+        if attribute not in ATTRIBUTES:
+            raise ValueError("attribute 必须为五种画像属性之一")
+        if candidate.get("owner") not in {"self", "person"}:
+            raise ValueError("owner 必须为 self 或 person")
+        for key in ("stable", "inferred"):
+            if type(candidate.get(key)) is not bool:
+                raise ValueError(f"{key} 必须为 JSON 布尔值 true 或 false")
+        self._tags(candidate.get("tags", []))
+        person = _person(candidate.get("person_id", "")) if candidate["owner"] == "person" else ""
+        if candidate["owner"] == "self" and candidate.get("person_id"):
+            raise ValueError("自身记忆的 person_id 应为空")
+        if candidate["owner"] == "person" and not person:
+            raise ValueError("人物记忆缺少 person_id")
+        people = self._people(
+            [
+                value
+                for job in supporting
+                for value in [job.get("person_id", ""), *job.get("people", [])]
+            ]
+        )
+        if person and person not in people:
+            raise ValueError("人物身份未在关联来源中明确提供")
+        material = "\n".join(job["text"] for job in supporting)
+        raw_basis = source["text"]
+        if source.get("kind") == "chat":
+            raw_basis = json.loads(raw_basis).get("user", "")
+        stable = candidate["stable"]
+        global_profile = (
+            person
+            and stable
+            and source.get("kind") == "chat"
+            and source.get("person_id") == person
+            and not candidate["inferred"]
+            and self._cross_scope_profile(candidate, raw_basis, material, person)
+        )
+        if global_profile:
+            content = global_profile
+        row_scope = "global" if global_profile else scope
+        old_ids = candidate.get("merge_ids", [])
+        if candidate.get("replace_id"):
+            if old_ids:
+                raise ValueError("replace_id 与 merge_ids 不能同时使用")
+            old_ids = [candidate["replace_id"]]
+        if (
+            not isinstance(old_ids, list)
+            or any(not isinstance(key, str) for key in old_ids)
+            or len(set(old_ids)) != len(old_ids)
+        ):
+            raise ValueError("替换或合并编号格式不正确")
+        old = {row["id"]: row for row in known}
+        originals = []
+        for key in old_ids:
+            current = self.runtime.store.get(self.namespace, key)
+            if (
+                key not in old
+                or old[key].get("scope") != row_scope
+                or old[key].get("person_id", "") != person
+                or (not person and old[key].get("persona_name") != name)
+            ):
+                raise ValueError("只能修正本轮提供、同归属同场合的旧记忆")
+            if (
+                not current
+                or not current.get("active", True)
+                or current.get("version") != old[key].get("version")
+            ):
+                raise ValueError("旧记忆版本已变化，请手动确认后重试")
+            originals.append(current)
+        return {
+            "candidate": candidate,
+            "text": content,
+            "evidence": evidence,
+            "attribute": attribute,
+            "person": person,
+            "scope": row_scope,
+            "stable": stable,
+            "occurred": source.get("occurred_at") or "",
+            "source": source,
+            "supporting": supporting,
+            "old_ids": old_ids,
+            "originals": originals,
+        }
+
+    def _save_extracted(self, plan, name):
+        candidate, source = plan["candidate"], plan["source"]
+        row = self.remember(
+            plan["text"],
+            key=plan["old_ids"][0] if plan["old_ids"] else None,
+            scope=plan["scope"],
+            person_id=plan["person"],
+            persona_name=name,
+            source=source["source"],
+            sources=source.get("sources", []),
+            source_keys=list(
+                dict.fromkeys(key for job in plan["supporting"] for key in job["source_keys"])
+            ),
+            occurred_at=plan["occurred"],
+            attribute=plan["attribute"],
+            reasoning=plan["evidence"],
+            tags=candidate.get("tags", []),
+            stable=plan["stable"],
+            inferred=candidate["inferred"],
+            important=source.get("important", False),
+            protected=source.get("protected", False),
+            evidence_type=source.get("evidence_type"),
+            reading_basis=source.get("reading_basis"),
+            journal_day=source.get("journal_day"),
+        )
+        if not row:
+            return {}
+        if plan["old_ids"]:
+            originals = plan["originals"]
+            row["important"] |= any(item.get("important") for item in originals)
+            row["protected"] |= any(item.get("protected") for item in originals)
+            row["sources"] += [value for item in originals for value in self._source_names(item)]
+            row["source_keys"] = list(
+                dict.fromkeys(
+                    row["source_keys"]
+                    + [key for item in originals for key in item.get("source_keys", [])]
                 )
-                if row:
-                    if plan["old_ids"]:
-                        originals = [
-                            self.runtime.store.get(self.namespace, key) for key in plan["old_ids"]
-                        ]
-                        row["important"] = row["important"] or any(
-                            item.get("important") for item in originals
-                        )
-                        row["protected"] = row["protected"] or any(
-                            item.get("protected") for item in originals
-                        )
-                        row["sources"] += [
-                            source for item in originals for source in self._source_names(item)
-                        ]
-                        row["source_keys"] = list(
-                            dict.fromkeys(
-                                row["source_keys"]
-                                + [key for item in originals for key in item.get("source_keys", [])]
-                            )
-                        )
-                        self.runtime.store.put(self.namespace, row["id"], row)
-                    results.append(row)
-                    for old_id in plan["old_ids"][1:]:
-                        previous = self.runtime.store.get(self.namespace, old_id)
-                        self._version(previous)
-                        previous.update(active=False, replaced_by=row["id"])
-                        self.runtime.store.put(self.namespace, old_id, previous)
-            self._apply_feedback(payload, feedback)
-            self._finish_feedback(feedback)
-            for job in batch:
-                self.runtime.store.put(
-                    "memory_materials",
-                    job["id"],
-                    {
-                        "id": job["id"],
-                        "key": job["key"],
-                        "digest": job.get("digest", _digest(job["text"])),
-                        "memory_ids": [row["id"] for row in results],
-                        "completed_at": _stamp(_now()),
-                    },
-                )
-                self.runtime.store.delete("memory_jobs", job["id"])
-        return results
+            )
+            self.runtime.store.put(self.namespace, row["id"], row)
+        for old_id in plan["old_ids"][1:]:
+            previous = self.runtime.store.get(self.namespace, old_id)
+            self._version(previous)
+            previous.update(active=False, replaced_by=row["id"])
+            self.runtime.store.put(self.namespace, old_id, previous)
+        return row
 
     @staticmethod
     def _cross_scope_profile(candidate, evidence, original, person_id):
@@ -1177,11 +1134,13 @@ class MemoryService:
         job = self.enqueue_material(text, scope=scope, person_id=person_id, source=source)
         if not job or not job.get("text") or not job.get("persona_name"):
             return []
-        try:
-            return await self._extract_batch([job]) or []
-        except Exception:
-            logger.warning("Memory extraction failed", exc_info=True)
-            return []
+        await self.process_pending()
+        receipt = self.runtime.store.get("memory_materials", job["id"], {})
+        return [
+            row
+            for key in receipt.get("memory_ids", [])
+            if (row := self.runtime.store.get(self.namespace, key))
+        ]
 
     history = versions
 
@@ -1244,10 +1203,4 @@ class MemoryService:
         return result
 
     def queue_status(self):
-        jobs = self.runtime.store.list("memory_jobs")
-        return {
-            "pending": len(jobs),
-            "failed": sum(job.get("status") == "failed" for job in jobs),
-            "feedback": len(self.runtime.store.list("memory_feedback")),
-            "processing": self._processing,
-        }
+        return self.extraction.status()
