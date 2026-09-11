@@ -16,6 +16,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .prompts import PROMPTS
 from .context_usage import usage_for
 from .life_actions import ActionLedger
+from .schedule_time import (
+    SCHEDULE_DEFAULTS,
+    SLEEP_NOTICE,
+    ScheduleSleepError,
+    schedule_bounds,
+    schedule_range,
+)
 from .layout import resolve_selection
 from .context import (
     activity_material,
@@ -91,16 +98,59 @@ class LifeService(ActionLedger):
             return default
 
     def parameters(self) -> dict:
+        start, end = schedule_range(self.runtime.settings.get("life", {}))
         result = {
             "daily_plan_time": self.runtime.settings.get("life", {}).get(
                 "daily_plan_time", "06:00"
             ),
             "activity_count": int(self._setting("activity_count", 10)),
+            "schedule_start": start,
+            "schedule_end": end,
         }
         time.fromisoformat(result["daily_plan_time"])
         if not 1 <= result["activity_count"] <= 48:
             raise ValueError("每天活动数必须在 1 到 48 之间")
         return result
+
+    def _day_marker(self, day: date) -> dict:
+        """Read cached metadata without parsing archived requests on each clock check."""
+        return next(
+            (
+                row
+                for row in self.runtime.store.project(
+                    "life_days", ("date", "scope", "status", "parameters")
+                )
+                if row.get("date") == str(day) and row.get("scope", "global") == "global"
+            ),
+            {},
+        )
+
+    def day_parameters(self, day: date) -> dict:
+        """Read frozen parameters without rewriting older daily archives."""
+        marker = self._day_marker(day)
+        parameters = marker.get("parameters") or self.parameters()
+        return {**SCHEDULE_DEFAULTS, **copy.deepcopy(parameters)}
+
+    def schedule_window(self, now: datetime | None = None) -> dict:
+        """Share one effective interval between presentation and send-time checks."""
+        now = self._now(now)
+        parameters = self.day_parameters(now.date())
+        start, end = schedule_bounds(parameters, now.date(), now.tzinfo)
+        enabled = self.runtime.enabled("life")
+        return {
+            "date": str(now.date()),
+            "schedule_start": parameters["schedule_start"],
+            "schedule_end": parameters["schedule_end"],
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "enabled": enabled,
+            "sleeping": enabled and not start <= now < end,
+        }
+
+    def ensure_social_awake(self):
+        """Recheck civil time after waiting for a model slot or private session lock."""
+        if self.schedule_window()["sleeping"]:
+            raise ScheduleSleepError(SLEEP_NOTICE)
 
     async def _complete(self, task, template, context, scope="global", *, frozen_template=False):
         complete = getattr(self.runtime, "complete", None)
@@ -114,7 +164,9 @@ class LifeService(ActionLedger):
             "life", template + "\n资料：" + json.dumps(context, ensure_ascii=False), scope=scope
         )
 
-    def state(self) -> dict:
+    def state(self, scope: str = "global", *, now=None, window=None) -> dict:
+        now = self._now(now)
+        window = self.schedule_window(now) if window is None else window
         character = self.runtime.settings.get("character", {})
         state = {
             "mood": character.get("mood", "平静"),
@@ -123,9 +175,15 @@ class LifeService(ActionLedger):
         }
         state.update(self.runtime.store.get("life_state", "current", {}) or {})
         state.pop("energy", None)
-        current = self.current()
+        current = (
+            self.current(scope, now=now)
+            if self.runtime.enabled("life") and not window["sleeping"]
+            else None
+        )
         for field in ("location", "sleep_state"):
             state[field] = (current or {}).get(field) or character.get(field) or "未知"
+        if window["sleeping"]:
+            state["sleep_state"] = "睡梦中"
         return copy.deepcopy(state)
 
     def update_state(self, changes: dict) -> dict:
@@ -155,8 +213,8 @@ class LifeService(ActionLedger):
             result.update(overrides.get(scope, {}))
         return result
 
-    def current(self, scope: str = "global") -> dict | None:
-        now = self._now()
+    def current(self, scope: str = "global", *, now=None) -> dict | None:
+        now = self._now(now)
         matches = [
             a
             for a in self.list_activities()
@@ -168,9 +226,10 @@ class LifeService(ActionLedger):
         ]
         return self._view(matches[-1], scope) if matches else None
 
-    def schedule_context(self, scope: str = "global") -> dict:
+    def schedule_context(self, scope: str = "global", *, now=None, window=None) -> dict:
         """Project today's visible schedule without exposing other scopes' overrides."""
-        day = str(self._now().date())
+        now = self._now(now)
+        day = str(now.date())
         fields = (
             "id",
             "date",
@@ -192,6 +251,7 @@ class LifeService(ActionLedger):
         ]
         return {
             "date": day,
+            "window": self.schedule_window(now) if window is None else window,
             "status": "available" if rows else "missing",
             "notice": ""
             if rows
@@ -199,9 +259,11 @@ class LifeService(ActionLedger):
             "activities": [{key: row[key] for key in fields if key in row} for row in rows],
         }
 
-    def _parse_time(self, value: str, day: date) -> datetime:
+    def _parse_time(self, value: str, day: date, *, allow_midnight=False) -> datetime:
         if not isinstance(value, str):
             raise TypeError("Activity time must be an ISO datetime or HH:MM.")
+        if value == "24:00" and allow_midnight:
+            return datetime.combine(day + timedelta(days=1), time.min, tzinfo=self._now().tzinfo)
         try:
             parsed = datetime.fromisoformat(value)
         except ValueError:
@@ -216,7 +278,7 @@ class LifeService(ActionLedger):
             raise ValueError("An activity requires a title.")
         start, end = (
             self._parse_time(data.get("start", ""), day),
-            self._parse_time(data.get("end", ""), day),
+            self._parse_time(data.get("end", ""), day, allow_midnight=True),
         )
         if end <= start and "T" not in data.get("end", ""):
             end += timedelta(days=1)
@@ -317,22 +379,36 @@ class LifeService(ActionLedger):
     def _validate_day(self, activities, parameters):
         if len(activities) != parameters["activity_count"]:
             raise ValueError(f"日程需要恰好 {parameters['activity_count']} 个活动")
-        ordered = sorted(activities, key=lambda a: a["start"])
-        if any(left["end"] > right["start"] for left, right in pairwise(ordered)):
+        if not activities:
+            raise ValueError("日程至少需要一个活动")
+        day = date.fromisoformat(activities[0]["date"])
+        start, end = schedule_bounds(parameters, day, self._now().tzinfo)
+        intervals = sorted(
+            (self._parse_time(row["start"], day), self._parse_time(row["end"], day))
+            for row in activities
+        )
+        if any(row.get("date") != str(day) for row in activities) or any(
+            not start <= first < last <= end for first, last in intervals
+        ):
+            raise ValueError("日程活动必须位于设定范围内，时长大于零且不跨到次日凌晨")
+        if any(left[1] > right[0] for left, right in pairwise(intervals)):
             raise ValueError("日程活动不能重叠；同一活动内可包含多类行动")
+        if intervals[0][0] != start or intervals[-1][1] != end:
+            first, last = schedule_range(parameters)
+            raise ValueError(f"第一条活动必须从 {first} 开始，最后一条必须到 {last} 结束；中间允许空档")
 
     def freeze_parameters(self, now: datetime | None = None) -> dict:
         """Freeze only the daily outline settings before a configuration change."""
         now = self._now(now)
         key = f"{now.date()}:global"
-        marker = self.runtime.store.get("life_days", key, {}) or {}
-        if not marker and not self._day_activities(now.date()):
+        marker = self._day_marker(now.date())
+        if not marker:
             marker = {
                 "date": str(now.date()),
                 "scope": "global",
                 "schema_version": 3,
                 "drive_schema_version": 1,
-                "status": "waiting",
+                "status": "completed" if self._day_activities(now.date()) else "waiting",
                 "parameters": self.parameters(),
             }
             self.runtime.store.put("life_days", key, marker)
@@ -341,16 +417,15 @@ class LifeService(ActionLedger):
     def plan_request(self, now: datetime | None = None, *, formal=False) -> dict:
         now = self._now(now)
         selection = resolve_selection(self.runtime.settings, "life.plan")
-        marker = self.runtime.store.get("life_days", f"{now.date()}:global", {}) or {}
         context = {
             "date": str(now.date()),
             "context_usage": usage_for(self.runtime.settings, selection),
             "context_selection": selection,
             "now": now.isoformat(),
-            "parameters": (marker.get("parameters") if formal else None) or self.parameters(),
+            "parameters": self.day_parameters(now.date()) if formal else self.parameters(),
         }
         if self.runtime.enabled("state"):
-            context["state"] = self.state()
+            context["state"] = self.state(now=now)
         return {"template": PLAN_TEMPLATE, "context": context, "scope": "global"}
 
     async def plan_day(self, now: datetime | None = None, scope: str = "global") -> list[dict]:
@@ -391,7 +466,7 @@ class LifeService(ActionLedger):
                         },
                     )
                 return existing
-            parameters = marker.get("parameters") or self.parameters()
+            parameters = self.day_parameters(day)
             due = datetime.combine(
                 day, time.fromisoformat(parameters["daily_plan_time"]), tzinfo=now.tzinfo
             )
@@ -693,9 +768,7 @@ class LifeService(ActionLedger):
                 "now": now.isoformat(),
                 "scope": scope,
                 "editable": [activity_material(self._view(a, scope)) for a in editable.values()],
-                "parameters": (
-                    self.runtime.store.get("life_days", f"{now.date()}:global", {}) or {}
-                ).get("parameters"),
+                "parameters": self.day_parameters(now.date()),
             }
             data = parse_json(await self._complete("life.revise", REVISE_TEMPLATE, context, scope))
             if (
@@ -790,6 +863,7 @@ class LifeService(ActionLedger):
                 if len(events) >= 16:
                     break
         social = self.runtime.settings.get("social", {})
+        window = self.schedule_window(now)
         context = {
             "当前时间": now.isoformat(),
             "context_usage": usage_for(self.runtime.settings, selection),
@@ -803,7 +877,8 @@ class LifeService(ActionLedger):
                 for k in ACTION_ORDER
             )
             + f"。聊天免打扰 {social.get('quiet_start', '23:00')}—{social.get('quiet_end', '08:00')}；"
-            "对象在实际执行时由白名单抽取，并再次检查冷却及发送限制。",
+            + f"日程范围 {window['schedule_start']}—{window['schedule_end']}，范围外睡梦中，停止主动聊天和群聊插话；"
+            + "对象在实际执行时由白名单抽取，并再次检查冷却及发送限制。",
         }
         if self.runtime.enabled("state"):
             state = self.state()
@@ -942,6 +1017,9 @@ class LifeService(ActionLedger):
         if not self.runtime.enabled("proactive" if kind == "social" else kind):
             self._action_finish(activity, kind, "skipped", "module_disabled", now)
             return
+        if kind == "social" and self.schedule_window(now)["sleeping"]:
+            self._action_finish(activity, kind, "skipped", SLEEP_NOTICE, now)
+            return
         deadline = min(
             self._parse_time(activity["end"], date.fromisoformat(activity["date"])),
             self._parse_time(action["at"], date.fromisoformat(activity["date"]))
@@ -986,7 +1064,7 @@ class LifeService(ActionLedger):
                 else "failed"
             )
             reason = result.get("reason") or (result.get("text") if status != "success" else "")
-            if status == "skipped" and current_time() >= deadline:
+            if status == "skipped" and reason != SLEEP_NOTICE and current_time() >= deadline:
                 reason = "execution_deadline_exceeded"
             self._action_finish(activity, kind, status, str(reason or ""), current_time(), result)
         except TimeoutError:

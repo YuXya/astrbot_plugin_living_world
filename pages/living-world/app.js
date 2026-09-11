@@ -341,11 +341,12 @@ async function saveSettings(settings) {
     const contextOnly = Object.keys(settings).length > 0 && Object.keys(settings).every(key => ["context_usage", "context_layout", "reply"].includes(key));
     if ((contextOnly || result?.settings_only === true) && result?.settings && typeof result.settings === "object") {
       snapshot.settings = clone(result.settings);
+      if (result.schedule_window) snapshot.schedule_window = clone(result.schedule_window);
     } else {
       await readState();
     }
     render();
-  }, "设置已保存并应用，已有记录继续保留");
+  }, Object.keys(settings).length === 1 && settings.life ? "日程设置已保存；生成时间、活动数和范围默认次日生效，今天可手动重新生成" : "设置已保存并应用，已有记录继续保留");
 }
 function field(label, name, value, options = {}) {
   const wrapper = el("label", `field${options.wide ? " wide" : ""}`);
@@ -432,7 +433,7 @@ function recordList(records, options = {}) {
     if (record.scope) meta.append(el("span", "", scopeLabel(record.scope)));
     if (record.person_id) meta.append(el("span", "", `人物 ${record.person_id}`));
     const time = record.start_at || record.start || record.created_at || record.timestamp || record.date || record.day;
-    if (time) meta.append(el("span", options.timeline ? "timeline-time" : "", options.timeline && record.end ? `${clockTime(time)} — ${clockTime(record.end)}` : stamp(time)));
+    if (time) meta.append(el("span", options.timeline ? "timeline-time" : "", options.timeline && record.end ? `${clockTime(time)} — ${activityEndClock(record)}` : stamp(time)));
     if (options.currentId === record.id) meta.append(badge("当前活动", "good"));
     if (record.important || record.pinned) meta.append(badge("重要保留", "good"));
     if (record.stable && !record.context_category) meta.append(badge("稳定画像", "good"));
@@ -493,14 +494,29 @@ function settingsForm(label, description) {
 function orderedActivities(day = dayNow()) {
   return rows("activities").filter((item) => (item.date || item.start?.slice(0, 10)) === day).sort((a, b) => String(a.start).localeCompare(String(b.start)));
 }
+function scheduleWindow(day = dayNow()) {
+  const frozen = snapshot.schedule_window?.date === day ? snapshot.schedule_window : null;
+  const marker = rows("life_days").find(row => row.date === day && (!row.scope || row.scope === "global"));
+  const parameters = frozen || marker?.parameters || (day === dayNow() ? snapshot.settings.life : {});
+  const start = parameters?.schedule_start || "08:00", end = parameters?.schedule_end || "24:00";
+  const now = clockTime(new Date().toISOString());
+  const enabled = Boolean(snapshot.settings.modules.life);
+  return { start, end, enabled, sleeping: enabled && day === dayNow() && (now < start || now >= end) };
+}
 function currentActivity() {
+  const window = scheduleWindow();
+  if (!window.enabled || window.sleeping) return null;
   const now = Date.now();
   return orderedActivities().find((item) => new Date(item.start).getTime() <= now && new Date(item.end).getTime() > now && !["cancelled", "skipped"].includes(item.status));
 }
 function clockTime(value) {
   if (!value) return "未定";
   if (/^\d\d:\d\d$/.test(value)) return value;
-  try { return new Date(value).toLocaleTimeString("zh-CN", { timeZone: valueAt(snapshot.settings, "character.timezone", "Asia/Shanghai"), hour: "2-digit", minute: "2-digit", hour12: false }); } catch { return String(value); }
+  try { return new Date(value).toLocaleTimeString("zh-CN", { timeZone: valueAt(snapshot.settings, "character.timezone", "Asia/Shanghai"), hour: "2-digit", minute: "2-digit", hourCycle: "h23" }); } catch { return String(value); }
+}
+function activityEndClock(record) {
+  const end = clockTime(record.end), start = new Date(record.start), finish = new Date(record.end);
+  return end === "00:00" && finish > start ? "24:00" : end;
 }
 function actionReason(value) {
   const labels = { regenerated: "重新细化", outline_changed: "活动大纲已修改", activity_updated: "活动大纲已修改", module_disabled: "行动模块已关闭", daily_limit_reduced: "降低每日上限后取消", expired_action_window: "已超过行动有效时间", expired_before_action: "执行前活动已结束", overdue_after_restart: "重启时已过期，不补做", execution_interrupted_outcome_unknown: "上次执行中断，结果未确认，不重复执行" };
@@ -543,20 +559,21 @@ function renderOverview(tab = "current") {
   const root = el("div", "stack");
   const state = snapshot.state || {};
   const current = currentActivity();
+  const window = scheduleWindow();
   const today = orderedActivities();
   const persona = rows("personas").find((row) => row.id === snapshot.settings?.persona_id);
   const weather = rows("observations").find((item) => observationKind(item, "weather"));
   const next = today.flatMap((item) => item.actions?.social?.enabled ? [{ activity: item, action: item.actions.social }] : []).filter((item) => (!item.action.execution?.status || item.action.execution.status === "pending") && new Date(item.action.at || item.activity.start).getTime() >= Date.now()).sort((a, b) => String(a.action.at || a.activity.start).localeCompare(String(b.action.at || b.activity.start)))[0];
   root.append(append(el("div", "section-toolbar"), el("p", "muted", `${dayNow()} · ${persona?.name || snapshot.settings?.persona_id || "尚未绑定人格"} · 管理员视图`), append(el("div", "actions"), linkButton("聊天对象与白名单", "whitelist"), linkButton("日程生成参数", "schedule?tab=settings"))));
   const stateGrid = el("div", "state-grid");
-  const sleep = current?.sleep_state || state.sleep_state || "未知";
+  const sleep = window.sleeping ? "睡梦中" : current?.sleep_state || snapshot.settings.character.sleep_state || "未知";
   const sleepLabels = { awake: "清醒", asleep: "睡眠中", sleeping: "睡眠中", unknown: "未知" };
-  for (const [label, value] of [["心情", state.mood || "未知"], ["精力", snapshot.drives?.meters?.energy?.display_value === undefined ? "未知" : `${snapshot.drives.meters.energy.display_value} / 100`], ["地点", current?.location || state.location || "未知"], ["睡眠", sleepLabels[sleep] || sleep], ["天气", weather?.factual_summary || weather?.text || "尚未取得天气"], ["今日活动", `${today.length} 个活动`]]) stateGrid.append(append(el("div", "state-tile"), el("span", "", label), el("strong", "", value)));
-  const currentBody = append(el("div", "current-activity"), el("p", "eyebrow", current ? `${clockTime(current.start)} — ${clockTime(current.end)} · 当前活动` : "当前没有进行中的活动"), el("h2", "", current?.title || "等待下一段生活"), el("p", "", current?.description || current?.content || "当天日程生成后，活动将在自己的时间开始。"), current ? actionBadges(current) : null);
+  for (const [label, value] of [["心情", state.mood || "未知"], ["精力", snapshot.drives?.meters?.energy?.display_value === undefined ? "未知" : `${snapshot.drives.meters.energy.display_value} / 100`], ["地点", current?.location || snapshot.settings.character.location || "未知"], ["睡眠", sleepLabels[sleep] || sleep], ["天气", weather?.factual_summary || weather?.text || "尚未取得天气"], ["今日活动", `${today.length} 个活动`]]) stateGrid.append(append(el("div", "state-tile"), el("span", "", label), el("strong", "", value)));
+  const currentBody = append(el("div", "current-activity"), el("p", "eyebrow", current ? `${clockTime(current.start)} — ${activityEndClock(current)} · 当前活动` : window.sleeping ? "日程范围外" : "当前未安排活动"), el("h2", "", window.sleeping ? "睡梦中" : current?.title || "当前未安排活动"), el("p", "", window.sleeping ? "暂停主动聊天和群聊插话，普通回复仍按原设置处理。" : current?.description || current?.content || (today.length ? "活动之间允许留空档，下一条活动将按日程时间开始。" : "当天日程生成后，活动将在自己的时间开始。")), current ? actionBadges(current) : null);
   const nextBody = append(el("div", "stack"), el("div", "next-social-time", next ? clockTime(next.action.at || next.activity.start) : "暂无待执行联系"), el("p", "record-body", next ? next.action.intent || next.activity.title : "临近活动细化时，再决定是否主动聊天。"), el("p", "hint", "活动细化决定是否主动聊天；对象按白名单权重抽选，并检查冷却、免打扰与发送上限。"), linkButton("查看聊天对象与白名单", "whitelist"));
   const timeline = recordList(today, { timeline: true, currentId: current?.id, emptyTitle: "今天还没有正式日程" });
   timeline.classList.add("home-timeline");
-  append(root, append(el("div", "overview-grid"), append(el("div", "stack"), card("此刻的角色", "状态来自设定与日程，没有依据时显示未知。", stateGrid), card("现在在做什么", "角色日常与真实行动分别记录。", currentBody)), card("今日时间线", "新闻 → 搜索 → 聊天；同一活动可以安排多种行动。", timeline, linkButton("完整日程", "schedule?tab=timeline")), card("下一次主动联系", "内容到执行时结合聊天场合生成。", nextBody)));
+  append(root, append(el("div", "overview-grid"), append(el("div", "stack"), card("此刻的角色", "状态来自设定与日程，没有依据时显示未知。", stateGrid), card("现在在做什么", "角色日常与真实行动分别记录。", currentBody)), card("今日时间线", `日程范围 ${window.start}—${window.end}，活动之间允许留空档。`, timeline, linkButton("完整日程", "schedule?tab=timeline")), card("下一次主动联系", "内容到执行时结合聊天场合生成。", nextBody)));
   return root;
 }
 function renderCharacter(tab) {
@@ -672,7 +689,7 @@ function detailActivity(record) {
   const regenerate = Boolean(record.detailed);
   openEditor(regenerate ? "重新细化活动" : "细化活动", [
     el("p", "hint", "将真实调用模型，结合活动、相关记忆、今日安排、当前想法和发送限制，决定细节与是否安排新闻、搜索、主动聊天。可以全部不安排。本次调用不执行来源或发送消息；采用的未来行动将照常执行。"),
-    el("p", "record-body", `${record.title} · ${clockTime(record.start)} — ${clockTime(record.end)}`),
+    el("p", "record-body", `${record.title} · ${clockTime(record.start)} — ${activityEndClock(record)}`),
     regenerate ? el("p", "muted", "合格后替换旧细化与尚未执行的行动决定；失败或活动已经开始时保留旧结果。内在状态和真实执行记录保留。") : null,
     field("本次要求（可选）", "instruction", "", { type: "textarea", rows: 4, placeholder: "例如：这次专心散步，不安排主动聊天。", hint: "只用于这次细化，不保存成公共模板，既有发送限制仍然生效。" }),
   ].filter(Boolean), (values) => action("detail_activity", { id: record.id, instruction: values.instruction.trim(), regenerate }), regenerate ? "调用模型并重新细化" : "调用模型并细化");
@@ -740,8 +757,19 @@ function renderSchedule(tab = "timeline") {
   const form = settingsForm("保存日程设置", "每天自动生成活动大纲，临近活动时再细化并决定行动。保存设置不会调用模型。");
   const f = (label, key, options, fallback) => field(label, `life.${key}`, valueAt(settings, `life.${key}`, fallback), options);
   const numberOptions = { type: "number", min: 0, max: 48, step: 1 };
-  form.append(card("大纲生成参数", "生成时间和活动数修改默认次日生效；保存后可用「重新生成日程」立即用于今天。大纲只安排活动，不分配行动数量。", append(el("div", "form-grid"), f("每日生成时间", "daily_plan_time", { type: "time", required: true }, "06:00"), f("每天活动数", "activity_count", { ...numberOptions, min: 1 }, 10), f("提前细化活动（分钟）", "detail_minutes", { type: "number", min: 0, max: 120 }, 10))));
-  form.append(append(el("div", "actions"), linkButton("内在状态", "drives"), linkButton("聊天对象与白名单", "whitelist")), el("p", "hint", "每个活动每类最多一次，可以多类同时存在或全部不安排。细化只收到内在状态对应的当前想法；日程行动实际开始后扣值，失败不退还。一轮主动聊天可抽选多个不同对象，各对象仍受白名单、冷却、免打扰和发送上限约束。"));
+  const endField = f("日程结束时间", "schedule_end", { required: true, placeholder: "24:00", hint: "HH:MM，最晚当天 24:00；不支持次日凌晨。" }, "24:00");
+  const endInput = endField.querySelector("input");
+  endInput.pattern = "(?:[01][0-9]|2[0-3]):[0-5][0-9]|24:00"; endInput.maxLength = 5;
+  const currentWindow = scheduleWindow();
+  const savedStart = valueAt(settings, "life.schedule_start", "08:00"), savedEnd = valueAt(settings, "life.schedule_end", "24:00");
+  form.append(card("大纲生成参数", "生成时间、活动数和日程范围修改默认次日生效；保存后可用「重新生成日程」立即用于今天。", append(el("div", "stack"),
+    append(el("div", "form-grid"), f("每日生成时间", "daily_plan_time", { type: "time", required: true, hint: "调用模型生成大纲的时刻，与第一条活动开始时间分开。" }, "06:00"),
+      f("每天活动数", "activity_count", { ...numberOptions, min: 1 }, 10),
+      f("日程开始时间", "schedule_start", { type: "time", required: true }, "08:00"), endField,
+      f("提前细化活动（分钟）", "detail_minutes", { type: "number", min: 0, max: 120 }, 10)),
+    el("p", "hint", `当前日程采用范围（${dayNow()}）：${currentWindow.start}—${currentWindow.end}；已保存、下次生成采用范围：${savedStart}—${savedEnd}。`),
+    el("p", "hint", "第一条从开始时间起、最后一条到结束时间止，中间允许空档。范围外显示睡梦中并停止主动聊天和群聊插话；现有免打扰仍生效。保存设置不会重排今天。"))));
+  form.append(append(el("div", "actions"), linkButton("内在状态", "drives"), linkButton("聊天对象与白名单", "whitelist")), el("p", "hint", "每个活动每类最多一次，可以多类同时存在或全部不安排。细化只收到内在状态对应的当前想法；日程行动实际开始后扣值，失败不退还。一轮主动聊天固定一个对象，仍受白名单、冷却、免打扰、日程范围和发送上限约束。"));
   if (tab === "settings") return finishForm(form, "schedule.settings");
   const date = el("input"); date.type = "date"; date.value = scheduleDate || dayNow(); date.setAttribute("aria-label", "日程日期"); date.style.width = "auto";
   date.addEventListener("change", () => { scheduleDate = date.value; render(); });
@@ -757,7 +785,8 @@ function renderSchedule(tab = "timeline") {
   batchButton.dataset.disabled = String(Boolean(snapshot.day_regenerating) || !editable.length);
   const toolbar = append(el("div", "section-toolbar"), date, append(el("div", "actions"), regenerate, batchButton));
   const list = recordList(activities, { timeline: true, emptyTitle: "这一天还没有安排", emptyDescription: "到生成时间自动生成；也可手动重新生成今天的日程。", body: (record) => append(el("details"), el("summary", "", "细化与执行详情"), activityDetail(record)), actions: (record) => editable.includes(record) ? append(el("div", "actions"), button("编辑", () => editActivity(record), "secondary", true), button(record.detailed ? "重新细化" : "细化活动", () => detailActivity(record), "secondary", true)) : null });
-  root.append(card("日程与实际行动", "先生成大纲，再细化活动；细化决定是否安排新闻、搜索、主动聊天。按新闻 → 搜索 → 聊天执行，每项行动只执行一次。", append(el("div", "stack"), toolbar, snapshot.day_regenerating ? el("p", "hint", "正在重新生成日程：等待已有执行结束并生成新计划，期间暂停日程推进和活动编辑。完成后刷新查看结果。") : el("p", "muted", "重新生成日程保留内在状态。统计包含所选日期内被替换的旧版本实际行动；实际发送继续遵守白名单与发送限制。"), scheduleSummary(date.value), list)));
+  const selectedWindow = scheduleWindow(date.value);
+  root.append(card("日程与实际行动", `日程范围 ${selectedWindow.start}—${selectedWindow.end}，中间允许空档。先生成大纲，再细化活动并决定新闻、搜索、主动聊天。`, append(el("div", "stack"), toolbar, snapshot.day_regenerating ? el("p", "hint", "正在重新生成日程：等待已有执行结束并生成新计划，期间暂停日程推进和活动编辑。完成后刷新查看结果。") : el("p", "muted", "重新生成日程保留内在状态。统计包含所选日期内被替换的旧版本实际行动；实际发送继续遵守白名单与发送限制。"), scheduleSummary(date.value), list)));
   if (tab === "timeline") return root;
   root.replaceChildren(date);
   const day = rows("life_days").find((item) => (item.date || item.day || item.id?.slice(0, 10)) === date.value && (!item.scope || item.scope === "global"));

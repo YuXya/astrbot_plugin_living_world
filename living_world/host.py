@@ -291,11 +291,13 @@ class AstrBotHost:
 
         return await self.context.send_message(scope, MessageChain([Plain(text)]))
 
-    async def send_with_history(self, scope, text, persona_id):
+    async def send_with_history(self, scope, text, persona_id, *, before_send=None):
         """Serialize private sends with the host's reply and history-writing lock."""
         from astrbot.core.utils.session_lock import session_lock_manager
 
         async with session_lock_manager.acquire_lock(scope):
+            if before_send is not None:
+                before_send()
             sent = await self.send(scope, text)
             result = {"accepted": bool(sent), "history_status": "not_sent"}
             if not sent:

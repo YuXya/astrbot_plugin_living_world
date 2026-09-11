@@ -261,8 +261,16 @@ def _clock(value):
 def activity_text(row):
     """Project semantic fields only; IDs, scopes and execution controls stay internal."""
     if not row:
-        return "此刻没有正在进行的活动。"
-    when = "—".join(filter(None, (_clock(row.get("start")), _clock(row.get("end")))))
+        return "当前未安排活动。"
+    end_clock = _clock(row.get("end"))
+    try:
+        start = datetime.fromisoformat(row.get("start", ""))
+        end = datetime.fromisoformat(row.get("end", ""))
+        if end.date() == start.date() + timedelta(days=1) and end.time() == time.min:
+            end_clock = "24:00"
+    except (TypeError, ValueError):
+        pass
+    when = "—".join(filter(None, (_clock(row.get("start")), end_clock)))
     title = clean_life_text(row.get("title")) or clean_life_text(row.get("content")) or "未命名活动"
     status = STATUS.get(row.get("status"), "")
     lines = [" · ".join(filter(None, (when, title, status)))]
@@ -541,10 +549,16 @@ def context_from_data(data, *, legacy=False, version=4):
         add("生活状态", "模块设置", "生活状态模块已关闭，本轮未读取状态。")
     schedule = data.get("schedule", {})
     notice = clean_life_text(schedule.get("notice"))
+    if schedule.get("window", {}).get("sleeping"):
+        notice = "\n".join(filter(None, ["当前：睡梦中。", notice]))
     if schedule.get("status") == "disabled":
         add("当前活动", "日程模块设置", "日程生活模块已关闭，本轮未读取当前活动。")
     else:
-        add("当前活动", "当前场合可见的今日活动", activity_text(data.get("activity")))
+        add(
+            "当前活动",
+            "当前场合可见的今日活动与日程范围",
+            clean_life_text(data.get("activity_notice")) or activity_text(data.get("activity")),
+        )
     rows = schedule.get("activities", [])
     add(
         "今日日程",

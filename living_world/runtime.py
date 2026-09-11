@@ -44,6 +44,7 @@ from .life import LifeService
 from .memory import MemoryService
 from .memory_admin import MemoryAdmin, READ_ACTIONS
 from .store import Store
+from .schedule_time import ScheduleSleepError
 
 logger = logging.getLogger(__name__)
 ACTION_MODULES = {
@@ -400,6 +401,8 @@ class Runtime:
 
         if not gate_open() or not await self.scope_allowed(scope):
             raise ValueError("模块已停用或场合不在接入范围内")
+        if module == "social":
+            self.life.ensure_social_awake()
         audit = self.debug.begin(
             request["task"],
             request,
@@ -428,6 +431,8 @@ class Runtime:
                     or not await self.scope_allowed(scope)
                 ):
                     raise ValueError("会话绑定已变化")
+                if module == "social":
+                    self.life.ensure_social_awake()
                 if hasattr(self.host, "generate_request"):
                     call = self.host.generate_request(request)
                 else:
@@ -462,7 +467,11 @@ class Runtime:
             return text
         except BaseException as exc:
             entry.update(
-                status="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
+                status="cancelled"
+                if isinstance(exc, asyncio.CancelledError)
+                else "skipped"
+                if isinstance(exc, ScheduleSleepError)
+                else "failed",
                 error=type(exc).__name__,
             )
             self.debug.finish(
@@ -518,9 +527,10 @@ class Runtime:
         )
         try:
             transport = None
+            self.life.ensure_social_awake()
             if ":FriendMessage:" in scope and hasattr(self.host, "send_with_history"):
                 transport = await self.host.send_with_history(
-                    scope, text, self.settings["persona_id"]
+                    scope, text, self.settings["persona_id"], before_send=self.life.ensure_social_awake
                 )
                 result = transport["accepted"]
             else:
@@ -546,6 +556,9 @@ class Runtime:
                 status="sent" if result else "failed",
             )
             return result
+        except ScheduleSleepError as exc:
+            self.debug.finish(entry, status="skipped", error=str(exc))
+            raise
         except BaseException as exc:
             self.debug.finish(entry, status="unknown", error=str(exc) or type(exc).__name__)
             raise
@@ -639,16 +652,13 @@ class Runtime:
         }
         if selection is not None:
             data["context_selection"] = list(selection)
+        window = self.life.schedule_window(now)
         if self.enabled("state"):
-            data["state"] = self.life.state()
-            activity = self.life.current(scope) if self.enabled("life") else None
-            for field in ("location", "sleep_state"):
-                data["state"][field] = (
-                    (activity or {}).get(field) or self.settings["character"].get(field) or "未知"
-                )
+            data["state"] = self.life.state(scope, now=now, window=window)
         if self.enabled("life"):
-            data["schedule"] = self.life.schedule_context(scope)
-            data["activity"] = self.life.current(scope)
+            data["schedule"] = self.life.schedule_context(scope, now=now, window=window)
+            data["activity"] = None if window["sleeping"] else self.life.current(scope, now=now)
+            data["activity_notice"] = "睡梦中" if window["sleeping"] else ""
         if people is None:
             people = self.chat.memory_people(scope, person_id)
         observations = [
@@ -854,8 +864,23 @@ class Runtime:
         plan_keys = (
             "daily_plan_time",
             "activity_count",
+            "schedule_start",
+            "schedule_end",
         )
-        if any(old["life"][key] != proposed["life"][key] for key in plan_keys):
+        plan_changed = any(old["life"][key] != proposed["life"][key] for key in plan_keys)
+        if patch and set(patch) == {"life"}:
+            # Freeze today's settings atomically; outline changes do not run maintenance.
+            with self.store.transaction():
+                if plan_changed:
+                    self.life.freeze_parameters()
+                self.store.put("settings", "current", proposed)
+            self.settings = proposed
+            return {
+                "settings": copy.deepcopy(proposed),
+                "settings_only": True,
+                "schedule_window": self.life.schedule_window(),
+            }
+        if plan_changed:
             self.life.freeze_parameters()
         changed = {
             m
@@ -1042,6 +1067,7 @@ class Runtime:
                 for m in MODULES
             ],
             "state": self.life.state(),
+            "schedule_window": self.life.schedule_window(),
             "drives": self.drives.snapshot(),
             "activities": self.life.list_activities(),
             "life_days": self.store.list("life_days"),

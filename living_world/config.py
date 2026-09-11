@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from .drives import DRIVE_DEFAULTS, validate_drive
 from .memory_config import DEFAULT_MEMORY, memory_settings
 from .context_usage import DEFAULT_USAGE, integer, validate_usage
+from .schedule_time import SCHEDULE_DEFAULTS, schedule_range
 from .layout import (
     DEFAULT_SETTINGS as LAYOUT_DEFAULTS,
     validate_settings as validate_layout_settings,
@@ -95,6 +96,7 @@ DEFAULTS = {
         "tick_seconds": 60,
         "detail_minutes": 10,
         "daily_plan_time": "06:00",
+        **SCHEDULE_DEFAULTS,
         "activity_count": 10,
         "stale_action_minutes": 10,
     },
@@ -211,6 +213,7 @@ def settings_from(patch=None):
             raise ValueError("免打扰时间格式必须为 HH:MM")
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(result["life"]["daily_plan_time"])):
         raise ValueError("日程生成时间格式必须为 HH:MM")
+    schedule_range(result["life"])
     bounds = {
         ("social", "target_count"): (1, 20),
         ("social", "daily_limit"): (0, 1000),

@@ -14,6 +14,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .prompts import PROMPTS
+from .schedule_time import SLEEP_NOTICE, ScheduleSleepError
 
 
 def destination(scope: str) -> str:
@@ -179,6 +180,8 @@ class SocialService:
         ):
             return "host_interjection_enabled"
         now = self._now()
+        if self.runtime.life.schedule_window(now)["sleeping"]:
+            return SLEEP_NOTICE
         if self._quiet(now):
             return "quiet_hours"
         return self._rate_reason(scope, now)
@@ -309,7 +312,11 @@ class SocialService:
                 "interjection": interjection,
             }
             if before_start is not None and not before_start():
-                record["reason"] = "activity_changed_or_already_started"
+                record["reason"] = (
+                    SLEEP_NOTICE
+                    if self.runtime.life.schedule_window()["sleeping"]
+                    else "activity_changed_or_already_started"
+                )
                 self.runtime.store.put("deliveries", key, record)
                 return record
             if hasattr(self.runtime, "complete"):
@@ -360,6 +367,8 @@ class SocialService:
             record["updated_at"] = self._now().isoformat()
             self.runtime.store.put("deliveries", key, record)
             raise
+        except ScheduleSleepError:
+            record.update(status="skipped", reason=SLEEP_NOTICE, attempted=False)
         except Exception as exc:  # noqa: BLE001 - A failed transport has an uncertain delivery outcome.
             record["status"] = "unknown" if record["attempted"] else "failed"
             record["reason"] = (
@@ -528,6 +537,9 @@ class SocialService:
                     "recent_messages": str(history)[-12000:],
                     "context": context,
                 }
+                blocked = await self._control_reason(scope, True)
+                if blocked:
+                    return self._result(reason=blocked)
                 if hasattr(self.runtime, "complete"):
                     response = await self.runtime.complete(
                         "social.interject", "social", template, data, scope
@@ -565,6 +577,8 @@ class SocialService:
                 return result
             except asyncio.CancelledError:
                 raise
+            except ScheduleSleepError:
+                return self._result(reason=SLEEP_NOTICE)
             except Exception as exc:  # noqa: BLE001 - Keep interjection decisions independent.
                 result = self._result("failed", "interjection_decision_failed")
                 result["error"] = type(exc).__name__

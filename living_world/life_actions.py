@@ -88,6 +88,7 @@ class ActionLedger:
                 or store.get("life_retired_activities", activity_id)
                 or not self.runtime.enabled("life")
                 or not self.runtime.enabled("proactive" if kind == "social" else kind)
+                or (kind == "social" and self.schedule_window(now)["sleeping"])
             ):
                 return False
             action = row.get("actions", {}).get(kind, {})
