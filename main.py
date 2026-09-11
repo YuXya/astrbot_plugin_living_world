@@ -70,7 +70,7 @@ class Main(Star):
                     elif route == "import":
                         result = await self.runtime.restore(data)
                     else:
-                        result = await self.runtime.action(data)
+                        result = await self.runtime.page_action(data)
                 return json_response(result)
             except asyncio.CancelledError:
                 return error_response("操作已取消：模块或接入配置发生变化", status_code=409)

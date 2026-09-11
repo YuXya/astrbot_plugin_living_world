@@ -15,7 +15,12 @@ module.exports = async (page, go, field, click, save, shot) => {
   await click("刷新数据");
   await go("memory", "records"); await go("context", "usage");
   assert.equal(await field("context_usage.people_limit").inputValue(), "2");
+  const beforeSave = await page.evaluate(() => { window.rejectStateRead = true; return window.calls.length; });
   await save("保存上下文用量");
+  const saveCalls = await page.evaluate(index => { window.rejectStateRead = false; return window.calls.slice(index); }, beforeSave);
+  assert.deepEqual(saveCalls.map(call => `${call.method} ${call.endpoint}`), ["POST settings"]);
+  await go("memory", "records"); await go("context", "usage");
+  assert.equal(await field("context_usage.people_limit").inputValue(), "2");
   const usage = await page.evaluate(() => window.calls.findLast(call => call.endpoint === "settings" && call.method === "POST").body);
   assert.deepEqual(Object.keys(usage), ["context_usage"]);
   assert.equal(usage.context_usage.version, 2);
@@ -44,12 +49,15 @@ module.exports = async (page, go, field, click, save, shot) => {
   await field("memory.profile").selectOption("self:旧名字");
   assert.equal(await page.locator(".compact-record-row").count(), 0);
   await field("memory.profile").selectOption("person:42");
+  assert.equal(await field("memory.profile").locator('option:checked').textContent(), "朋友（QQ 42）（2 条）");
   assert.equal(await page.locator(".compact-record-row").count(), 2);
   await field("memory.attribute").selectOption("事实属性");
   assert.equal(await page.locator(".compact-record-row").count(), 1);
   await field("memory.attribute").selectOption("");
   await page.locator('[data-record-id="m1"]').getByRole("button", { name: "编辑", exact: true }).click();
   assert.match(await page.locator("#editor-body").textContent(), /编辑保留原有场合与人物归属/);
+  assert.match(await page.locator("#editor-body").textContent(), /朋友（QQ 42）/);
+  assert.doesNotMatch(await page.locator("#editor-body").textContent(), /QQ qq:/i);
   assert.equal(await page.locator('#editor [name="scope"]').count(), 0);
   await page.locator('#editor [name="text"]').fill("更新后的流星雨约定");
   await page.locator('#editor [name="reasoning"]').fill("私聊中确认日期。<script>window.memoryXss=1</script>");
@@ -65,10 +73,12 @@ module.exports = async (page, go, field, click, save, shot) => {
   assert.match(await page.locator("#editor-body").textContent(), /私聊中确认日期/);
   assert.equal(await page.evaluate(() => window.memoryXss), undefined);
   await page.locator("#editor-cancel").click();
+  await page.evaluate(() => { window.rejectStateRead = true; });
   await page.locator('[data-record-id="m1"]').getByRole("button", { name: "变更记录", exact: true }).click();
   await page.locator("#editor[open]").waitFor();
   assert.match(await page.locator("#editor-body").textContent(), /约好了明天一起聊流星雨/);
   await page.locator("#editor-cancel").click();
+  await page.evaluate(() => { window.rejectStateRead = false; });
   await field("memory.profile").selectOption("");
   await shot("memory-profiles-desktop");
 
@@ -92,8 +102,6 @@ module.exports = async (page, go, field, click, save, shot) => {
   assert.equal(config.memory.low_decay_seconds, 259200);
   assert.equal(config.memory.forgetting_enabled, true);
   assert.equal(Object.hasOwn(config.memory, "chat_idle_minutes"), false);
-  await click("暂停旧资料整理"); await page.getByRole("button", { name: "继续旧资料整理", exact: true }).waitFor();
-  await click("继续旧资料整理"); await page.getByRole("button", { name: "暂停旧资料整理", exact: true }).waitFor();
   await click("处理待提炼材料");
   assert.equal(await page.evaluate(() => window.calls.at(-2).body.action), "memory.process");
   await shot("memory-settings-desktop");

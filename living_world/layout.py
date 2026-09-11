@@ -18,8 +18,6 @@ from .context_usage import DEFAULT_USAGE
 TASK_NAMES = {
     "chat.group": "普通群聊回复",
     "chat.private": "普通私聊回复",
-    "journal.brief": "日记简报",
-    "notes.brief": "笔记简报",
     "bilibili.reflect": "B站见闻感想",
     "daily_digest.reflect": "AI日报感想",
     "journal.write": "生成日记",
@@ -27,14 +25,17 @@ TASK_NAMES = {
     "life.detail": "细化活动",
     "life.plan": "生成日程大纲",
     "life.revise": "调整未来日程",
-    "memory.reflect": "提炼聊天记忆",
+    "memory.reflect": "提炼与整理记忆",
     "news.reflect": "新闻感想",
     "news.select": "挑选新闻",
     "search.reflect": "搜索见闻感想",
     "search.topic": "选择搜索主题",
     "social.interject": "群聊插话判断",
     "social.message": "生成主动聊天消息",
+    "memory.query": "理解记忆检索词",
+    "memory.feedback": "判断记忆有用性",
 }
+
 LEGACY_BLOCK_NAMES = {
     "anchor.system": "原有系统提示词／人格",
     "profile": "角色补充资料",
@@ -73,123 +74,624 @@ LEGACY_BLOCK_NAMES = {
     "task.other": "其他任务资料",
     "group_reply": "本轮群聊回复要求",
 }
+
 LEGACY_LAYOUT = {
     "system": ["anchor.system", "profile", "world"],
-    "user": [key for key in LEGACY_BLOCK_NAMES if key not in {"anchor.system", "profile", "world"}],
-}
-
-
-def expanded(rows):
-    result = []
-    for key in rows:
-        if key == "memories":
-            result.extend(MEMORY_DEFAULTS)
-        elif key == "news":
-            result.append("observations")
-        elif key not in {"search", "bilibili", "daily_digest"}:
-            result.append(key)
-    return result
-
-
-V2_LAYOUT = {role: expanded(rows) for role, rows in LEGACY_LAYOUT.items()}
-V2_BLOCK_NAMES = {
-    key: ("日程与执行：今日日程" if key == "schedule" else value)
-    for key, value in V3_BLOCK_NAMES.items()
-    if key not in {"schedule.recent", "private_reply", "proactive_reply"}
-}
-
-
-def extend_order(layout):
-    result = copy.deepcopy(layout)
-    for rows in result.values():
-        for predecessor, additions in (
-            ("schedule", ["schedule.recent"]),
-            ("group_reply", ["private_reply", "proactive_reply"]),
-        ):
-            if predecessor in rows:
-                at = rows.index(predecessor) + 1
-                rows[at:at] = additions
-    return result
-
-
-DEFAULT_LAYOUT = extend_order(V2_LAYOUT)
-COMMON = {"profile", "world", "anchor.system", "anchor.user", "time", "state"}
-LIFE_BLOCKS = {
-    "activity",
-    "schedule",
-    "memories",
-    "experiences",
-    "weather",
-    "news",
-    "search",
-    "bilibili",
-    "daily_digest",
-}
-TASK_BLOCKS = {
-    "chat.group": LIFE_BLOCKS | {"speaker", "group_history", "group_reply"},
-    "chat.private": LIFE_BLOCKS | {"speaker"},
-    "life.plan": {"task.date", "task.parameters", "memories"},
-    "life.detail": {
-        "task.activity",
-        "task.range",
+    "user": [
+        "anchor.user",
+        "speaker",
+        "time",
+        "state",
+        "activity",
         "schedule",
         "memories",
+        "experiences",
+        "weather",
+        "news",
+        "search",
+        "bilibili",
+        "daily_digest",
+        "group_history",
+        "task.date",
+        "task.parameters",
+        "task.reason",
+        "task.activity",
+        "task.range",
         "task.actions",
         "task.limits",
         "task.thoughts",
         "task.instruction",
-    },
-    "life.revise": {"task.reason", "memories", "task.editable", "task.parameters", "task.other"},
-    "memory.reflect": {"task.material", "memories", "task.other"},
-    "journal.write": {"task.date", "task.events", "memories", "task.other"},
-    "notes.write": {"task.date", "task.events", "memories", "task.other"},
-    "journal.brief": {
-        "task.date",
+        "task.editable",
+        "task.candidates",
+        "task.question",
+        "task.evidence",
+        "task.events",
         "task.document",
         "task.brief_limit",
-        "task.evidence",
+        "task.material",
         "task.other",
-    },
-    "notes.brief": {
-        "task.date",
-        "task.document",
-        "task.brief_limit",
-        "task.evidence",
-        "task.other",
-    },
-    "news.select": LIFE_BLOCKS | {"task.candidates", "task.question"},
-    "search.topic": LIFE_BLOCKS | {"task.question"},
-    "social.message": LIFE_BLOCKS | {"task.reason", "group_history", "task.other"},
-    "social.interject": LIFE_BLOCKS | {"task.question", "group_history"},
+        "group_reply",
+    ],
 }
-for _task in ("news.reflect", "search.reflect", "bilibili.reflect", "daily_digest.reflect"):
-    TASK_BLOCKS[_task] = LIFE_BLOCKS | {"task.evidence", "task.reason"}
-TASK_BLOCKS = {task: set(expanded(rows)) for task, rows in TASK_BLOCKS.items()}
-for _task in ("social.message", "social.interject"):
-    TASK_BLOCKS[_task].add("speaker")
 
-DEFAULT_SELECTIONS = {}
-for _task in TASK_NAMES:
-    _selected = (COMMON | TASK_BLOCKS[_task]) - {"anchor.system", "anchor.user"}
-    if not _task.startswith("chat."):
-        _selected.add("task.other")
-    if _task in {"chat.group", "chat.private", "social.message"}:
-        _selected.discard("schedule")
-        _selected.add("schedule.recent")
-    if _task == "chat.private":
-        _selected.add("private_reply")
-    if _task == "social.message":
-        _selected.add("proactive_reply")
-    if _task in {"journal.write", "notes.write"}:
-        _selected -= set(MEMORY_DEFAULTS) - {
-            "memory.knowledge",
-            "memory.emotional",
-            "memory.profile",
-        }
-    DEFAULT_SELECTIONS[_task] = [key for key in V3_BLOCK_NAMES if key in _selected]
-V3_TASK_NAMES = copy.deepcopy(TASK_NAMES)
-V3_DEFAULT_SELECTIONS = copy.deepcopy(DEFAULT_SELECTIONS)
-V3_LAYOUT = copy.deepcopy(DEFAULT_LAYOUT)
+V2_BLOCK_NAMES = {
+    "anchor.system": "宿主：原有系统提示词与人格",
+    "anchor.user": "宿主消息／任务模板：本轮原始内容",
+    "profile": "角色与世界：角色补充资料",
+    "world": "角色与世界：世界设定",
+    "speaker": "聊天白名单：交谈对象与场合",
+    "time": "角色与世界：当前时间",
+    "state": "生活状态：心情、地点与作息",
+    "activity": "日程与执行：当前活动",
+    "schedule": "日程与执行：今日日程",
+    "memory.knowledge": "记忆与人物：知识记忆",
+    "memory.event": "记忆与人物：事件与约定记忆",
+    "memory.skill": "记忆与人物：技能记忆",
+    "memory.emotional": "记忆与人物：情感记忆",
+    "memory.profile": "记忆与人物：人物认知",
+    "memory.journal": "日记与笔记：日记简报",
+    "memory.notes": "日记与笔记：笔记简报",
+    "experiences": "经历记录：近期经历",
+    "weather": "来源设置：天气",
+    "observations": "近期见闻：综合见闻",
+    "group_history": "聊天白名单：近期会话消息",
+    "task.date": "模型试跑：任务日期",
+    "task.parameters": "模型试跑：任务参数",
+    "task.reason": "模型试跑：任务原因与聊天意图",
+    "task.activity": "日程与执行：待细化活动",
+    "task.range": "日程与执行：活动时间范围",
+    "task.actions": "日程与执行：近期实际行动",
+    "task.limits": "生成与细化设置：能力与限制",
+    "task.thoughts": "内在状态：当前阶段想法",
+    "task.instruction": "日程与执行：管理员本次要求",
+    "task.editable": "日程与执行：可调整活动",
+    "task.candidates": "来源设置：新闻候选",
+    "task.question": "模型试跑：本次问题与群消息",
+    "task.evidence": "近期见闻：来源原始证据",
+    "task.events": "日记与笔记：回顾经历资料",
+    "task.document": "日记与笔记：日记与笔记原文",
+    "task.brief_limit": "上下文用量：简报长度要求",
+    "task.material": "模型试跑：本次任务材料",
+    "task.other": "模型试跑：其他任务资料",
+    "group_reply": "回复与插话：本轮群聊回复要求",
+}
+
+V3_LAYOUT = {
+    "system": ["anchor.system", "profile", "world"],
+    "user": [
+        "anchor.user",
+        "speaker",
+        "time",
+        "state",
+        "activity",
+        "schedule",
+        "schedule.recent",
+        "memory.knowledge",
+        "memory.event",
+        "memory.skill",
+        "memory.emotional",
+        "memory.profile",
+        "memory.journal",
+        "memory.notes",
+        "experiences",
+        "weather",
+        "observations",
+        "group_history",
+        "task.date",
+        "task.parameters",
+        "task.reason",
+        "task.activity",
+        "task.range",
+        "task.actions",
+        "task.limits",
+        "task.thoughts",
+        "task.instruction",
+        "task.editable",
+        "task.candidates",
+        "task.question",
+        "task.evidence",
+        "task.events",
+        "task.document",
+        "task.brief_limit",
+        "task.material",
+        "task.other",
+        "group_reply",
+        "private_reply",
+        "proactive_reply",
+    ],
+}
+
+DEFAULT_LAYOUT = {
+    "system": ["anchor.system", "profile", "world"],
+    "user": [
+        "anchor.user",
+        "speaker",
+        "time",
+        "state",
+        "activity",
+        "schedule",
+        "schedule.recent",
+        "memory",
+        "memory.recent",
+        "weather",
+        "group_history",
+        "task.date",
+        "task.parameters",
+        "task.reason",
+        "task.activity",
+        "task.range",
+        "task.actions",
+        "task.limits",
+        "task.thoughts",
+        "task.instruction",
+        "task.editable",
+        "task.candidates",
+        "task.question",
+        "task.evidence",
+        "task.material",
+        "task.other",
+        "group_reply",
+        "private_reply",
+        "proactive_reply",
+    ],
+}
+
+DEFAULT_SELECTIONS = {
+    "chat.group": [
+        "profile",
+        "world",
+        "speaker",
+        "time",
+        "state",
+        "activity",
+        "schedule.recent",
+        "weather",
+        "group_history",
+        "group_reply",
+        "memory",
+        "memory.recent",
+    ],
+    "chat.private": [
+        "profile",
+        "world",
+        "speaker",
+        "time",
+        "state",
+        "activity",
+        "schedule.recent",
+        "weather",
+        "private_reply",
+        "memory",
+        "memory.recent",
+    ],
+    "bilibili.reflect": [
+        "profile",
+        "world",
+        "time",
+        "state",
+        "activity",
+        "schedule",
+        "weather",
+        "task.reason",
+        "task.evidence",
+        "task.other",
+        "memory",
+        "memory.recent",
+    ],
+    "daily_digest.reflect": [
+        "profile",
+        "world",
+        "time",
+        "state",
+        "activity",
+        "schedule",
+        "weather",
+        "task.reason",
+        "task.evidence",
+        "task.other",
+        "memory",
+        "memory.recent",
+    ],
+    "journal.write": ["profile", "world", "time", "state", "task.date", "task.other", "memory"],
+    "notes.write": ["profile", "world", "time", "state", "task.date", "task.other", "memory"],
+    "life.detail": [
+        "profile",
+        "world",
+        "time",
+        "state",
+        "schedule",
+        "task.activity",
+        "task.range",
+        "task.actions",
+        "task.limits",
+        "task.thoughts",
+        "task.instruction",
+        "task.other",
+        "memory",
+    ],
+    "life.plan": [
+        "profile",
+        "world",
+        "time",
+        "state",
+        "task.date",
+        "task.parameters",
+        "task.other",
+        "memory",
+    ],
+    "life.revise": [
+        "profile",
+        "world",
+        "time",
+        "state",
+        "task.parameters",
+        "task.reason",
+        "task.editable",
+        "task.other",
+        "memory",
+    ],
+    "memory.reflect": [
+        "profile",
+        "world",
+        "time",
+        "state",
+        "task.material",
+        "task.other",
+        "memory",
+    ],
+    "news.reflect": [
+        "profile",
+        "world",
+        "time",
+        "state",
+        "activity",
+        "schedule",
+        "weather",
+        "task.reason",
+        "task.evidence",
+        "task.other",
+        "memory",
+        "memory.recent",
+    ],
+    "news.select": [
+        "profile",
+        "world",
+        "time",
+        "state",
+        "activity",
+        "schedule",
+        "weather",
+        "task.candidates",
+        "task.question",
+        "task.other",
+        "memory",
+        "memory.recent",
+    ],
+    "search.reflect": [
+        "profile",
+        "world",
+        "time",
+        "state",
+        "activity",
+        "schedule",
+        "weather",
+        "task.reason",
+        "task.evidence",
+        "task.other",
+        "memory",
+        "memory.recent",
+    ],
+    "search.topic": [
+        "profile",
+        "world",
+        "time",
+        "state",
+        "activity",
+        "schedule",
+        "weather",
+        "task.question",
+        "task.other",
+        "memory",
+        "memory.recent",
+    ],
+    "social.interject": [
+        "profile",
+        "world",
+        "speaker",
+        "time",
+        "state",
+        "activity",
+        "schedule",
+        "weather",
+        "group_history",
+        "task.question",
+        "task.other",
+        "memory",
+        "memory.recent",
+    ],
+    "social.message": [
+        "profile",
+        "world",
+        "speaker",
+        "time",
+        "state",
+        "activity",
+        "schedule.recent",
+        "weather",
+        "group_history",
+        "task.reason",
+        "task.other",
+        "proactive_reply",
+        "memory",
+        "memory.recent",
+    ],
+    "memory.query": ["profile", "world", "task.material", "task.other"],
+    "memory.feedback": ["task.material", "task.other"],
+}
+
+DEFAULT_SETTINGS = {
+    "version": 4,
+    "order": {
+        "system": ["anchor.system", "profile", "world"],
+        "user": [
+            "anchor.user",
+            "speaker",
+            "time",
+            "state",
+            "activity",
+            "schedule",
+            "schedule.recent",
+            "memory",
+            "memory.recent",
+            "weather",
+            "group_history",
+            "task.date",
+            "task.parameters",
+            "task.reason",
+            "task.activity",
+            "task.range",
+            "task.actions",
+            "task.limits",
+            "task.thoughts",
+            "task.instruction",
+            "task.editable",
+            "task.candidates",
+            "task.question",
+            "task.evidence",
+            "task.material",
+            "task.other",
+            "group_reply",
+            "private_reply",
+            "proactive_reply",
+        ],
+    },
+    "baseline_order": {
+        "system": ["anchor.system", "profile", "world"],
+        "user": [
+            "anchor.user",
+            "speaker",
+            "time",
+            "state",
+            "activity",
+            "schedule",
+            "schedule.recent",
+            "memory",
+            "memory.recent",
+            "weather",
+            "group_history",
+            "task.date",
+            "task.parameters",
+            "task.reason",
+            "task.activity",
+            "task.range",
+            "task.actions",
+            "task.limits",
+            "task.thoughts",
+            "task.instruction",
+            "task.editable",
+            "task.candidates",
+            "task.question",
+            "task.evidence",
+            "task.material",
+            "task.other",
+            "group_reply",
+            "private_reply",
+            "proactive_reply",
+        ],
+    },
+    "tasks": {
+        "chat.group": [
+            "profile",
+            "world",
+            "speaker",
+            "time",
+            "state",
+            "activity",
+            "schedule.recent",
+            "weather",
+            "group_history",
+            "group_reply",
+            "memory",
+            "memory.recent",
+        ],
+        "chat.private": [
+            "profile",
+            "world",
+            "speaker",
+            "time",
+            "state",
+            "activity",
+            "schedule.recent",
+            "weather",
+            "private_reply",
+            "memory",
+            "memory.recent",
+        ],
+        "bilibili.reflect": [
+            "profile",
+            "world",
+            "time",
+            "state",
+            "activity",
+            "schedule",
+            "weather",
+            "task.reason",
+            "task.evidence",
+            "task.other",
+            "memory",
+            "memory.recent",
+        ],
+        "daily_digest.reflect": [
+            "profile",
+            "world",
+            "time",
+            "state",
+            "activity",
+            "schedule",
+            "weather",
+            "task.reason",
+            "task.evidence",
+            "task.other",
+            "memory",
+            "memory.recent",
+        ],
+        "journal.write": ["profile", "world", "time", "state", "task.date", "task.other", "memory"],
+        "notes.write": ["profile", "world", "time", "state", "task.date", "task.other", "memory"],
+        "life.detail": [
+            "profile",
+            "world",
+            "time",
+            "state",
+            "schedule",
+            "task.activity",
+            "task.range",
+            "task.actions",
+            "task.limits",
+            "task.thoughts",
+            "task.instruction",
+            "task.other",
+            "memory",
+        ],
+        "life.plan": [
+            "profile",
+            "world",
+            "time",
+            "state",
+            "task.date",
+            "task.parameters",
+            "task.other",
+            "memory",
+        ],
+        "life.revise": [
+            "profile",
+            "world",
+            "time",
+            "state",
+            "task.parameters",
+            "task.reason",
+            "task.editable",
+            "task.other",
+            "memory",
+        ],
+        "memory.reflect": [
+            "profile",
+            "world",
+            "time",
+            "state",
+            "task.material",
+            "task.other",
+            "memory",
+        ],
+        "news.reflect": [
+            "profile",
+            "world",
+            "time",
+            "state",
+            "activity",
+            "schedule",
+            "weather",
+            "task.reason",
+            "task.evidence",
+            "task.other",
+            "memory",
+            "memory.recent",
+        ],
+        "news.select": [
+            "profile",
+            "world",
+            "time",
+            "state",
+            "activity",
+            "schedule",
+            "weather",
+            "task.candidates",
+            "task.question",
+            "task.other",
+            "memory",
+            "memory.recent",
+        ],
+        "search.reflect": [
+            "profile",
+            "world",
+            "time",
+            "state",
+            "activity",
+            "schedule",
+            "weather",
+            "task.reason",
+            "task.evidence",
+            "task.other",
+            "memory",
+            "memory.recent",
+        ],
+        "search.topic": [
+            "profile",
+            "world",
+            "time",
+            "state",
+            "activity",
+            "schedule",
+            "weather",
+            "task.question",
+            "task.other",
+            "memory",
+            "memory.recent",
+        ],
+        "social.interject": [
+            "profile",
+            "world",
+            "speaker",
+            "time",
+            "state",
+            "activity",
+            "schedule",
+            "weather",
+            "group_history",
+            "task.question",
+            "task.other",
+            "memory",
+            "memory.recent",
+        ],
+        "social.message": [
+            "profile",
+            "world",
+            "speaker",
+            "time",
+            "state",
+            "activity",
+            "schedule.recent",
+            "weather",
+            "group_history",
+            "task.reason",
+            "task.other",
+            "proactive_reply",
+            "memory",
+            "memory.recent",
+        ],
+        "memory.query": ["profile", "world", "task.material", "task.other"],
+        "memory.feedback": ["task.material", "task.other"],
+    },
+}
 
 
 def unified_identifier(identifier):
@@ -203,50 +705,6 @@ def unified_identifier(identifier):
         return None
     return identifier
 
-
-def unified_order(layout):
-    """Place unified memory at the first old memory slot, retaining role and baseline."""
-    result, seen = {}, set()
-    for role, rows in layout.items():
-        result[role] = []
-        for key in rows:
-            if key in {"observations", "task.events", "task.document", "task.brief_limit"}:
-                continue
-            identifier = unified_identifier(key)
-            if identifier and identifier not in seen:
-                result[role].append(identifier)
-                seen.add(identifier)
-    return result
-
-
-def unified_selection(rows):
-    selected = {unified_identifier(key) for key in rows}
-    return [key for key in BLOCK_NAMES if key in selected and not key.startswith("anchor.")]
-
-
-TASK_NAMES = {
-    key: ("提炼与整理记忆" if key == "memory.reflect" else name)
-    for key, name in V3_TASK_NAMES.items()
-    if key not in {"journal.brief", "notes.brief"}
-}
-TASK_NAMES["memory.query"] = "理解记忆检索词"
-TASK_NAMES["memory.feedback"] = "判断记忆有用性"
-DEFAULT_LAYOUT = unified_order(V3_LAYOUT)
-DEFAULT_SELECTIONS = {
-    task: unified_selection(rows)
-    for task, rows in V3_DEFAULT_SELECTIONS.items()
-    if task in TASK_NAMES
-}
-for _task in ("journal.write", "notes.write"):
-    DEFAULT_SELECTIONS[_task] = [key for key in DEFAULT_SELECTIONS[_task] if key != "task.material"]
-DEFAULT_SELECTIONS["memory.query"] = ["profile", "world", "task.material", "task.other"]
-DEFAULT_SELECTIONS["memory.feedback"] = ["task.material", "task.other"]
-DEFAULT_SETTINGS = {
-    "version": 4,
-    "order": DEFAULT_LAYOUT,
-    "baseline_order": copy.deepcopy(DEFAULT_LAYOUT),
-    "tasks": DEFAULT_SELECTIONS,
-}
 
 FIELD_BLOCKS = {
     "recipient": "speaker",
@@ -341,45 +799,16 @@ def validate_selection(value, *, version=4):
 
 
 def validate_settings(value):
-    if not isinstance(value, dict) or type(value.get("version")) is not int:
+    if (
+        not isinstance(value, dict)
+        or type(value.get("version")) is not int
+        or value["version"] != 4
+    ):
+        raise ValueError("只支持当前版本的上下文布局，旧配置不再自动转换")
+    if set(value) != set(DEFAULT_SETTINGS) or not isinstance(value["tasks"], dict):
         raise ValueError("上下文布局配置格式无效")
-    version = value["version"]
-    fields = {"version", "default", "tasks"} if version in {1, 2} else set(DEFAULT_SETTINGS)
-    if version not in {1, 2, 3, 4} or set(value) != fields or not isinstance(value["tasks"], dict):
-        raise ValueError("上下文布局配置格式无效")
-    tasks = TASK_NAMES if version == 4 else V3_TASK_NAMES
-    if set(value["tasks"]) - set(tasks):
-        raise ValueError("上下文布局包含未知任务")
-    if version in {1, 2}:
-        order = validate_layout(value["default"], version=version)
-        for old in value["tasks"].values():
-            if old is not None:
-                validate_layout(old, version=version)
-        if version == 1:
-            order = {role: expanded(rows) for role, rows in order.items()}
-        order = extend_order(order)
-        return {
-            "version": 4,
-            "order": unified_order(order),
-            "baseline_order": unified_order(order),
-            "tasks": copy.deepcopy(DEFAULT_SELECTIONS),
-        }
-    if set(value["tasks"]) != set(tasks):
-        raise ValueError("上下文勾选缺少任务")
-    if version == 3:
-        selections = {
-            task: unified_selection(validate_selection(rows, version=3))
-            for task, rows in value["tasks"].items()
-            if task in TASK_NAMES
-        }
-        for task in ("memory.query", "memory.feedback"):
-            selections[task] = copy.deepcopy(DEFAULT_SELECTIONS[task])
-        return {
-            "version": 4,
-            "order": unified_order(validate_layout(value["order"], version=3)),
-            "baseline_order": unified_order(validate_layout(value["baseline_order"], version=3)),
-            "tasks": selections,
-        }
+    if set(value["tasks"]) != set(TASK_NAMES):
+        raise ValueError("上下文勾选任务不完整或包含未知任务")
     return {
         "version": 4,
         "order": validate_layout(value["order"]),

@@ -9,6 +9,7 @@ import time
 import uuid
 
 from .debug_views import build_views, record_groups
+from .debug_payload import compact_record, snapshot_value
 from .layout import task_label
 from .prompts import PROMPTS
 
@@ -91,8 +92,7 @@ def _observation_only(rows):
     if (
         root.get("capture_version") != 2
         or root.get("status") != "observed"
-        or root.get("response")
-        != {"reason": "尚未进入模型阶段；其他链路是否处理暂不确定"}
+        or root.get("response") != {"reason": "尚未进入模型阶段；其他链路是否处理暂不确定"}
     ):
         return False
     return all(
@@ -113,11 +113,56 @@ class DebugService:
     def __init__(self, runtime):
         self.runtime = runtime
         self.defaults = dict(DEFAULT_TEMPLATES)
-        for row in runtime.store.list("debug_records"):
+        for summary in self.metadata():
+            if summary.get("status") != "running":
+                continue
+            row = runtime.store.get("debug_records", summary["id"])
             if row.get("status") == "running":
                 row.update(status="interrupted", error="插件重启，调用结果未确认")
                 runtime.store.put("debug_records", row["id"], row)
         self.trim()
+
+    def metadata(self):
+        fields = (
+            "id",
+            "task",
+            "category",
+            "module",
+            "scope",
+            "kind",
+            "turn_id",
+            "parent_id",
+            "created_at",
+            "status",
+            "capture_version",
+            "error",
+        )
+        project = getattr(self.runtime.store, "project", None)
+        if project is not None:
+            return project("debug_records", fields)
+        return [
+            {key: row[key] for key in fields if key in row}
+            for row in self.runtime.store.list("debug_records")
+        ]
+
+    def page_index(self):
+        records = self.metadata()
+        return {"debug_records": records, "debug_views": build_views(records), "debug_lazy": True}
+
+    def page_record(self, record_id):
+        groups = record_groups(self.metadata())
+        selected = groups.get(record_id) or next(
+            (rows for rows in groups.values() if any(row["id"] == record_id for row in rows)), []
+        )
+        records = [self.runtime.store.get("debug_records", row["id"]) for row in selected]
+        records = [row for row in records if row]
+        if not records:
+            raise ValueError("这次调用记录已清理或不存在，请刷新调用列表")
+        views = build_views(
+            records,
+            self.runtime.store.list("life_days") + self.runtime.store.list("life_day_history"),
+        )
+        return {"records": records, "view": views[0]}
 
     @diagnostic_write
     def begin(
@@ -144,11 +189,12 @@ class DebugService:
             "kind": kind,
             "boundary": boundary,
             "created_at": time.time(),
-            "request": json_value(request),
+            "request": snapshot_value(json_value(request)),
             "status": "running",
             "turn_id": turn_id,
             "parent_id": parent_id,
         }
+        record = compact_record(record)
         self.runtime.store.put("debug_records", record["id"], record)
         self.trim()
         return record
@@ -163,7 +209,7 @@ class DebugService:
             return
         record = {
             **self.runtime.store.get("debug_records", record["id"], record),
-            "response": json_value(response),
+            "response": snapshot_value(json_value(response)),
             "status": status,
             "error": str(error),
             "finished_at": time.time(),
@@ -176,12 +222,17 @@ class DebugService:
         counts = {}
         deletes = []
         groups = sorted(
-            record_groups(self.runtime.store.list("debug_records")).values(),
+            record_groups(self.metadata()).values(),
             key=lambda rows: rows[0].get("created_at", 0),
             reverse=True,
         )
         for rows in groups:
-            if _observation_only(rows):
+            possible_observation = any(
+                row.get("task") == "chat.turn" and row.get("status") == "observed" for row in rows
+            )
+            if possible_observation and _observation_only(
+                [self.runtime.store.get("debug_records", row["id"], {}) for row in rows]
+            ):
                 deletes.extend(("debug_records", row["id"]) for row in rows)
                 continue
             root = rows[0]
@@ -198,7 +249,7 @@ class DebugService:
 
     def clear(self, category=None):
         count = 0
-        records = self.runtime.store.list("debug_records")
+        records = self.metadata()
         for rows in record_groups(records).values():
             if category is None or any(row.get("category") == category for row in rows):
                 for row in rows:
@@ -243,6 +294,7 @@ class DebugService:
         return {
             "status": "success",
             "task": task,
+            "template": template,
             "text": "只保存此模板文本；测试上下文不会自动写入模板",
         }
 

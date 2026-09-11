@@ -91,7 +91,7 @@ class SocialService:
                 )
         return result
 
-    async def _target_name(self, target):
+    async def _target_name(self, target, *, source_scope=None):
         """Cache successful and failed lookups without delaying chat indefinitely."""
         cached = self._target_names.get(target)
         if cached and cached[0] > monotonic():
@@ -99,7 +99,13 @@ class SocialService:
         name = ""
         try:
             lookup = getattr(self.runtime.host, "target_name", None)
-            if lookup is not None:
+            person_lookup = getattr(self.runtime.host, "person_name", None)
+            if source_scope and person_lookup is not None:
+                result = await asyncio.wait_for(
+                    person_lookup(source_scope, target.split(":", 2)[2]), timeout=2
+                )
+                name = result.strip() if isinstance(result, str) else ""
+            elif lookup is not None:
                 result = await asyncio.wait_for(lookup(target), timeout=2)
                 name = result.strip() if isinstance(result, str) else ""
         except Exception:  # noqa: BLE001 - Optional name lookup must never prevent chatting.

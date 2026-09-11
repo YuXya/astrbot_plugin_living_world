@@ -14,7 +14,7 @@ from living_world.context_catalog import (
     PAGES,
     memory_category,
 )
-from living_world.context_usage import DEFAULT_USAGE, historical_usage, legacy_usage
+from living_world.context_usage import DEFAULT_USAGE
 from living_world.layout import LEGACY_LAYOUT, assemble, collect_task_blocks, validate_settings
 from living_world.runtime import Runtime
 from test_runtime import FakeHost, GROUP, PRIVATE
@@ -34,41 +34,8 @@ def test_names_are_real_menu_names_and_categories_are_disjoint():
     assert memory_category({"source": "notes", "kind": "knowledge"}) is None
 
 
-@pytest.mark.parametrize("total", [0, 1, 3, 10, 17, 50])
-def test_legacy_allowances_remain_interpretable_but_live_usage_uses_new_defaults(total):
-    old = {"memory": {"context_limit": total, "journal_limit": 7, "brief_max_chars": 180}}
-    migrated = settings_from(old)
-    archived_usage = historical_usage(old)
-    limits = archived_usage["limits"]
-    assert sum(limits[key] for key in list(MEMORY_DEFAULTS)[:5]) == total
-    assert limits["memory.journal"] + limits["memory.notes"] == min(total, 7)
-    assert limits["memory.journal"] >= limits["memory.notes"]
-    assert set(archived_usage["brief_max_chars"].values()) == {180}
-    assert migrated["context_usage"] == DEFAULT_USAGE
-    assert not {"context_limit", "journal_limit", "brief_max_chars"} & migrated["memory"].keys()
-    assert settings_from(migrated) == migrated
-    assert legacy_usage({}) == DEFAULT_USAGE
-    if total == 3:
-        assert [limits[key] for key in list(MEMORY_DEFAULTS)[:5]] == [1, 1, 0, 0, 1]
-    if total == 17:
-        assert [limits[key] for key in list(MEMORY_DEFAULTS)[:5]] == [7, 3, 2, 2, 3]
 
 
-def test_old_roles_and_positions_expand_without_resetting_other_blocks():
-    old = copy.deepcopy(LEGACY_LAYOUT)
-    old["user"].remove("memories")
-    old["system"].insert(0, "memories")
-    old["user"].remove("news")
-    old["system"].append("news")
-    value = validate_settings({"version": 1, "default": old, "tasks": {"social.message": old}})
-    assert value["version"] == 4
-    assert value["order"]["system"][0] == "memory"
-    assert "observations" not in value["order"]["system"]
-    assert value["baseline_order"] == value["order"]
-    assert "schedule.recent" in value["tasks"]["social.message"]
-    assert not {"news", "search", "bilibili", "daily_digest", "memories"} & set(
-        value["order"]["user"]
-    )
 
 
 @pytest.mark.parametrize("value", [-1, 51, 1.2, True, float("nan"), "4"])

@@ -92,19 +92,6 @@ async def test_inflight_extraction_cannot_resurrect_deleted_or_disabled_archive(
         assert len(world.store.list("memory_jobs")) == 1
 
 
-async def test_deleting_archive_deletes_derived_versions_and_prevents_requeue(world):
-    entry = archive(world)
-    await world.journal.summarize(entry["id"])
-    await world.memory.process_pending()
-    row = world.store.list("memories")[0]
-    world.memory.update(row["id"], {"text": "修正结论"})
-    assert world.memory.versions(row["id"])
-    world.journal.delete(entry["id"])
-    assert world.store.list("memories") == []
-    assert world.memory.versions(row["id"]) == []
-    world.store.put("journals", entry["id"], entry)
-    world.memory.migrate(importing=True)
-    assert world.store.list("memory_jobs") == []
 
 
 async def test_extraction_transaction_rolls_back_memory_if_completion_marker_fails(

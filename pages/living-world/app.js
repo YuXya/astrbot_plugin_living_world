@@ -25,6 +25,7 @@ const formDrafts = new Map();
 const arrayDrafts = new Map();
 const selections = new Map();
 const listStates = new Map();
+let debugPageCache = null;
 const rememberedTabs = {};
 const scrollPositions = new Map();
 let currentRoute = resolveRoute(location.hash);
@@ -154,8 +155,19 @@ function compactRecords(key, records, options = {}) {
   if (options.filter) controls.append(options.filter);
   root.append(controls);
   const list = el("div", "compact-record-list"); const pager = el("div", "pagination"); root.append(pager, list);
+  let searchedQuery = null, searchedRows = records;
+  const searchTexts = new WeakMap();
   const fill = () => {
-    const filtered = records.filter((record) => stringify(record).toLocaleLowerCase().includes(state.query.toLocaleLowerCase()));
+    const query = state.query.toLocaleLowerCase();
+    if (query !== searchedQuery) {
+      searchedQuery = query;
+      searchedRows = query ? records.filter(record => {
+        let text = searchTexts.get(record);
+        if (text === undefined) { text = stringify(record).toLocaleLowerCase(); searchTexts.set(record, text); }
+        return text.includes(query);
+      }) : records;
+    }
+    const filtered = searchedRows;
     const pages = Math.max(1, Math.ceil(filtered.length / 10)); state.page = Math.min(state.page, pages - 1);
     list.replaceChildren(); pager.replaceChildren();
     const prev = button("上一页", () => { state.page--; fill(); }, "secondary", true);
@@ -231,7 +243,12 @@ function empty(title = "暂时没有记录", description = "生活发生之后�
   return append(el("div", "empty-state compact"), el("h2", "", title), el("p", "", description));
 }
 function details(value, title = "查看完整记录") {
-  return append(el("details"), el("summary", "", title), el("pre", "", stringify(value)));
+  const node = append(el("details"), el("summary", "", title));
+  let loaded = false;
+  node.addEventListener("toggle", () => {
+    if (node.open && !loaded) { loaded = true; node.append(el("pre", "", stringify(value))); }
+  });
+  return node;
 }
 function stringify(value) {
   return typeof value === "string" ? value : JSON.stringify(value ?? {}, null, 2);
@@ -300,6 +317,7 @@ async function readState() {
   const next = await bridge.apiGet("state");
   if (!next || typeof next !== "object") throw new Error("插件返回了无效状态，请查看 AstrBot 日志。");
   snapshot = next;
+  debugPageCache = null;
   if (snapshot.context_layout_catalog?.menus) Object.assign(PAGES, snapshot.context_layout_catalog.menus);
   $("#connection").textContent = "已连接 AstrBot";
   $("#version").textContent = `Living World ${snapshot.version || ""}`;
@@ -310,9 +328,19 @@ async function refresh() {
 }
 async function action(name, payload = {}) {
   return request(async () => {
-    const result = await bridge.apiPost("action", { action: name, ...payload });
+    const response = await bridge.apiPost("action", { action: name, ...payload });
+    const result = response?.page_state ? response.result : response;
     lastResult = { action: name, result, time: new Date().toLocaleTimeString("zh-CN", { hour12: false }) };
-    await readState();
+    const template = snapshot.debug?.templates?.find(row => row.task === result?.task);
+    if (response?.page_state) {
+      Object.assign(snapshot, response.page_state);
+    } else if (["save_template", "reset_template"].includes(name) && template && typeof result.template === "string") {
+      template.template = result.template;
+    } else if (name === "update_state") {
+      snapshot.state = clone(result);
+    } else if (name !== "memory.history") {
+      await readState();
+    }
     if (name === "debug_test" && result?.status === "success") navigate("context", "calls");
     render();
     return result ?? true;
@@ -320,9 +348,13 @@ async function action(name, payload = {}) {
 }
 async function saveSettings(settings) {
   return request(async () => {
-    await bridge.apiPost("settings", settings);
-
-    await readState();
+    const result = await bridge.apiPost("settings", settings);
+    const contextOnly = Object.keys(settings).length > 0 && Object.keys(settings).every(key => ["context_usage", "context_layout", "reply"].includes(key));
+    if ((contextOnly || result?.settings_only === true) && result?.settings && typeof result.settings === "object") {
+      snapshot.settings = clone(result.settings);
+    } else {
+      await readState();
+    }
     render();
   }, "设置已保存并应用，已有记录继续保留");
 }
@@ -888,7 +920,14 @@ function memoryCheck(label, name, value) {
   const node = append(el("label", "inline-check"), el("input"), el("span", "", label));
   Object.assign(node.firstChild, { type: "checkbox", name, checked: Boolean(value) }); return node;
 }
-function memoryOwner(record) { return record.owner === "person" || record.person_id ? `QQ ${record.person_id || "身份未记录"}` : record.persona_name || record.owner_name || "当前人格"; }
+function memoryOwner(record) {
+  if (!(record.owner === "person" || record.person_id)) return record.persona_name || record.owner_name || "当前人格";
+  const number = String(record.person_id || "").replace(/^qq:/i, "");
+  const profile = snapshot?.memory_profiles?.find(item => item.owner === "person" && String(item.person_id || "").replace(/^qq:/i, "") === number);
+  const name = profile?.name || record.owner_name || "";
+  const placeholder = !name || (profile?.name_status !== "resolved" && profile?.name_status !== "manual" && String(name).replace(/^qq:/i, "") === number);
+  return `${placeholder ? "未获取昵称" : name}（QQ ${number || "身份未记录"}）`;
+}
 function editMemory(record = {}) {
   const owner = record.id ? el("p", "hint", `所属场合：${scopeLabel(record.scope)}；画像：${memoryOwner(record)}。编辑保留原有场合与人物归属。`) : append(el("div", "form-grid"),
     field("所属场合", "scope", "global", { options: scopeOptions(), hint: "私人谈话、经历与约定请选择对应会话。" }),
@@ -947,15 +986,10 @@ function renderContextUsage() {
 }
 function memoryProgress() {
   const status = snapshot.memory_status || {};
-  const migration = status.migration || status;
   const queue = status.queue || {};
-  const paused = Boolean(migration.paused);
   const root = el("div", "memory-progress stack");
-  root.append(el("p", "", `旧资料整理：已完成 ${migration.completed || 0} / ${migration.total || 0}，待处理 ${migration.pending || 0}，失败 ${migration.failed || 0}${paused ? " · 已暂停" : ""}。`));
-  if (migration.waiting_persona) root.append(el("p", "hint", "等待解析当前人格；归属未确认的资料暂停整理。"));
-  if (migration.persona_name) root.append(el("p", "hint", `本次旧资料整理绑定人格：${migration.persona_name}`));
-  if (Object.keys(queue).length) root.append(el("p", "hint", `新材料提炼：待处理 ${queue.pending || 0}，失败 ${queue.failed || 0}。只在所属场合内整理。`));
-  root.append(append(el("div", "actions"), button(paused ? "继续旧资料整理" : "暂停旧资料整理", () => action(paused ? "memory.migration.resume" : "memory.migration.pause"), "secondary"), button("处理待提炼材料", () => action("memory.process"), "secondary")), el("p", "hint", "处理材料可能调用记忆模型；不执行搜索或发送 QQ。原始经历、见闻和日记继续保留。"));
+  root.append(el("p", "hint", `材料提炼：待处理 ${queue.pending || 0}，失败 ${queue.failed || 0}${queue.processing ? " · 正在处理" : ""}。只在所属场合内整理。`));
+  root.append(button("处理待提炼材料", () => action("memory.process"), "secondary"), el("p", "hint", "处理材料可能调用记忆模型；不执行搜索或发送 QQ。原始经历、见闻和日记继续保留。"));
   return root;
 }
 function renderMemorySettings() {
@@ -980,7 +1014,7 @@ function renderMemorySettings() {
     const { chat_idle_minutes, low_decay_days, ...values } = memory;
     return saveSettings({ memory: { ...values, chat_idle_seconds: Math.round(chat_idle_minutes * 60), low_decay_seconds: Math.round(low_decay_days * 86400) } });
   });
-  return append(el("div", "stack"), form, card("后台提炼与旧资料整理", "队列与进度持久化，重启后继续；失败材料保留待重试。", memoryProgress()));
+  return append(el("div", "stack"), form, card("后台提炼", "队列与进度持久化，重启后继续；失败材料保留待重试。", memoryProgress()));
 }
 function memoryBody(record) {
   const flags = [record.stable && "稳定画像", record.inferred && "有依据的推断", record.important && "重要保留", record.protected && "主动记忆保护", record.active === false && "已替换"].filter(Boolean);
@@ -996,16 +1030,15 @@ function renderMemory(tab = "records") {
   if (tab === "settings") return renderMemorySettings();
   const root = el("div", "stack");
   const profiles = snapshot.memory_profiles || [];
-  const profileOptions = [{ value: "", label: "全部画像" }, ...profiles.map((profile) => ({ value: profile.id, label: `${profile.name || profile.persona_name || profile.person_id}${profile.owner === "person" ? " · QQ " + profile.person_id : profile.current ? " · 当前自身画像" : " · 历史自身画像"}（${profile.count || 0} 条）` }))];
+  const profileOptions = [{ value: "", label: "全部画像" }, ...profiles.map((profile) => ({ value: profile.id, label: `${profile.owner === "person" ? memoryOwner(profile) : (profile.name || profile.persona_name) + (profile.current ? " · 当前自身画像" : " · 历史自身画像")}（${profile.count || 0} 条）` }))];
   const memorySource = sourceIndexButton("memory"), recentSource = sourceIndexButton("memory.recent");
   memorySource.textContent = "记忆与画像来源"; recentSource.textContent = "近期记忆来源";
   root.append(el("p", "hint", "自身记忆按人格名称分别保存；QQ 人物画像按身份识别。人格改名后使用空的自身档案，旧档可查看，改回原名可继续使用。"), append(el("div", "actions"), button("添加记忆", () => editMemory(), "primary"), memorySource, recentSource));
-  if (rows("memories").some(row => row.schema_version !== 2)) root.append(append(el("div", "actions"), el("span", "hint", "旧格式资料正在分批整理，完成后出现在对应画像中。"), button("查看整理进度", () => navigate("memory", "settings"), "secondary", true)));
   const filters = append(el("div", "compact-filter"), chooser("画像档案", "memory.profile", profileOptions), recordScopeFilter("memories"), chooser("画像属性", "memory.attribute", [{ value: "", label: "全部属性" }, ...memoryAttributes.map(value => ({ value, label: value }))]), chooser("保留状态", "memory.state", [{ value: "", label: "全部有效记忆" }, { value: "important", label: "重要或主动保护" }, { value: "stable", label: "稳定画像" }]));
   const selected = profiles.find(profile => profile.id === selections.get("memory.profile"));
   const data = byRecordScope("memories", rows("memories")).filter(row => row.schema_version === 2 && row.active !== false && (!selected || (selected.owner === "person" ? row.person_id === selected.person_id : !row.person_id && row.persona_name === selected.persona_name)) && (!selections.get("memory.attribute") || row.attribute === selections.get("memory.attribute")) && (!selections.get("memory.state") || (selections.get("memory.state") === "stable" ? row.stable : row.important || row.protected)));
   const history = async (record) => {
-    const result = await action("memory.history", { id: record.id }); if (result === false) return;
+    const result = await request(() => bridge.apiPost("action", { action: "memory.history", id: record.id }), "变更记录已读取"); if (result === false) return;
     const versions = Array.isArray(result) ? result : result.records || result.history || [];
     openRecord("记忆变更记录", versions.length ? versions.map(version => card(`版本 ${version.version || ""}`, version.reason || "", memoryBody(version.record || version))) : empty("尚无历史版本"));
   };
@@ -1459,6 +1492,23 @@ function renderTemplates() {
   root.append(form); return root;
 }
 
+function lazyDebugView(selected) {
+  if (!debugPageCache || debugPageCache.id !== selected.id) {
+    const cache = { id: selected.id, loading: true };
+    debugPageCache = cache;
+    bridge.apiPost("action", { action: "debug_record", id: selected.id }).then(result => {
+      cache.result = result;
+    }).catch(error => { cache.error = error?.message || String(error); }).finally(() => {
+      cache.loading = false;
+      if (debugPageCache === cache && currentRoute.page === "context" && currentRoute.tab === "calls") render();
+    });
+  }
+  const cache = debugPageCache;
+  if (cache.loading) return el("p", "hint", "正在读取所选调用；其他记录正文尚未加载…");
+  if (cache.error) return append(el("div", "stack"), el("p", "danger-copy", cache.error), button("重新读取此轮", () => { debugPageCache = null; render(); }, "secondary"));
+  return renderDebugView(cache.result.view, cache.result.records, true);
+}
+
 function renderDebugRecords() {
   const root = el("div", "stack");
   const settings = snapshot.settings || {};
@@ -1485,7 +1535,7 @@ function renderDebugRecords() {
   prev.dataset.disabled = String(at <= 0); next.dataset.disabled = String(at < 0 || at >= filtered.length - 1);
   root.append(append(el("div", "compact-filter"), category, round, prev, next));
   if (snapshot.provider_capture_available === false) root.append(el("p", "hint warning", "当前 HTTP 捕获适配不可用；旧快照不冒充原文。"));
-  root.append(selected ? renderDebugView(selected, records, true) : empty("此类别暂时没有调用记录")); return root;
+  root.append(selected ? snapshot.debug_lazy ? lazyDebugView(selected) : renderDebugView(selected, records, true) : empty("此类别暂时没有调用记录")); return root;
 }
 
 function renderDebugTrial() {

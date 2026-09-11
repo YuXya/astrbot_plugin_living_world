@@ -378,7 +378,7 @@ def unified_memory_text(row, now):
 
 
 def unified_memory_rows(records, *, seen=None):
-    """Accept only migrated records; repeated selection of the same version is harmless."""
+    """Accept current-format records; repeated selection of the same version is harmless."""
     seen = set() if seen is None else seen
     rows = []
     for row in records:

@@ -591,7 +591,6 @@ class ChatService:
                 for key in (
                     "prompt",
                     "system_prompt",
-                    "contexts",
                     "image_urls",
                     "audio_urls",
                     "extra_user_content_parts",
@@ -601,6 +600,8 @@ class ChatService:
                 )
             }
             captured["tools"] = req.func_tool.openai_schema() if req.func_tool else []
+            captured["host_history_messages"] = len(getattr(req, "contexts", None) or [])
+            captured["snapshot_notice"] = "宿主历史不在插件快照中重复保存；此项不是 API 请求原文。"
             captured.update(persona_id=self.runtime.settings["persona_id"], scope=trace["scope"])
             self.record(
                 trace,

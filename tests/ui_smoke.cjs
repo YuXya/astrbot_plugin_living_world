@@ -111,14 +111,17 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       window.fixture.settings.context_usage = structuredClone(bootstrap.context_usage_defaults);
       window.AstrBotPluginPage = {
         ready: async () => ({ isDark: false }),
-        apiGet: async (endpoint) => { window.calls.push({ endpoint, method: "GET" }); return structuredClone(endpoint === "export" ? { version: 1, settings: window.fixture.settings } : window.fixture); },
+        apiGet: async (endpoint) => { window.calls.push({ endpoint, method: "GET" }); if (endpoint === "state" && window.rejectStateRead) throw new Error("保存设置不应重新读取全部状态"); return structuredClone(endpoint === "export" ? { version: 1, settings: window.fixture.settings } : window.fixture); },
         apiPost: async (endpoint, body) => {
           window.calls.push({ endpoint, method: "POST", body: structuredClone(body) });
           if (window.failNext) { window.failNext = false; throw new Error("测试来源暂时不可用"); }
           if (endpoint === "settings") {
+            const unchangedSocial = !body.social || Object.entries(body.social).every(([key, value]) => JSON.stringify(window.fixture.settings.social[key]) === JSON.stringify(value));
+            const settingsOnly = Object.keys(body).every(key => ["context_usage", "context_layout", "reply", "social"].includes(key)) && unchangedSocial;
             const merge = (target, patch) => { for (const [key, value] of Object.entries(patch)) { if (value && typeof value === "object" && !Array.isArray(value)) merge(target[key] ||= {}, value); else target[key] = structuredClone(value); } }; merge(window.fixture.settings, body);
             for (const [id, config] of Object.entries(body.drives || {})) window.fixture.drives.meters[id].config = structuredClone(config);
             window.refreshDriveFixture();
+            return { settings: structuredClone(window.fixture.settings), settings_only: settingsOnly };
           }
           if (["save_drive_settings", "set_drive_value"].includes(body.action)) {
             const meter = window.fixture.drives.meters[body.id];
@@ -133,6 +136,11 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
           if (body.action === "save_template" || body.action === "reset_template") {
             const row = window.fixture.debug.templates.find((item) => item.task === body.task);
             if (row) row.template = body.action === "reset_template" ? row.default_template : body.template;
+            return { status: "success", task: body.task, template: row.template };
+          }
+          if (body.action === "update_state") {
+            Object.assign(window.fixture.state, body.patch);
+            return structuredClone(window.fixture.state);
           }
           if (body.action === "debug_build") return { request: structuredClone(window.fixture.debug_records[0].request) };
           if (body.action === "debug_preview") {
@@ -161,11 +169,14 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
             row.actions = { news: { enabled: false, reason: "课堂不需要新闻", intent: "", at: null, execution: { status: "disabled" } }, search: { enabled: true, reason: "遇到具体学习疑问，需要核对函数概念", intent: "搜索函数学习方法", at: `${tomorrow}T09:10:00+08:00`, execution: { status: "pending" } }, social: { enabled: false, reason: "本次要求不安排主动聊天", intent: "", at: null, execution: { status: "disabled" } } };
             return structuredClone(row);
           }
-          if (body.action === "update_activity") {
-            const row = window.fixture.activities.find((item) => item.id === body.id);
-            if (row.detailed) window.fixture.detail_history.push({ id: `history-${row.detail_version}`, activity_id: row.id, archived_at: new Date().toISOString(), activity: structuredClone(row), reason: "大纲已修改" });
-            Object.assign(row, body.patch, { detailed: false, actions: {}, description: "", detail_version: "" });
-            return structuredClone(row);
+          if (["update_activity", "update_activities"].includes(body.action)) {
+            const changed = (body.updates || [{ id: body.id, changes: body.patch }]).map(update => {
+              const row = window.fixture.activities.find(item => item.id === update.id);
+              if (row.detailed) window.fixture.detail_history.push({ id: `history-${row.detail_version}`, activity_id: row.id, archived_at: new Date().toISOString(), activity: structuredClone(row), reason: "大纲已修改" });
+              Object.assign(row, update.changes, { detailed: false, actions: {}, description: "", detail_version: "" });
+              return row;
+            });
+            return structuredClone({ result: body.action === "update_activity" ? changed[0] : changed, page_state: { activities: window.fixture.activities, detail_history: window.fixture.detail_history } });
           }
           if (body.action === "memory.update") {
             const row = window.fixture.memories.find(item => item.id === body.id);
@@ -187,6 +198,10 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
       await page.locator(`#section-panel[data-page="${name}"][data-section="${tab}"]`).waitFor();
     };
     const only = process.env.LIVING_WORLD_UI_SUITE;
+    if (!only || only === "lightweight") {
+    process.stdout.write("Lightweight template and JSON actions…\n");
+    await require("./ui_lightweight.cjs")(page, go);
+    }
     if (!only || only === "format") {
     process.stdout.write("Formatting regressions…\n");
     await require("./ui_body_formatting.cjs")(page);

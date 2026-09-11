@@ -629,9 +629,6 @@ class MemoryService:
                 for job in self.runtime.store.list("memory_jobs"):
                     if key in job.get("source_keys", []):
                         self.runtime.store.delete("memory_jobs", job["id"])
-                for archived in self.runtime.store.list("memory_legacy"):
-                    if archived.get("namespace") == self.namespace and archived.get("key") == key:
-                        self.runtime.store.delete("memory_legacy", archived["id"])
             self.runtime.store.delete(self.namespace, id)
             for version in self.versions(id):
                 self.runtime.store.delete("memory_versions", version["id"])
@@ -683,7 +680,6 @@ class MemoryService:
         sources=None,
         persona_name=None,
         people=None,
-        migration=False,
         **metadata,
     ):
         """Persist source evidence; completion keeps only its digest and output IDs."""
@@ -713,7 +709,6 @@ class MemoryService:
             "people": people or [],
             "persona_name": name,
             "occurred_at": occurred_at or "",
-            "migration": bool(migration),
             "created_at": _stamp(_now()),
             "status": "pending",
             "attempts": 0,
@@ -771,7 +766,6 @@ class MemoryService:
             "status": "pending",
             "attempts": 0,
             "retry_at": 0,
-            "migration": False,
             "sources": [],
         }
         self.runtime.store.put("memory_jobs", job_id, job)
@@ -895,18 +889,13 @@ class MemoryService:
             self.runtime.store.list("memory_jobs"), key=lambda row: row.get("created_at", "")
         )
         chats, batches = {}, []
-        status = self.migration_status()
         for job in jobs:
-            if (
-                job.get("retry_at", 0) > time.time()
-                or job.get("migration")
-                and status.get("paused")
-            ):
+            if job.get("retry_at", 0) > time.time():
                 continue
             if not self._sources_enabled(job):
                 continue
             if not job.get("persona_name"):
-                name = status.get("persona_name") if job.get("migration") else self._persona()
+                name = self._persona()
                 if not name:
                     continue
                 job["persona_name"] = name
@@ -932,7 +921,6 @@ class MemoryService:
             return result
         self._processing = True
         try:
-            self.migrate()
             for batch in self._eligible_batches()[:20]:
                 if not self.runtime.enabled("memory"):
                     break
@@ -1038,10 +1026,6 @@ class MemoryService:
                 raise ValueError("Extracted memory names an unprovided identity")
             supporting = [job for job in batch if evidence in job["text"]]
             source = supporting[0]
-            if source.get("migration") and source.get("person_id"):
-                if person and person != source["person_id"]:
-                    raise ValueError("Migration cannot change a recorded QQ identity")
-                person = source["person_id"]
             stable = candidate.get("stable") is True
             global_profile = (
                 person
@@ -1157,7 +1141,6 @@ class MemoryService:
                         "key": job["key"],
                         "digest": job.get("digest", _digest(job["text"])),
                         "memory_ids": [row["id"] for row in results],
-                        "migration": job.get("migration", False),
                         "completed_at": _stamp(_now()),
                     },
                 )
@@ -1214,9 +1197,6 @@ class MemoryService:
             for job in self.runtime.store.list("memory_jobs"):
                 if key in job.get("source_keys", []):
                     self.runtime.store.delete("memory_jobs", job["id"])
-            for archived in self.runtime.store.list("memory_legacy"):
-                if archived.get("key") == key:
-                    self.runtime.store.delete("memory_legacy", archived["id"])
 
     def _decay_enabled(self):
         return self.runtime.enabled("memory") and self.config["forgetting_enabled"]
@@ -1263,177 +1243,11 @@ class MemoryService:
                     self.runtime.store.put(self.namespace, row["id"], row)
         return result
 
-    def migration_status(self):
-        saved = self.runtime.store.get("memory_migration", "v2", {})
-        all_jobs = self.runtime.store.list("memory_jobs")
-        jobs = [row for row in all_jobs if row.get("migration")]
-        done = [row for row in self.runtime.store.list("memory_materials") if row.get("migration")]
+    def queue_status(self):
+        jobs = self.runtime.store.list("memory_jobs")
         return {
-            "version": 1,
-            "paused": bool(saved.get("paused", False)),
-            "persona_name": saved.get("persona_name", ""),
-            "total": len(jobs) + len(done),
             "pending": len(jobs),
-            "failed": sum(row.get("status") == "failed" for row in jobs),
-            "completed": len(done),
-            "waiting_persona": bool(jobs and not saved.get("persona_name")),
-            "queue_pending": len(all_jobs),
-            "queue_failed": sum(row.get("status") == "failed" for row in all_jobs),
-            "chat_pending": sum(row.get("kind") == "chat" for row in all_jobs),
-            "feedback_pending": len(self.runtime.store.list("memory_feedback")),
+            "failed": sum(job.get("status") == "failed" for job in jobs),
+            "feedback": len(self.runtime.store.list("memory_feedback")),
             "processing": self._processing,
         }
-
-    def pause_migration(self):
-        state = self.runtime.store.get("memory_migration", "v2", {})
-        state["paused"] = True
-        self.runtime.store.put("memory_migration", "v2", state)
-        return self.migration_status()
-
-    def resume_migration(self):
-        state = self.runtime.store.get("memory_migration", "v2", {})
-        state["paused"] = False
-        self.runtime.store.put("memory_migration", "v2", state)
-        for job in self.runtime.store.list("memory_jobs"):
-            if job.get("migration"):
-                job.update(retry_at=0, status="pending")
-                self.runtime.store.put("memory_jobs", job["id"], job)
-        return self.migration_status()
-
-    def migrate(self, saved_settings=None, *, importing=False):
-        """Archive once, then enqueue old source records without changing their dates."""
-        store = self.runtime.store
-        state = store.get("memory_migration", "v2", {})
-        initial = not state
-        with self._transaction():
-            if not state:
-                state = {
-                    "version": 2,
-                    "created_at": _stamp(_now()),
-                    "persona_name": self._persona(),
-                    "paused": False,
-                }
-                store.put("memory_migration", "v2", state)
-                store.put(
-                    "memory_config_history",
-                    "v2",
-                    {
-                        "id": "v2",
-                        "settings": copy.deepcopy(saved_settings or self.runtime.settings),
-                    },
-                )
-                for task in (
-                    "memory.reflect",
-                    "journal.write",
-                    "notes.write",
-                    "journal.brief",
-                    "notes.brief",
-                ):
-                    template = store.get("prompt_templates", task)
-                    if template:
-                        store.put(
-                            "prompt_template_history",
-                            "memory-v2:" + task,
-                            {
-                                "id": "memory-v2:" + task,
-                                "task": task,
-                                "template": template,
-                                "created_at": _stamp(_now()),
-                            },
-                        )
-                        store.delete("prompt_templates", task)
-            elif not state.get("persona_name") and self._persona():
-                state["persona_name"] = self._persona()
-                store.put("memory_migration", "v2", state)
-            if not initial and not importing:
-                return self.migration_status()
-            events = {str(row.get("id", "")): row for row in store.list("events")}
-            observations = {str(row.get("id", "")): row for row in store.list("observations")}
-            journals = {str(row.get("id", "")): row for row in store.list("journals")}
-            actions = {str(row.get("id", "")): row for row in store.list("actions")}
-            sources = []
-            for row in store.list(self.namespace):
-                if row.get("schema_version") == 2 or not row.get("id"):
-                    continue
-                key = "legacy-memory:" + str(row.get("id", ""))
-                store.put(
-                    "memory_legacy",
-                    key,
-                    {"id": key, "key": key, "namespace": self.namespace, "record": row},
-                )
-                # The source document will replace its old automatic copy.
-                duplicate = (
-                    str(row.get("source_event_id", "")) in events
-                    or str(row.get("id", "")).removeprefix("journal:") in journals
-                    or str(row.get("journal_id", "")) in journals
-                    or any(
-                        str(item.get("id", "")) in observations
-                        or str(item.get("id", "")) in journals
-                        for item in row.get("sources", [])
-                        if isinstance(item, dict)
-                    )
-                )
-                if not duplicate and row.get("active", True):
-                    sources.append((key, row, row.get("source", "memory"), row.get("text", "")))
-                store.delete(self.namespace, row["id"])
-            for namespace, records, prefix in (
-                ("events", events, "event"),
-                ("observations", observations, "observation"),
-                ("journals", journals, "journal"),
-            ):
-                for identifier, row in records.items():
-                    if not identifier:
-                        continue
-                    key = prefix + ":" + identifier
-                    archive_key = namespace + ":" + identifier
-                    if store.get("memory_legacy", archive_key):
-                        continue
-                    store.put(
-                        "memory_legacy",
-                        archive_key,
-                        {"id": archive_key, "key": key, "namespace": namespace, "record": row},
-                    )
-                    if (
-                        namespace == "events"
-                        and str(row.get("source_record_id", "")) in observations
-                    ):
-                        continue
-                    if namespace == "events" and identifier.startswith("action:"):
-                        action = actions.get(identifier.removeprefix("action:"), {})
-                        if str(action.get("observation_id", "")) in observations:
-                            continue
-                    if namespace == "observations":
-                        if (
-                            row.get("module") == "weather"
-                            or not row.get("factual_summary")
-                            or row.get("reflection_status") == "failed"
-                        ):
-                            continue
-                        source = row.get("module", "")
-                        body = (
-                            "事实摘要："
-                            + row["factual_summary"]
-                            + "\n角色感想："
-                            + row.get("impression", "")
-                        )
-                    else:
-                        source = row.get("source", row.get("kind", ""))
-                        body = row.get("text", "")
-                    sources.append((key, row, source, body))
-            for key, row, source, body in sources:
-                self.enqueue_material(
-                    body,
-                    scope=row.get("scope", "global"),
-                    source=source,
-                    key=key,
-                    occurred_at=row.get("occurred_at") or row.get("created_at") or "",
-                    person_id=row.get("person_id", ""),
-                    sources=row.get("sources", []),
-                    persona_name=state.get("persona_name", ""),
-                    migration=True,
-                    source_keys=row.get("source_keys", []),
-                    important=row.get("important", False),
-                    reading_basis=row.get("reading_basis", ""),
-                    journal_day=row.get("day", ""),
-                )
-        return self.migration_status()

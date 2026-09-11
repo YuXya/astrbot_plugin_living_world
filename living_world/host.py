@@ -41,6 +41,30 @@ class AstrBotHost:
         result = await self.resolve_session(scope)
         return result["persona_id"] if result["reason_code"] == "resolved" else ""
 
+    async def person_name(self, scope, number):
+        """Read a QQ nickname, with the originating group as a non-friend fallback."""
+        from .social import destination
+
+        target = destination(scope)
+        try:
+            name = await self.target_name(f"{target.split(':', 1)[0]}:FriendMessage:{int(number)}")
+            if name:
+                return name
+        except Exception:
+            pass
+        platform = self.platform(target)
+        if (
+            ":GroupMessage:" not in target
+            or platform is None
+            or platform.meta().name != "aiocqhttp"
+        ):
+            return ""
+        result = await platform.get_client().call_action(
+            "get_group_member_info", group_id=int(target.split(":", 2)[2]), user_id=int(number)
+        )
+        name = result.get("nickname") if isinstance(result, dict) else None
+        return name.strip() if isinstance(name, str) else ""
+
     async def resolve_session(self, scope):
         """Use the host's persona precedence, including 4.27's provider default."""
         result = {

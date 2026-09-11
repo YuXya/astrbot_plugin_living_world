@@ -38,10 +38,12 @@ _RANGES = {
 
 
 def memory_settings(value=None):
-    """Upgrade old decay settings without enabling the new destructive policy."""
+    """Validate current memory settings without converting historical options."""
     result = copy.deepcopy(DEFAULT_MEMORY)
     if not isinstance(value, dict):
         return result
+    if set(value) - set(DEFAULT_MEMORY):
+        raise ValueError("记忆配置含未知或旧版本字段，不再自动转换")
     if "forgetting_enabled" in value:
         if not isinstance(value["forgetting_enabled"], bool):
             raise ValueError("遗忘开关必须是布尔值")

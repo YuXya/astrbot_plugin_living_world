@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from .drives import DRIVE_DEFAULTS, validate_drive
 from .memory_config import DEFAULT_MEMORY, memory_settings
-from .context_usage import DEFAULT_USAGE, integer, legacy_usage, validate_usage
+from .context_usage import DEFAULT_USAGE, integer, validate_usage
 from .layout import (
     DEFAULT_SETTINGS as LAYOUT_DEFAULTS,
     validate_settings as validate_layout_settings,
@@ -134,18 +134,6 @@ def settings_from(patch=None):
     if patch is not None and not isinstance(patch, dict):
         raise ValueError("配置必须是对象")
     result = merge(DEFAULTS, patch or {})
-    saved_reply = (patch or {}).get("reply", {})
-    if isinstance(saved_reply, dict):
-        for key in ("private_prompt", "proactive_prompt"):
-            if key not in saved_reply:
-                result["reply"][key] = saved_reply.get("group_prompt", DEFAULT_GROUP_REPLY_PROMPT)
-    saved_layout = (patch or {}).get("context_layout")
-    if isinstance(saved_layout, dict) and saved_layout.get("version") in {1, 2, 3}:
-        # Historical objects must not be merged with newly introduced task keys.
-        result["context_layout"] = copy.deepcopy(saved_layout)
-    saved_usage = (patch or {}).get("context_usage")
-    if isinstance(saved_usage, dict) and saved_usage.get("version") == 1:
-        result["context_usage"] = copy.deepcopy(saved_usage)
     for section in (
         "modules",
         "drives",
@@ -165,17 +153,11 @@ def settings_from(patch=None):
     ):
         if not isinstance(result[section], dict):
             raise TypeError(f"{section} 必须是对象")
-    if "context_usage" not in (patch or {}):
-        result["context_usage"] = legacy_usage(patch or {})
     result["context_usage"] = validate_usage(result["context_usage"])
     result["context_layout"] = validate_layout_settings(result["context_layout"])
     integer(result["social"]["target_count"], 1, 20, "每轮抽选目标数")
     result["social"]["target_count"] = 1
     result["memory"] = memory_settings(result["memory"])
-    # Old backup keys remain readable for migration, but never become live controls.
-    result["character"].pop("energy", None)
-    for key in ("news_count", "search_count", "social_count"):
-        result["life"].pop(key, None)
     if set(result["drives"]) != set(DRIVE_DEFAULTS):
         raise ValueError("内在状态配置包含未知项目")
     result["drives"] = {
@@ -261,12 +243,6 @@ def settings_from(patch=None):
             if not value.is_integer():
                 raise ValueError(f"{section}.{key} 必须为整数")
             result[section][key] = int(value)
-    original_news = (patch or {}).get("news", {})
-    if "sources" not in original_news and original_news.get("feeds"):
-        result["news"]["sources"] = [
-            {"id": f"legacy-{i}", "name": url, "url": url, "enabled": True}
-            for i, url in enumerate(original_news["feeds"])
-        ]
     for section in ("news", "daily_digest"):
         rows = result[section]["sources"]
         if not isinstance(rows, list) or len(rows) > 100:

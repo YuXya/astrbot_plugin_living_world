@@ -33,7 +33,6 @@ from .context import (
 )
 from .debug import DebugService, json_value
 from .drives import DriveService
-from .drives_migration import migrate_drives
 from .journal import JournalService
 from .layout import (
     assemble,
@@ -46,9 +45,8 @@ from .layout import (
     FIELD_BLOCKS,
 )
 from .context_catalog import memory_category
-from .context_usage import archive_conversion, usage_for
+from .context_usage import usage_for
 from .life import LifeService
-from .life_migration import migrate_life
 from .memory import MemoryService
 from .store import Store
 
@@ -90,9 +88,6 @@ class Runtime:
         self.memory = MemoryService(self)
         self.life = LifeService(self)
         with self.store.transaction():
-            archive_conversion(self.store, saved_settings)
-            migrate_life(self.life)
-            migrate_drives(self)
             self.drives = DriveService(self)
             self.store.put("settings", "current", self.settings)
         self.journal = JournalService(self)
@@ -101,7 +96,6 @@ class Runtime:
 
         self.social = SocialService(self)
         self.sources = SourceService(self)
-        self.memory.migrate(saved_settings)
         # An interrupted delivery is ambiguous: never automatically resend it.
         for row in self.store.list("actions"):
             if row.get("status") == "running":
@@ -1155,6 +1149,16 @@ class Runtime:
     async def update_settings(self, patch):
         proposed = settings_from(merge(self.settings, patch))
         old = self.settings
+        context_fields = {"context_layout", "context_usage", "reply"}
+        if (
+            patch
+            and set(patch) <= context_fields | {"social"}
+            and old["social"] == proposed["social"]
+        ):
+            # Presentation settings apply to future snapshots without running maintenance.
+            self.store.put("settings", "current", proposed)
+            self.settings = proposed
+            return {"settings": copy.deepcopy(proposed), "settings_only": True}
         plan_keys = (
             "daily_plan_time",
             "activity_count",
@@ -1217,7 +1221,6 @@ class Runtime:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self.memory.migrate(old)
         self.kick_memory()
         return {"settings": copy.deepcopy(self.settings)}
 
@@ -1296,6 +1299,8 @@ class Runtime:
             await asyncio.sleep(float(self.settings["life"]["tick_seconds"]))
 
     async def snapshot(self):
+        from .profile_names import named_profiles
+
         catalogs = await self.host.catalogs(self.settings["sessions"])
         session_status = [await self.chat.inspect(s["umo"]) for s in self.settings["sessions"]]
         diagnostics = []
@@ -1326,6 +1331,8 @@ class Runtime:
             dependency.update(status="unavailable", text=str(exc))
             if self.enabled("bilibili") or self.enabled("daily_digest"):
                 diagnostics.append(str(exc))
+        memories = self.store.list("memories")
+        memory_profiles = await named_profiles(self, self.memory.profiles(), memories)
         return {
             "version": __version__,
             "settings": self.settings,
@@ -1359,30 +1366,14 @@ class Runtime:
             "actions": self.store.list("actions")[:200],
             "daily_digest_runs": self.store.list("daily_digest_runs")[:100],
             "bilibili_dependency": dependency,
-            "debug_records": self.store.list("debug_records"),
-            "debug_views": self.debug.views(),
+            **self.debug.page_index(),
             "debug": self.debug.snapshot(),
             "context_layout_catalog": layout_catalog(),
             "session_status": session_status,
             "provider_capture_available": self.chat.audit.available and self.chat.audit.active,
-            "memories": [
-                {**row, "context_category": memory_category(row)}
-                for row in self.store.list("memories")
-            ],
-            "memory_status": {
-                "migration": self.memory.migration_status(),
-                "queue": {
-                    "pending": sum(
-                        not row.get("migration") for row in self.store.list("memory_jobs")
-                    ),
-                    "failed": sum(
-                        not row.get("migration") and row.get("status") == "failed"
-                        for row in self.store.list("memory_jobs")
-                    ),
-                    "feedback": len(self.store.list("memory_feedback")),
-                },
-            },
-            "memory_profiles": self.memory.profiles(),
+            "memories": [{**row, "context_category": memory_category(row)} for row in memories],
+            "memory_status": {"queue": self.memory.queue_status()},
+            "memory_profiles": memory_profiles,
             "observations": self.store.list("observations"),
             "entries": self.journal.list_entries(),
             "events": self.store.list("events")[:200],
@@ -1397,15 +1388,15 @@ class Runtime:
         self.memory.maintain()
         return {
             "format": "living-world",
-            "version": 1,
+            "version": 2,
             "created_at": time.time(),
             "settings": self.settings,
             "records": self.store.export(),
         }
 
     async def restore(self, backup):
-        if backup.get("format") != "living-world" or backup.get("version") != 1:
-            raise ValueError("不支持的备份格式")
+        if backup.get("format") != "living-world" or backup.get("version") != 2:
+            raise ValueError("只支持当前版本导出的备份，旧备份不再自动转换")
         restored = settings_from(backup.get("settings", {}))
         self.store.validate_records(backup.get("records"))
         # Imported automatic behavior stays disabled until explicitly configured.
@@ -1415,10 +1406,7 @@ class Runtime:
         try:
             with self.store.transaction():
                 self.store.restore(backup["records"])
-                archive_conversion(self.store, backup.get("settings", {}))
                 self.settings = restored
-                migrate_life(self.life)
-                migrate_drives(self, legacy_settings=backup.get("settings", {}))
                 self.drives.rebase()
                 self.memory.rebase_clock()
                 # An older backup cannot restore a memory that was permanently forgotten.
@@ -1426,7 +1414,6 @@ class Runtime:
                     self.memory.delete(tombstone["id"])
                 for tombstone in self.store.list("memory_source_tombstones"):
                     self.memory.delete_source(tombstone["id"])
-                self.memory.migrate(backup.get("settings", {}), importing=True)
         finally:
             self.settings = before
         await self.update_settings(restored)
@@ -1437,6 +1424,19 @@ class Runtime:
 
     async def action(self, data):
         return await self.run("admin", self._action(data))
+
+    async def page_action(self, data):
+        """Return affected page records without reloading unrelated host or debug data."""
+        result = await self.action(data)
+        if data.get("action") in {"update_activity", "update_activities"}:
+            return {
+                "result": result,
+                "page_state": {
+                    "activities": self.life.list_activities(),
+                    "detail_history": self.store.list("life_detail_history"),
+                },
+            }
+        return result
 
     async def _action(self, data):
         action = data.get("action")
@@ -1457,6 +1457,8 @@ class Runtime:
             return self.debug.clear(data.get("category") or None)
         if action == "debug_export_body":
             return self.debug.export_body(str(data["call_id"]), str(data["side"]))
+        if action == "debug_record":
+            return self.debug.page_record(str(data["id"]))
         if action == "save_template":
             return self.debug.save_template(str(data["task"]), data["template"])
         if action == "reset_template":
@@ -1489,15 +1491,9 @@ class Runtime:
             return self.life.update_activity(data["id"], data["patch"])
         if action == "update_state":
             return self.life.update_state(data["patch"])
-        if action == "memory.migration.pause":
-            return self.memory.pause_migration()
-        if action == "memory.migration.resume":
-            result = self.memory.resume_migration()
-            self.kick_memory()
-            return result
         if action == "memory.process":
             self.kick_memory()
-            return self.memory.migration_status()
+            return self.memory.queue_status()
         if action == "memory.history":
             return {"records": self.memory.history(str(data["id"]))}
         if action == "memory.update":

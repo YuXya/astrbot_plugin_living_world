@@ -339,47 +339,7 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(self.memory.versions(row["id"]), [])
         self.assertEqual(self.memory.remember("新内容", key="fixed"), {})
 
-    def test_migration_preserves_time_and_archives_once_and_waits_for_persona(self):
-        self.runtime.settings["persona_id"] = ""
-        self.runtime.store.put(
-            "events",
-            "e1",
-            {
-                "id": "e1",
-                "text": "去年练琴",
-                "scope": "global",
-                "source": "fiction",
-                "created_at": 1700000000,
-            },
-        )
-        self.runtime.store.put(
-            "memories",
-            "old",
-            {"id": "old", "text": "去年练琴", "source_event_id": "e1", "scope": "global"},
-        )
-        status = self.memory.migrate()
-        self.assertTrue(status["waiting_persona"])
-        self.assertEqual(status["pending"], 1)
-        self.assertEqual(self.run_async(self.memory.process_pending())["processed"], 0)
-        self.runtime.settings["persona_id"] = "可可"
-        self.runtime.response = {"memories": [self.candidate("去年练琴")]}
-        self.assertEqual(self.run_async(self.memory.process_pending())["processed"], 1)
-        self.assertEqual(self.memory.recall()[0]["occurred_at"], "2023-11-14T22:13:20.000000+00:00")
-        self.memory.migrate()
-        self.assertEqual(self.memory.migration_status()["completed"], 1)
-        self.assertIsNotNone(self.runtime.store.get("memory_legacy", "legacy-memory:old"))
 
-    def test_migration_pause_and_source_deletion(self):
-        self.runtime.store.put("journals", "j1", {"id": "j1", "text": "日记", "kind": "journal"})
-        self.memory.migrate()
-        self.memory.pause_migration()
-        self.assertEqual(self.run_async(self.memory.process_pending())["processed"], 0)
-        self.memory.resume_migration()
-        row = self.memory.remember("日记里的事实", source_keys=["journal:j1"])
-        self.memory.delete_source("journal:j1")
-        self.assertIsNone(self.runtime.store.get("memories", row["id"]))
-        self.assertEqual(self.runtime.store.list("memory_jobs"), [])
-        self.assertEqual(self.memory.enqueue_material("日记", key="journal:j1"), {})
 
     def test_settings_validate_ranges_and_default_forgetting_off(self):
         self.assertFalse(memory_settings({"half_life_days": 30})["forgetting_enabled"])
@@ -449,18 +409,6 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(self.memory.recall("小明", scope="group:1", person_id="qq:99"), [visible])
         self.assertEqual(self.memory.recall("小明", scope="group:2", person_id="qq:99"), [])
 
-    def test_migration_does_not_capture_new_persona_sources_on_each_worker(self):
-        self.memory.migrate()
-        self.runtime.settings["persona_id"] = "新名字"
-        self.runtime.store.put(
-            "events", "new", {"id": "new", "text": "新名字的经历", "source": "fiction"}
-        )
-        self.memory.migrate()
-        self.assertEqual(self.runtime.store.list("memory_jobs"), [])
-        self.assertIsNone(self.runtime.store.get("memory_legacy", "events:new"))
-        job = self.memory.enqueue_material("新名字的经历", key="event:new")
-        self.assertEqual(job["persona_name"], "新名字")
-        self.assertFalse(job["migration"])
 
     def test_merge_preserves_source_modules_and_deletion_removes_all_versions(self):
         first = self.memory.remember("新闻读到天文学", source="news")
