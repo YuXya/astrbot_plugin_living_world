@@ -303,7 +303,7 @@ async def test_old_occurrence_is_preserved_and_private_memory_stays_private(worl
     assert world.store.get("events", "legacy") == raw
 
 
-async def test_detail_plan_preview_and_source_evidence_use_correct_material(world):
+async def test_detail_plan_and_source_evidence_use_correct_material(world):
     raw = f"搜索所得：中文摘要\n角色感想：想了解天文\n阅读依据：search_results\n来源：{URL}"
     world.record_event(raw, source="search", kind="search", key="search:one")
     world.record_event("今天散步", source="fiction", key="today")
@@ -336,9 +336,6 @@ async def test_detail_plan_preview_and_source_evidence_use_correct_material(worl
     plan = json.dumps(world.life.plan_request()["context"], ensure_ascii=False)
     assert "memories" not in world.life.plan_request()["context"]
     assert URL not in plan
-    preview = await world.build_test_request("life.detail")
-    assert preview["dynamic_context"]["待细化活动"] == detail["context"]["待细化活动"]
-    assert URL not in preview["prompt"]
     reflected = await world.prepare_request(
         "search.reflect",
         "search",

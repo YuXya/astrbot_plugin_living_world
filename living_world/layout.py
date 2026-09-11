@@ -1,4 +1,4 @@
-"""Ordered, role-aware context blocks shared by chat, tasks and diagnostic trials."""
+"""Ordered, role-aware context blocks shared by chat and background tasks."""
 
 import copy
 import json
@@ -135,9 +135,9 @@ V2_BLOCK_NAMES = {
     "weather": "来源设置：天气",
     "observations": "近期见闻：综合见闻",
     "group_history": "聊天白名单：近期会话消息",
-    "task.date": "模型试跑：任务日期",
-    "task.parameters": "模型试跑：任务参数",
-    "task.reason": "模型试跑：任务原因与聊天意图",
+    "task.date": "提示词模板：任务日期",
+    "task.parameters": "提示词模板：任务参数",
+    "task.reason": "提示词模板：任务原因与聊天意图",
     "task.activity": "日程与执行：待细化活动",
     "task.range": "日程与执行：活动时间范围",
     "task.actions": "日程与执行：近期实际行动",
@@ -146,13 +146,13 @@ V2_BLOCK_NAMES = {
     "task.instruction": "日程与执行：管理员本次要求",
     "task.editable": "日程与执行：可调整活动",
     "task.candidates": "来源设置：新闻候选",
-    "task.question": "模型试跑：本次问题与群消息",
+    "task.question": "提示词模板：本次问题与群消息",
     "task.evidence": "近期见闻：来源原始证据",
     "task.events": "日记与笔记：回顾经历资料",
     "task.document": "日记与笔记：日记与笔记原文",
     "task.brief_limit": "上下文用量：简报长度要求",
-    "task.material": "模型试跑：本次任务材料",
-    "task.other": "模型试跑：其他任务资料",
+    "task.material": "提示词模板：本次任务材料",
+    "task.other": "提示词模板：其他任务资料",
     "group_reply": "回复与插话：本轮群聊回复要求",
 }
 

@@ -1,6 +1,5 @@
 """Independent allowances, canonical names, migration and frozen request material."""
 
-import copy
 import json
 from datetime import timedelta
 
@@ -15,7 +14,6 @@ from living_world.context_catalog import (
     memory_category,
 )
 from living_world.context_usage import DEFAULT_USAGE
-from living_world.layout import LEGACY_LAYOUT, assemble, collect_task_blocks, validate_settings
 from living_world.runtime import Runtime
 from test_runtime import FakeHost, GROUP, PRIVATE
 
@@ -32,10 +30,6 @@ def test_names_are_real_menu_names_and_categories_are_disjoint():
     assert memory_category({"id": "journal:legacy", "kind": "knowledge"}) is None
     assert memory_category({"source": "journal", "kind": "emotional"}) is None
     assert memory_category({"source": "notes", "kind": "knowledge"}) is None
-
-
-
-
 
 
 @pytest.mark.parametrize("value", [-1, 51, 1.2, True, float("nan"), "4"])
@@ -156,50 +150,15 @@ async def test_source_archives_are_not_direct_context_and_weather_is_independent
             }
         }
     )
-    trial = await runtime.prepare_trial_request(request)
-    assert trial["prompt"] == request["prompt"]
     raw = json.loads(await runtime.context_text(reinforce=False))
     assert not raw["observations"] and not raw["recent_memories"] and not raw["memories"]
     assert len(runtime.store.list("observations")) == 7
 
 
-async def test_legacy_trial_preserves_four_sources_and_old_names(runtime):
-    data = {
-        "context": {
-            "current_time": "2026-09-10T12:00:00+08:00",
-            "memories": [],
-            "schedule": {"status": "missing"},
-            "observations": [
-                {"module": module, "text": module.upper()}
-                for module in ("news", "search", "bilibili", "daily_digest")
-            ],
-        }
-    }
-    expected = assemble(
-        LEGACY_LAYOUT, collect_task_blocks(data, legacy=True), "SYSTEM", "TEMPLATE", legacy=True
-    )
-    request = {
-        "task": "social.message",
-        "module": "social",
-        "scope": "global",
-        "provider_id": "",
-        "prompt_mode": "structured",
-        "context_layout": LEGACY_LAYOUT,
-        "context_blocks": [],
-        "base_system_prompt": "SYSTEM",
-        "template": "TEMPLATE",
-        "dynamic_context": data,
-    }
-    trial = await runtime.prepare_trial_request(request)
-    assert trial["prompt"] == expected["prompt"]
-    assert "【近期见闻】" in trial["prompt"]
-    assert "近期见闻：综合见闻" not in trial["prompt"]
-
-
 @pytest.mark.parametrize(
     "scope, expected", [(GROUP, "会话类型：QQ群聊"), (PRIVATE, "会话类型：一对一私聊")]
 )
-async def test_selected_recipient_is_explicit_and_trial_has_no_send(runtime, scope, expected):
+async def test_selected_recipient_is_explicit_in_sent_message(runtime, scope, expected):
     await runtime.update_settings(
         {
             "modules": {"proactive": True},
@@ -215,11 +174,6 @@ async def test_selected_recipient_is_explicit_and_trial_has_no_send(runtime, sco
     assert "【聊天白名单：交谈对象与场合】" in request["prompt"]
     assert scope not in request["prompt"]
     assert len(runtime.host.sent) == 1
-    trial = await runtime.build_test_request("social.message", scope)
-    assert expected in trial["prompt"] and len(runtime.host.sent) == 1
-    before = runtime.store.export()
-    await runtime.prepare_trial_request(trial)
-    assert runtime.store.export() == before
 
 
 async def test_usage_restore_and_conversion_backup_are_persistent(runtime, tmp_path):

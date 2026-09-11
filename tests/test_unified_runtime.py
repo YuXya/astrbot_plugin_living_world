@@ -149,18 +149,6 @@ async def test_journal_reads_memories_not_raw_events_and_enqueues_original(world
     assert any(job["key"] == "journal:" + entry["id"] for job in world.store.list("memory_jobs"))
 
 
-async def test_build_and_trial_do_not_enqueue_or_reinforce(world):
-    world.memory.remember("可可喜欢画画", stable=True, source="admin")
-    before = world.store.export()
-    request = await world.build_test_request("life.plan")
-    assert world.host.calls == []
-    assert request["context_layout_version"] == 4
-    assert world.store.export() == before
-    await world.test_request(request)
-    assert not world.store.list("memory_jobs")
-    assert not world.store.list("memory_feedback")
-
-
 async def test_recall_tool_history_excludes_content_but_keeps_pairing(world):
     from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
 

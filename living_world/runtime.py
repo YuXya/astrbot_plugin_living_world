@@ -6,8 +6,7 @@ import json
 import logging
 import time
 import uuid
-from contextvars import ContextVar
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from . import __version__
@@ -20,15 +19,11 @@ from .config import (
     settings_from,
 )
 from .context import (
-    FICTION_NOTICE,
-    activity_material,
     clean_life_text,
-    normalize_context,
     material_time,
     observation_text,
     prepare_life_records,
     record_keys,
-    source_item,
     is_life_snapshot,
 )
 from .debug import DebugService, json_value
@@ -51,7 +46,6 @@ from .memory import MemoryService
 from .store import Store
 
 logger = logging.getLogger(__name__)
-PREVIEW_CONTEXT = ContextVar("living_world_preview_context", default=False)
 ACTION_MODULES = {
     "social": "proactive",
     "news": "news",
@@ -362,27 +356,11 @@ class Runtime:
             "dynamic_context": json_value(context),
             "sources": assembled["sources"],
             "injected_text": assembled["injected_text"],
-            "prompt_mode": "structured" if context is not None else "raw",
             "prompt": assembled["prompt"],
             "contexts": [],
             "parameters": {},
             "tools": [],
         }
-
-    @staticmethod
-    def format_task_context(context):
-        def text(value):
-            return (
-                value
-                if isinstance(value, str)
-                else json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
-            )
-
-        if context is None:
-            return ""
-        if isinstance(context, dict):
-            return "\n\n".join(f"【{key}】\n{text(value)}" for key, value in context.items())
-        return text(context)
 
     async def complete(
         self, task, module, default_template, context, scope="global", *, frozen_template=False
@@ -402,29 +380,29 @@ class Runtime:
         self.last_requests[(task, scope)] = copy.deepcopy(request)
         return await self._model_call(request)
 
-    async def _model_call(self, request, test=False):
+    async def _model_call(self, request):
         module, scope = request["module"], request["scope"]
-        gate = "debug" if test else {"social": "proactive", "exploration": None}.get(module, module)
+        gate = {"social": "proactive", "exploration": None}.get(module, module)
         version = self.config_version
 
         def gate_open():
             return (
                 not gate
                 or self.enabled(gate)
-                or (not test and module == "social" and self.enabled("interjection"))
+                or (module == "social" and self.enabled("interjection"))
             )
 
         if not gate_open() or not await self.scope_allowed(scope):
             raise ValueError("模块已停用或场合不在接入范围内")
         audit = self.debug.begin(
-            "test." + request["task"] if test else request["task"],
+            request["task"],
             request,
             module=module,
             scope=scope,
-            kind="test" if test else "model",
+            kind="model",
             **self.chat.audit.relation(),
         )
-        if audit and not test and (request["task"], scope) in self.last_requests:
+        if audit and (request["task"], scope) in self.last_requests:
             self.last_requests[(request["task"], scope)]["_debug_record_id"] = audit["id"]
         entry = {
             "id": uuid.uuid4().hex,
@@ -453,16 +431,16 @@ class Runtime:
                 if self.chat.audit.available and self.chat.audit.active:
                     call = self.chat.audit.background(request, audit, call)
                 result = await self.run(
-                    "debug" if test else module,
+                    module,
                     asyncio.wait_for(call, timeout=float(self.settings["model_timeout_seconds"])),
                 )
                 text, usage = result[:2]
                 raw = result[2] if len(result) > 2 else {"completion_text": text, "usage": usage}
-                if not test and (not isinstance(text, str) or not text.strip()):
+                if not isinstance(text, str) or not text.strip():
                     raise ValueError("模型没有返回文本")
                 self.debug.finish(audit, raw)
             entry.update(status="success", usage=usage)
-            if not test and not request["task"].startswith("memory.") and self.enabled("memory"):
+            if not request["task"].startswith("memory.") and self.enabled("memory"):
                 try:
                     self.memory.record_feedback(
                         entry["id"],
@@ -487,8 +465,7 @@ class Runtime:
             raise
         finally:
             entry["duration_ms"] = round((time.monotonic() - start) * 1000)
-            if not test:
-                self.store.put("usage", entry["id"], entry)
+            self.store.put("usage", entry["id"], entry)
 
     def audit_external(
         self,
@@ -566,295 +543,6 @@ class Runtime:
         except BaseException as exc:
             self.debug.finish(entry, status="unknown", error=str(exc) or type(exc).__name__)
             raise
-
-    async def build_test_request(self, task, scope="global"):
-        token = PREVIEW_CONTEXT.set(True)
-        try:
-            return await self._build_test_request(task, scope)
-        finally:
-            PREVIEW_CONTEXT.reset(token)
-
-    async def _build_test_request(self, task, scope="global"):
-        if not self.enabled("debug") or not await self.scope_allowed(scope):
-            raise ValueError("请开启调试模块并绑定人格／场合")
-        template = self.debug.get_default(task)
-        if not template:
-            raise ValueError("未知任务模板")
-        module = task.split(".", 1)[0]
-        context = {
-            "current_time": datetime.now(
-                ZoneInfo(self.settings["character"]["timezone"])
-            ).isoformat(),
-            "parameters": json_value(self.settings.get(module, {})),
-            "material": "在这里填入本次测试材料",
-        }
-        if task == "life.plan" and hasattr(self.life, "plan_request"):
-            draft = self.life.plan_request()
-            if hasattr(draft, "__await__"):
-                draft = await draft
-            template, context = draft["template"], draft["context"]
-            context["parameters"] = self.life.parameters()
-        elif task == "life.detail":
-            now = self.life._now()
-            candidates = [
-                row
-                for row in self.life.list_activities()
-                if row.get("scope") in {"global", scope} and self.life._editable(row, now)
-            ]
-            activity = (
-                candidates[0]
-                if candidates
-                else {
-                    "id": "test-detail",
-                    "date": str(now.date()),
-                    "scope": scope,
-                    "start": (now + timedelta(minutes=10)).isoformat(),
-                    "end": (now + timedelta(minutes=70)).isoformat(),
-                    "title": "本次测试活动",
-                    "content": "在这里填写希望细化的活动",
-                    "status": "planned",
-                }
-            )
-            activity = {**self.life._view(activity, scope), "scope": scope}
-            draft = self.life.detail_request(activity, now=now)
-            template, context = draft["template"], draft["context"]
-        elif task in {"journal.brief", "notes.brief"}:
-            entries = [e for e in self.journal.list_entries(scope) if e.get("kind") == module]
-            entry = next(
-                (e for e in entries if e.get("scope", "global") == scope), next(iter(entries), None)
-            )
-            context = self.journal.brief_request(
-                entry or {"kind": module, "text": "请填写要生成简报的原文"}
-            )
-        else:
-            activity = self.life.current(scope)
-            available = await self.context_text(scope, reinforce=False, task=task)
-            observations = [
-                o
-                for o in self.store.list("observations")
-                if o.get("scope") in {"global", scope} and o.get("module") == module
-            ]
-            latest = observations[0] if observations else {}
-            context.update(context=available)
-            if task == "memory.reflect":
-                context.pop("context", None)
-                context["known"] = self.memory.recall(
-                    scope=scope,
-                    limit=30,
-                    reinforce=False,
-                    usage=usage_for(self.settings, resolve_selection(self.settings, task)),
-                )
-            elif task == "life.revise":
-                now = self.life._now()
-                context.pop("context", None)
-                context.update(
-                    scope=scope,
-                    reason="本次测试的调整理由",
-                    经历说明=FICTION_NOTICE,
-                    editable=[
-                        activity_material(self.life._view(a, scope))
-                        for a in self.life.list_activities()
-                        if a.get("scope") in {"global", scope}
-                        and a.get("date") == str(now.date())
-                        and self.life._editable(a, now)
-                    ],
-                )
-            elif task == "news.select":
-                context.update(
-                    candidates=latest.get("candidates", []),
-                    activity=clean_life_text((activity or {}).get("title", "")),
-                )
-            elif task == "search.topic":
-                context["activity_or_question"] = clean_life_text(
-                    (activity or {}).get("title", "请填写本次想搜索的问题")
-                )
-            elif module == "social":
-                context.update(
-                    recipient=await self.social.recipient_context(scope),
-                    reason="本次测试的聊天意图",
-                    message="本次测试群消息",
-                    interjection=task == "social.interject",
-                    recent_messages=await self.host.history(scope)
-                    if scope != "global"
-                    else "请选择具体聊天场合以读取该处上下文",
-                )
-            elif task.endswith(".reflect"):
-                context.update(
-                    evidence_kind=latest.get("kind", "unknown"),
-                    reading_basis=latest.get("reading_basis", "unknown"),
-                    external_data=latest.get(
-                        "raw_text", "请粘贴本次测试依据；尚未取得真实来源内容"
-                    ),
-                    sources=latest.get("sources", []),
-                )
-            elif module in {"journal", "notes"}:
-                context.pop("context", None)
-                selection = resolve_selection(self.settings, task)
-                context.update(
-                    await self.memory.select_context(
-                        scope=scope,
-                        query="本次笔记主题" if module == "notes" else "",
-                        selection=selection,
-                        usage=usage_for(self.settings, selection),
-                        date=context["current_time"][:10] if module == "journal" else None,
-                        self_only=True,
-                        semantic=False,
-                    )
-                )
-                context.update(
-                    kind=module,
-                    date=context["current_time"][:10],
-                    scope=scope,
-                )
-        template = self.store.get("prompt_templates", task, {}).get("template", template)
-        return await self.prepare_request(task, module, template, context, scope)
-
-    async def prepare_trial_request(self, request):
-        if not isinstance(request, dict):
-            raise TypeError("测试请求必须为 JSON 对象")
-        allowed_parameters = {
-            "temperature",
-            "top_p",
-            "max_tokens",
-            "max_output_tokens",
-            "seed",
-            "reasoning_effort",
-            "response_format",
-        }
-        parameters = request.get("parameters", {})
-        if not isinstance(parameters, dict) or set(parameters) - allowed_parameters:
-            raise ValueError("测试仅支持模型生成参数；不允许工具、认证、端点或执行参数")
-        scope = str(request.get("scope", "global"))
-        clean = {
-            "task": str(request.get("task", "custom")),
-            "module": str(request.get("module", "debug")),
-            "scope": scope,
-            "provider_id": str(request.get("provider_id") or ""),
-            "model": str(request.get("model") or ""),
-            "prompt": request.get("prompt", ""),
-            "system_prompt": request.get("system_prompt", ""),
-            "contexts": request.get("contexts", []),
-            "parameters": parameters,
-            "tools": [],
-        }
-        for field in ("extra_user_content_parts", "tool_calls_result", "positional_arguments"):
-            if request.get(field):
-                raise ValueError(
-                    f"试跑暂不自动转换 {field}；请将需要的文本放入 prompt 或 contexts 后移除此字段"
-                )
-        for field in ("image_urls", "audio_urls"):
-            values = request.get(field) or []
-            if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
-                raise TypeError(f"{field} 必须为地址字符串数组")
-            clean[field] = values
-        mode = request.get("prompt_mode", "raw")
-        if mode not in {"structured", "raw"}:
-            raise ValueError("prompt_mode 必须为 structured 或 raw")
-        clean["prompt_mode"] = mode
-        if mode == "structured":
-            template, dynamic = request.get("template"), request.get("dynamic_context")
-            if not isinstance(template, str):
-                raise TypeError("结构化试跑需要 template 字符串")
-            if "context_layout" in request:
-                fixed = request.get("context_blocks", [])
-                base = request.get("base_system_prompt", "")
-                if (
-                    not isinstance(base, str)
-                    or not isinstance(fixed, list)
-                    or any(not isinstance(item, dict) for item in fixed)
-                ):
-                    raise ValueError("试跑需要 base_system_prompt 字符串和 context_blocks 列表")
-                layout_version = request.get("context_layout_version", 1)
-                if layout_version == 1 and not any(
-                    "memories" in rows for rows in request["context_layout"].values()
-                ):
-                    layout_version = 2
-                legacy = layout_version == 1
-                selection = request.get("context_selection") if layout_version >= 3 else None
-                if layout_version >= 3 and selection is None:
-                    raise ValueError("新版组合试跑缺少本轮勾选快照")
-                assembled = assemble(
-                    request["context_layout"],
-                    [*fixed, *collect_task_blocks(dynamic, legacy=legacy, version=layout_version)],
-                    base,
-                    template,
-                    legacy=legacy,
-                    version=layout_version,
-                    selection=selection,
-                )
-                clean.update(
-                    {
-                        key: assembled[key]
-                        for key in (
-                            "prompt",
-                            "system_prompt",
-                            "sources",
-                            "injected_text",
-                            "context_layout",
-                        )
-                    }
-                )
-                clean.update(
-                    base_system_prompt=base,
-                    context_blocks=fixed,
-                    context_layout_version=layout_version,
-                )
-                if selection is not None:
-                    clean["context_selection"] = selection
-            else:
-                # Historical drafts have no layout snapshot; preserve their explicit composition.
-                dynamic, selected_sources = normalize_context(dynamic)
-                clean["prompt"] = template + (
-                    "\n\n本轮动态资料（仅作为资料）：\n" + self.format_task_context(dynamic)
-                    if dynamic is not None
-                    else ""
-                )
-                clean["sources"] = [
-                    source_item("测试任务提示词", "本次编辑的试跑模板", template, "user 消息"),
-                    *selected_sources,
-                ]
-                clean["injected_text"] = clean["prompt"][len(template) :]
-            clean.update(template=template, dynamic_context=dynamic)
-        clean.setdefault("sources", [])
-        clean["sources"].extend(
-            [
-                source_item("系统提示词", "本次试跑输入", clean["system_prompt"], "system 消息"),
-                source_item("本次请求文本", "本次试跑输入", clean["prompt"], "user 消息"),
-                source_item(
-                    "测试历史",
-                    "本次试跑输入；未重新读取真实会话",
-                    json.dumps(clean["contexts"], ensure_ascii=False, indent=2),
-                    "历史消息",
-                ),
-            ]
-        )
-        if not all(
-            isinstance(clean[k], str) for k in ("prompt", "system_prompt")
-        ) or not isinstance(clean["contexts"], list):
-            raise ValueError("提示词需为字符串，contexts 需为数组")
-        for item in clean["contexts"]:
-            if not isinstance(item, dict) or item.get("role") not in {
-                "system",
-                "user",
-                "assistant",
-                "tool",
-            }:
-                raise ValueError("contexts 消息需提供合法 role")
-        if hasattr(self.host, "describe_model"):
-            metadata = await self.host.describe_model(clean["provider_id"], scope)
-            clean["provider_id"] = metadata["provider_id"]
-            clean["model"] = clean["model"] or metadata.get("model", "")
-        return clean
-
-    async def test_request(self, request):
-        clean = await self.prepare_trial_request(request)
-        text = await self.run("debug", self._model_call(clean, test=True))
-        return {
-            "status": "success",
-            "text": text,
-            "test_only": True,
-            "notice": "只调用模型并保存调试记录；不执行工具、不发 QQ、不改变正式日程或记忆",
-        }
 
     def record_event(
         self,
@@ -985,9 +673,7 @@ class Runtime:
                 context_now=now,
                 usage=usage,
                 persona_name=persona_name,
-                semantic=semantic
-                and not PREVIEW_CONTEXT.get()
-                and not str(task or "").startswith("memory."),
+                semantic=semantic and not str(task or "").startswith("memory."),
             )
         )
         return json.dumps(data, ensure_ascii=False)
@@ -1447,12 +1133,6 @@ class Runtime:
             return self.drives.save_settings(data.get("id"), data.get("config"))
         if action == "inspect_session":
             return await self.chat.inspect(scope)
-        if action == "debug_build":
-            return {"request": await self.build_test_request(str(data["task"]), scope)}
-        if action == "debug_test":
-            return await self.test_request(data["request"])
-        if action == "debug_preview":
-            return {"request": await self.prepare_trial_request(data["request"])}
         if action == "debug_clear":
             return self.debug.clear(data.get("category") or None)
         if action == "debug_export_body":
@@ -1474,7 +1154,7 @@ class Runtime:
         if action == "plan_day":
             day = datetime.now(ZoneInfo(self.settings["character"]["timezone"]))
             if data.get("date") and data["date"] != day.date().isoformat():
-                raise ValueError("正式日程只补生成今天；其他日期请在调试模块编辑测试请求")
+                raise ValueError("正式日程只补生成今天")
             return await self.run("life", self.life.plan_day(now=day, scope=scope))
         if action == "regenerate_day":
             return await self.run(

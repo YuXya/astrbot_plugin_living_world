@@ -116,7 +116,7 @@ class SocialService:
     async def recipient_context(self, scope, display_name=None):
         """Describe the actual destination without exposing transport identifiers."""
         if scope == "global":
-            return "尚未选择聊天对象。请在模型试跑中选择具体群聊或私聊场合。"
+            return "当前任务没有指定群聊或私聊对象。"
         target = destination(scope)
         if display_name is None:
             for item in self.runtime.settings.get("sessions", []):

@@ -160,24 +160,6 @@ module.exports = async (page, go, backendContract) => {
     assert.equal(await page.locator('.debug-round [name="debug_call"] option').count(), 2);
     await page.locator('[name="category"]').selectOption("");
     await round.locator('[name="debug_call"]').selectOption("0");
-    await round.getByRole("button", { name: "复制到试跑编辑器", exact: true }).click();
-    assert.equal(JSON.parse(await page.locator('[name="request_json"]').inputValue()).parameters.temperature, 0.7, "Provider parameters survive copying to the test editor");
-    assert.equal(await page.getByRole("tab", { name: "模型试跑", exact: true }).getAttribute("aria-selected"), "true");
-    await page.getByRole("button", { name: "从当前配置建立测试请求", exact: true }).click();
-    await page.getByText("已建立测试请求；尚未调用模型", { exact: true }).waitFor();
-    assert.equal(await page.locator('[name="request_mode"]').inputValue(), "structured");
-    await page.getByText("组合模式：", { exact: false }).waitFor();
-    await page.locator('[name="request_mode"]').selectOption("raw");
-    const request = JSON.parse(await page.locator('[name="request_json"]').inputValue());
-    assert.equal(request.prompt_mode, "raw");
-    assert.equal(request.contexts[0].content, "完整历史");
-    assert.ok(request.prompt.includes("测试记忆"), "Switching to raw preserves structured context in compiled prompt");
-    request.prompt = "Edited private test context";
-    await page.locator('[name="request_json"]').fill(JSON.stringify(request));
-    const businessBefore = await page.evaluate(() => JSON.stringify({ activities: window.fixture.activities, memories: window.fixture.memories, deliveries: window.fixture.deliveries }));
-    await page.getByRole("button", { name: "仅调用 AI 试跑", exact: true }).click();
-    await page.locator('#section-context-calls[aria-selected="true"]').waitFor();
-    assert.equal(await page.evaluate(() => JSON.stringify({ activities: window.fixture.activities, memories: window.fixture.memories, deliveries: window.fixture.deliveries })), businessBefore);
     await page.evaluate((contract) => {
       window.regularDebugFixture = { views: window.fixture.debug_views, records: window.fixture.debug_records };
       window.fixture.debug_views = contract.views; window.fixture.debug_records = contract.records;

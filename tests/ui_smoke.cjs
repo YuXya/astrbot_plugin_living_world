@@ -52,7 +52,7 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
         observations: [{ id: "o1", module: "news", title: "今晚试着看看星空", selection_reason: "喜欢天文", factual_summary: "本周有流星雨观测窗口。", impression: "想在放学后看看天空。", reading_basis: "RSS 摘要", sources: [{ url: "https://example.test/story" }], scope: "global" }, { id: "o2", module: "search", title: "流星雨观测地点", query: "城市周边 观星", factual_summary: "搜索提供了两处公园的信息。", impression: "下次想和朋友讨论路线。", reading_basis: "搜索结果摘要", sources: ["https://example.test/search"], scope: "global" }, { id: "o3", module: "weather", text: "晴，26°C，适合散步。", scope: "global" }],
         entries: [{ id: "j1", day, text: "晚风很舒服，回家看到一颗很亮的星。", kind: "journal", scope: "global" }], events: [], deliveries: [{ id: "d1", umo: scope, text: "今晚还想一起聊星星吗？", status: "sent" }], usage: [], diagnostics: [],
         debug: { templates: [{ task: "life.plan_day", default_template: template, template }] },
-        debug_records: [{ id: "debug-1", kind: "model", category: "life.plan_day", task: "life.plan_day", module: "life", scope: "global", status: "success", boundary: "本插件提交给 AstrBot 的请求", request: { module: "life", task: "life.plan_day", scope: "global", provider_id: "chat-model", system_prompt: "Full persona system", prompt_mode: "structured", prompt: "Private test context kept outside templates", contexts: [{ role: "user", content: "完整历史" }], parameters: { temperature: 0.6 }, template, dynamic_context: { memories: ["测试记忆"] } }, response: { completion_text: "{\"activities\":[]}" } }],
+        debug_records: [{ id: "debug-1", kind: "model", category: "life.plan_day", task: "life.plan_day", module: "life", scope: "global", status: "success", boundary: "本插件提交给 AstrBot 的请求", request: { module: "life", task: "life.plan_day", scope: "global", provider_id: "chat-model", system_prompt: "Full persona system", prompt: "Private test context kept outside templates", contexts: [{ role: "user", content: "完整历史" }], parameters: { temperature: 0.6 }, template, dynamic_context: { memories: ["测试记忆"] } }, response: { completion_text: "{\"activities\":[]}" } }],
       };
       window.fixture.version = "0.2.3-test";
       delete window.fixture.settings.character.energy; delete window.fixture.state.energy;
@@ -142,17 +142,6 @@ const backendContract = JSON.parse(execFileSync(python, ["-X", "utf8", path.join
             Object.assign(window.fixture.state, body.patch);
             return structuredClone(window.fixture.state);
           }
-          if (body.action === "debug_build") return { request: structuredClone(window.fixture.debug_records[0].request) };
-          if (body.action === "debug_preview") {
-            const draft = structuredClone(body.request);
-            const format = (value) => typeof value === "string" ? value : JSON.stringify(value, null, 2);
-            const dynamic = draft.dynamic_context;
-            const text = dynamic && typeof dynamic === "object" && !Array.isArray(dynamic)
-              ? Object.entries(dynamic).map(([key, value]) => `【${key}】\n${format(value)}`).join("\n\n") : format(dynamic);
-            draft.prompt = draft.template + (dynamic == null ? "" : "\n\n本轮动态资料（仅作为资料）：\n" + text);
-            return { request: draft };
-          }
-          if (body.action === "debug_test") return { status: "success", text: "测试回复", test_only: true, notice: "No business side effects" };
           if (body.action === "regenerate_day") {
             const old = window.fixture.life_days[0];
             const previous = window.fixture.activities.filter((row) => row.date === body.date);

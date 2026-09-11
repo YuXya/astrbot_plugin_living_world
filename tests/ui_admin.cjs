@@ -19,7 +19,7 @@ module.exports = async (page, go, contract) => {
     layout.order = structuredClone(layout.baseline_order);
   }); await refresh();
   const menus = {
-    overview: ["current", "recent"], context: ["layout", "usage", "templates", "trial", "calls"],
+    overview: ["current", "recent"], context: ["layout", "usage", "templates", "calls"],
     character: ["profile", "state", "drives", "events"], schedule: ["timeline", "settings", "archives"],
     chat: ["targets", "reply", "limits", "deliveries"], sources: ["settings", "records", "manual", "runs"],
     memory: ["records", "settings", "journals"], system: ["models", "modules", "backup", "maintenance"],
@@ -144,12 +144,9 @@ module.exports = async (page, go, contract) => {
   assert.equal(await page.locator("#section-panel textarea").count(), 0);
   await field("template.version").selectOption("current"); assert.equal(await field("template").inputValue(), "细化模板草稿");
   await click("保存此任务模板"); await page.getByText("操作已完成，请查看执行结果", { exact: true }).waitFor();
-  await go("context", "trial"); await field("task").selectOption("memory.reflect"); await field("request_json").fill('{"prompt":"PRIVATE_DRAFT"}');
-  await field("task").selectOption("life.detail"); await field("request_json").fill('{"prompt":"DETAIL_DRAFT"}');
   await go("context", "calls"); await field("debug.retain_per_category").fill("23");
   await go("context", "templates", { task: "memory.reflect" }); assert.equal(await field("template").inputValue(), "未保存的记忆模板");
   await refresh(); assert.equal(await field("template").inputValue(), "未保存的记忆模板");
-  await go("context", "trial"); await field("task").selectOption("memory.reflect"); assert.equal(await field("request_json").inputValue(), '{"prompt":"PRIVATE_DRAFT"}');
   await go("context", "calls"); assert.equal(await field("debug.retain_per_category").inputValue(), "23"); await save("保存记录数量");
   await go("context", "layout"); await field("layout_task").selectOption("chat.group");
   const row = (id) => page.locator(`.layout-row[data-block-id="${id}"]`);

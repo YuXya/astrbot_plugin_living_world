@@ -12,15 +12,10 @@ let dialogHandler = null;
 let modalDraft = false;
 let scheduleDate = "";
 let debugCategory = "";
-let testRequest = "";
-let debugTask = "life.plan";
-let debugScope = "global";
-let debugMode = "structured";
 let retentionDraft = null;
 let layoutDraft = null;
 let layoutTask = "chat.group";
 const templateDrafts = new Map();
-const trialDrafts = new Map();
 const formDrafts = new Map();
 const arrayDrafts = new Map();
 const selections = new Map();
@@ -194,22 +189,13 @@ function taskDisplay(task) {
     || snapshot?.debug?.templates?.find((item) => item.task === task)?.label
     || (debugTaskNames[task] ? `${task}（${debugTaskNames[task]}）` : task);
 }
-function hasDebugDrafts() { return Boolean(layoutDraft || templateDrafts.size || retentionDraft !== null || testRequest.trim() || [...trialDrafts.values()].some((draft) => draft.request.trim())); }
-function rememberTrial() { trialDrafts.set(debugTask, { request: testRequest, scope: debugScope, mode: debugMode }); }
-function acceptTrial(task, previous, next) {
-  const latest = task === debugTask ? { request: testRequest, scope: debugScope, mode: debugMode } : trialDrafts.get(task) || { request: "", scope: "global", mode: "structured" };
-  if (JSON.stringify(latest) !== JSON.stringify(previous)) { notice("输入已改变，保留当前草稿；请重新建立或预览请求。", true); return false; }
-  trialDrafts.set(task, next);
-  if (task === debugTask) { testRequest = next.request; debugScope = next.scope; debugMode = next.mode; }
-  render(); return true;
-}
-
+function hasDebugDrafts() { return Boolean(layoutDraft || templateDrafts.size || retentionDraft !== null); }
 const debugSelections = new Map();
 let debugBodySequence = 0;
 let selectedDrive = "loneliness";
 const driveDrafts = new Map();
 const driveNames = { loneliness: "寂寞值", energy: "精力" };
-const debugTaskNames = { "chat.turn": "聊天回复", "reply.model": "聊天回复", "reply.request": "聊天回复", "reply.tool": "聊天工具", "life.plan": "生成日程", "life.plan_day": "生成今日日程", "life.detail": "细化活动", "life.adjust": "调整日程", "news.select": "挑选新闻", "news.read": "阅读新闻", "search.topic": "选择搜索主题", "search.note": "搜索见闻笔记", "journal.write": "生成日记", "journal.brief": "日记简报", "notes.write": "生成笔记", "notes.brief": "笔记简报", "debug.test": "模型试跑", "test": "模型试跑" };
+const debugTaskNames = { "chat.turn": "聊天回复", "reply.model": "聊天回复", "reply.request": "聊天回复", "reply.tool": "聊天工具", "life.plan": "生成日程", "life.plan_day": "生成今日日程", "life.detail": "细化活动", "life.adjust": "调整日程", "news.select": "挑选新闻", "news.read": "阅读新闻", "search.topic": "选择搜索主题", "search.note": "搜索见闻笔记", "journal.write": "生成日记", "journal.brief": "日记简报", "notes.write": "生成笔记", "notes.brief": "笔记简报" };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -341,7 +327,6 @@ async function action(name, payload = {}) {
     } else if (name !== "memory.history") {
       await readState();
     }
-    if (name === "debug_test" && result?.status === "success") navigate("context", "calls");
     render();
     return result ?? true;
   }, (result) => result?.status === "skipped" ? `本次未执行：${result.text || result.reason || "请查看操作结果"}` : result?.status === "failed" ? `本次执行失败：${result.text || result.error || result.reason || "请查看操作结果"}` : name === "memory.process" ? "已安排后台提炼，点击刷新数据查看进度" : "操作已完成，请查看执行结果");
@@ -865,7 +850,7 @@ function renderDrives() {
   }
   const rules = append(el("details", "drive-rules"), el("summary", "", "计算与生效规则"),
     el("p", "", "按在线时间连续增长，离线或模块暂停时不增长；增长与消耗可设为 0。当前值可填小数，显示和阶段匹配取整数部分。"),
-    el("p", "", "仅日程行动实际开始时扣值，失败不退；不足时仍可执行，最低归零。聊天一轮多对象只扣一次；手动来源、试跑、被动回复、群聊插话和独立 AI 日报不扣。"),
+    el("p", "", "仅日程行动实际开始时扣值，失败不退；不足时仍可执行，最低归零。聊天一轮多对象只扣一次；手动来源、被动回复、群聊插话和独立 AI 日报不扣。"),
     el("p", "", "应用当前值与保存参数分别生效，不调用模型。已有细化保持原决定，需要立即采用新想法时手动重新细化。"));
   configForm.append(rateFields, rules);
   const stages = el("div", "drive-stages");
@@ -1310,17 +1295,6 @@ function readableValue(value, depth = 0) {
   }
   return list.childElementCount ? list : el("p", "muted", "暂无内容");
 }
-function copyRecordToTrial(record) {
-  let draft = clone(record.request);
-  if (draft.arguments) {
-    const args = draft.arguments;
-    const parameters = { ...args };
-    for (const key of ["prompt", "system_prompt", "contexts", "image_urls", "audio_urls", "func_tool", "model", "session_id", "extra_user_content_parts", "tool_calls_result"]) delete parameters[key];
-    draft = { task: record.task, module: record.module || "reply", scope: record.scope, provider_id: draft.provider_id, model: args.model || draft.model, prompt_mode: "raw", prompt: args.prompt || "", system_prompt: args.system_prompt || "", contexts: args.contexts || [], image_urls: args.image_urls || [], audio_urls: args.audio_urls || [], tools: args.func_tool || [], extra_user_content_parts: args.extra_user_content_parts || [], tool_calls_result: args.tool_calls_result || [], positional_arguments: draft.positional_arguments || [], parameters };
-  }
-  rememberTrial(); debugTask = draft.task || debugTask; debugScope = draft.scope || "global"; debugMode = draft.prompt_mode || "raw";
-  testRequest = stringify(draft); rememberTrial(); navigate("context", "trial");
-}
 function toolArguments(value) {
   if (typeof value !== "string") return value;
   try { return JSON.parse(value); } catch { return value; }
@@ -1349,11 +1323,10 @@ function legacyDebugViews(records) {
       sends: group.filter((record) => record.task === "reply.send").map((record) => ({ status: record.status, content: record.request?.message })) };
   });
 }
-function renderDebugView(view, records, initiallyOpen) {
+function renderDebugView(view, initiallyOpen) {
   const container = el("details", "debug-round"); container.dataset.turn = view.id;
   const focused = new URLSearchParams(location.hash.split("?")[1] || "").get("turn");
   container.open = focused ? focused === view.id || view.record_ids?.includes(focused) : initiallyOpen;
-  const related = records.filter((record) => record.turn_id === view.id || record.id === view.id);
   const calls = Array.isArray(view.calls) ? view.calls : [];
   const selected = debugSelections.get(view.id) || { call: 0, tab: 0 };
   selected.sourceOpen ??= new Map();
@@ -1459,9 +1432,6 @@ function renderDebugView(view, records, initiallyOpen) {
         panel.append(sends);
       }
     }
-    const oldTrial = controls.querySelector(".debug-trial-copy"); if (oldTrial) oldTrial.remove();
-    const replay = records.find((record) => record.id === call?.record_id) || related.filter((record) => ["model", "test"].includes(record.kind))[selected.call];
-    if (replay?.request) { const copy = button("复制到试跑编辑器", () => copyRecordToTrial(replay), "secondary", true); copy.classList.add("debug-trial-copy"); controls.append(copy); }
   };
   callSelector.querySelector("select").addEventListener("change", (event) => { selected.call = Number(event.target.value); update(); });
   append(body, tabs, panel); container.append(body); update(); return container;
@@ -1481,7 +1451,7 @@ function renderTemplates() {
   root.append(chooser("模板版本", "template.version", versions, "current"));
   const version = selections.get("template.version");
   if (version !== "current") return append(root, el("p", "hint", "只读查看，不会自动启用或覆盖当前模板。"), el("pre", "template-preview", version === "default" ? item?.default_template || "" : archived[Number(version)]?.template || ""));
-  const form = settingsForm("保存此任务模板", "只保存本任务公共指令；试跑 JSON 和私人资料不会自动写入模板。");
+  const form = settingsForm("保存此任务模板", "只保存本任务公共指令；本轮临时资料不会自动写入模板。");
   const selectedTask = templateTask;
   const value = field("公共提示词模板", "template", templateDrafts.get(selectedTask) ?? item.template ?? item.default_template ?? "", { type: "textarea", rows: 12 });
   value.querySelector("textarea").addEventListener("input", (event) => { templateDrafts.set(selectedTask, event.target.value); });
@@ -1506,7 +1476,7 @@ function lazyDebugView(selected) {
   const cache = debugPageCache;
   if (cache.loading) return el("p", "hint", "正在读取所选调用；其他记录正文尚未加载…");
   if (cache.error) return append(el("div", "stack"), el("p", "danger-copy", cache.error), button("重新读取此轮", () => { debugPageCache = null; render(); }, "secondary"));
-  return renderDebugView(cache.result.view, cache.result.records, true);
+  return renderDebugView(cache.result.view, true);
 }
 
 function renderDebugRecords() {
@@ -1535,61 +1505,7 @@ function renderDebugRecords() {
   prev.dataset.disabled = String(at <= 0); next.dataset.disabled = String(at < 0 || at >= filtered.length - 1);
   root.append(append(el("div", "compact-filter"), category, round, prev, next));
   if (snapshot.provider_capture_available === false) root.append(el("p", "hint warning", "当前 HTTP 捕获适配不可用；旧快照不冒充原文。"));
-  root.append(selected ? snapshot.debug_lazy ? lazyDebugView(selected) : renderDebugView(selected, records, true) : empty("此类别暂时没有调用记录")); return root;
-}
-
-function renderDebugTrial() {
-  const root = el("div", "stack");
-  const templates = snapshot.debug?.templates || [];
-  const options = [...new Set([...templates.map((item) => item.task), ...trialDrafts.keys(), debugTask])];
-  if (options.length && !options.includes(debugTask)) debugTask = options[0];
-  const taskField = field("任务类别", "task", debugTask, { options: options.map((task) => ({ value: task, label: taskDisplay(task) })) });
-  const scopeField = field("测试场合", "scope", debugScope, { options: scopeOptions() });
-  let mode = debugMode;
-  try { const current = JSON.parse(testRequest); mode = current.prompt_mode || "raw"; } catch { /* An empty editor starts with a structured draft. */ }
-  const modeField = field("测试提示词模式", "request_mode", mode, { options: [{ value: "structured", label: "组合模板与动态上下文" }, { value: "raw", label: "直接编辑完整 prompt" }] });
-  const modeHint = el("p", "hint");
-  const updateHint = () => { modeHint.textContent = modeField.querySelector("select").value === "structured" ? "组合模式：编辑 template、dynamic_context；有布局快照时也可编辑 base_system_prompt、context_blocks 与 context_layout。prompt / system_prompt 是组装预览，按快照重新生成。旧请求无布局快照时保留原组合方式；草稿不保存为公共模板。" : "直接模式：JSON 中的 prompt 就是本次发送内容；template 和 dynamic_context 不参与组合。contexts、provider_id、model 与 parameters 在两种模式下均可编辑。"; };
-  updateHint();
-  const requestField = field("本次测试请求 JSON", "request_json", testRequest, { type: "textarea", rows: 18, hint: "这是可编辑的试跑参数；执行后的 API 原文见调用记录②。模型和参数只用于这次试跑，不会保存成公共模板。" });
-  requestField.querySelector("textarea").addEventListener("input", (event) => {
-    testRequest = event.target.value; rememberTrial();
-    try { const edited = JSON.parse(testRequest); debugMode = edited.prompt_mode || "raw"; modeField.querySelector("select").value = debugMode; rememberTrial(); updateHint(); } catch { /* Keep the selected mode while the JSON is incomplete. */ }
-  });
-  modeField.querySelector("select").addEventListener("change", async () => {
-    const nextMode = modeField.querySelector("select").value;
-    const task = debugTask, previous = { request: testRequest, scope: debugScope, mode: debugMode }, scope = debugScope;
-    if (testRequest.trim()) {
-      try {
-        let edited = JSON.parse(testRequest);
-        if (nextMode === "raw" && edited.prompt_mode === "structured") {
-          const preview = await request(() => bridge.apiPost("action", { action: "debug_preview", request: edited }), "已按本次快照组合请求，未调用模型");
-          if (preview === false) { modeField.querySelector("select").value = debugMode; return; }
-          edited = preview.request;
-        }
-        edited.prompt_mode = nextMode;
-        acceptTrial(task, previous, { request: stringify(edited), scope, mode: nextMode }); return;
-      } catch (error) { notice(`请先修正测试 JSON：${error.message}`, true); modeField.querySelector("select").value = debugMode; return; }
-    }
-    debugMode = nextMode; rememberTrial(); updateHint();
-  });
-  scopeField.querySelector("select").addEventListener("change", (event) => { debugScope = event.target.value; rememberTrial(); });
-  taskField.querySelector("select").addEventListener("change", (event) => {
-    rememberTrial(); debugTask = event.target.value;
-    const draft = trialDrafts.get(debugTask);
-    testRequest = draft?.request || ""; debugScope = draft?.scope || "global"; debugMode = draft?.mode || "structured"; render();
-  });
-  const build = async () => {
-    const task = debugTask, previous = { request: testRequest, scope: debugScope, mode: debugMode }, scope = debugScope;
-    const result = await request(() => bridge.apiPost("action", { action: "debug_build", task, scope }), "已建立测试请求；尚未调用模型");
-    if (result !== false) { const draft = result.request || result; acceptTrial(task, previous, { request: stringify(draft), scope, mode: draft.prompt_mode || "raw" }); }
-  };
-  const test = async () => {
-    try { const payload = JSON.parse(requestField.querySelector("textarea").value); if (!payload || Array.isArray(payload) || typeof payload !== "object") throw new Error("请求必须是 JSON 对象"); await action("debug_test", { request: payload }); }
-    catch (error) { notice(`测试请求无效：${error.message}`, true); }
-  };
-  root.append(card("模型试跑", "真实调用 AI，可能产生模型费用；不执行工具、不发送 QQ、不修改正式日程、记忆或生活数据。", append(el("div", "stack"), append(el("div", "actions"), button("仅调用 AI 试跑", test, "primary"), button("从当前配置建立测试请求", build, "secondary")), append(el("div", "form-grid"), taskField, scopeField), modeField, modeHint, requestField)));
-  return root;
+  root.append(selected ? snapshot.debug_lazy ? lazyDebugView(selected) : renderDebugView(selected, true) : empty("此类别暂时没有调用记录")); return root;
 }
 
 function showSourceIndex(id) {
@@ -1859,7 +1775,6 @@ function applyRouteSelection() {
   if (params.task && page === "context") {
     if (tab === "templates") { templateTask = params.task; selections.delete("template.version"); }
     else if (tab === "layout") layoutTask = params.task;
-    else if (tab === "trial" && params.task !== debugTask) { rememberTrial(); debugTask = params.task; const draft = trialDrafts.get(debugTask); testRequest = draft?.request || ""; debugScope = draft?.scope || "global"; debugMode = draft?.mode || "structured"; }
   }
   if (params.turn) { debugCategory = ""; debugRound = params.turn; }
 }
@@ -1884,7 +1799,7 @@ function render() {
     item.addEventListener("keydown", (event) => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); const next = ids[event.key === "Home" ? 0 : event.key === "End" ? ids.length - 1 : (ids.indexOf(id) + (event.key === "ArrowRight" ? 1 : ids.length - 1)) % ids.length]; navigate(page, next, { focus_tab: "1" }); });
     tabs.append(item);
   }
-  const renderers = { overview: renderOverview, character: renderCharacter, schedule: renderSchedule, chat: renderWhitelist, sources: renderSources, memory: renderMemory, system: renderSystem, context: (part) => ({ layout: renderContextLayout, usage: renderContextUsage, templates: renderTemplates, trial: renderDebugTrial, calls: renderDebugRecords }[part]()) };
+  const renderers = { overview: renderOverview, character: renderCharacter, schedule: renderSchedule, chat: renderWhitelist, sources: renderSources, memory: renderMemory, system: renderSystem, context: (part) => ({ layout: renderContextLayout, usage: renderContextUsage, templates: renderTemplates, calls: renderDebugRecords }[part]()) };
   const panel = renderers[page](tab); panel.id = "section-panel"; panel.classList.add("section-panel"); panel.dataset.page = page; panel.dataset.section = tab; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", `section-${page}-${tab}`);
   content.replaceChildren(tabs);
   if (sourceReturn && location.hash !== sourceReturn.hash) content.append(button(resolveRoute(sourceReturn.hash).tab === "usage" ? "返回上下文用量" : "返回上下文列表", () => {

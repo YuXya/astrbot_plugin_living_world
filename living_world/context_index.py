@@ -28,7 +28,7 @@ LIFE_SETTINGS = target("生成与细化设置", "schedule", "settings")
 MEMORY = target("记忆与画像", "memory", "records")
 JOURNALS = target("日记与笔记", "memory", "journals")
 USAGE = target("上下文用量", "context", "usage")
-TRIAL = target("本次试跑材料", "context", "trial", current_task="1")
+TEMPLATE = target("提示词模板", "context", "templates", current_task="1")
 INDEX = {
     "anchor.system": entry(
         "保留宿主原有系统提示词与核心人格。",
@@ -39,7 +39,7 @@ INDEX = {
     "anchor.user": entry(
         "标记本轮原消息或后台任务提示词的位置。",
         "普通聊天来自当前消息；后台任务来自该任务模板。",
-        TRIAL,
+        TEMPLATE,
         host_help="收到的 QQ 原消息不能在插件中改写；后台任务可从相关任务模板入口调整。",
     ),
     "profile": entry("补充核心人格之外的角色资料。", "角色与世界中已保存的角色补充资料。", PROFILE),
@@ -121,19 +121,19 @@ INDEX = {
         "日程、日记等任务启动时确定的日期。",
         SCHEDULE,
         JOURNALS,
-        TRIAL,
+        TEMPLATE,
     ),
     "task.parameters": entry(
         "提供任务需要的生成参数。",
-        "本任务已保存的设置，或试跑中显式填写的参数。",
+        "本任务已保存的设置及业务过程明确提供的参数。",
         LIFE_SETTINGS,
-        TRIAL,
+        TEMPLATE,
     ),
     "task.reason": entry(
         "说明本次调整、聊天或来源处理的原因。",
         "活动决定、触发本任务的业务过程或管理员本次输入。",
         SCHEDULE,
-        TRIAL,
+        TEMPLATE,
     ),
     "task.activity": entry(
         "提供这次需要细化的活动大纲。",
@@ -169,7 +169,7 @@ INDEX = {
         "为这一次细化补充临时要求。",
         "管理员点击细化／重新细化时填写的内容，不保存到公共模板。",
         SCHEDULE,
-        TRIAL,
+        TEMPLATE,
     ),
     "task.editable": entry(
         "告诉模型哪些未来活动允许调整。",
@@ -185,15 +185,15 @@ INDEX = {
     ),
     "task.question": entry(
         "提供当前选题问题或需要判断的群消息。",
-        "任务触发时的活动意图、群消息或试跑输入。",
-        TRIAL,
+        "任务触发时的活动意图、选题问题或当前群消息。",
+        TEMPLATE,
         target("回复与插话", "chat", "reply"),
     ),
     "task.evidence": entry(
         "提供本次来源整理所必需的原始证据。",
         "本次实际获得的网页、搜索、视频、链接或日记关联材料；结构内部不拆散。",
         target("近期见闻", "sources", "records"),
-        TRIAL,
+        TEMPLATE,
     ),
     "task.events": entry(
         "提供生成日记或笔记所依据的经历。",
@@ -210,18 +210,18 @@ INDEX = {
     ),
     "task.brief_limit": entry(
         "要求模型生成指定长度的上下文简报。",
-        "上下文用量中的简报最长字符设置，或本次显式试跑输入。",
+        "历史简报任务保存的长度要求。",
         USAGE,
         templates=("journal.brief", "notes.brief"),
     ),
     "task.material": entry(
-        "提供聊天记忆提炼或试跑的本次材料。",
+        "提供记忆提炼等业务任务的本次材料。",
         "本次任务直接提供的结构化输入，不是公共模板。",
-        TRIAL,
+        TEMPLATE,
         templates=("memory.reflect",),
     ),
     "task.other": entry(
-        "保留任务提供的其他必要资料。", "不属于通用资料块的任务输入；含义由当前任务决定。", TRIAL
+        "保留任务提供的其他必要资料。", "不属于通用资料块的任务输入；含义由当前任务决定。", TEMPLATE
     ),
 }
 for source, name, template in (

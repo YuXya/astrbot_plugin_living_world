@@ -209,7 +209,7 @@ async def test_concurrent_turns_keep_layout_and_material_snapshot(world):
 
 
 @pytest.mark.parametrize("task", list(PROMPTS))
-async def test_all_background_tasks_share_layout_and_frozen_trial_composition(world, task):
+async def test_all_background_tasks_share_layout(world, task):
     runtime, _, _ = world
     layout = moved(DEFAULT_LAYOUT, "memory", "system", "anchor.system")
     layout = moved(layout, "task.evidence", "system")
@@ -235,17 +235,6 @@ async def test_all_background_tasks_share_layout_and_frozen_trial_composition(wo
     )
     assert "FULL_DOCUMENT" in request["system_prompt"] and "FULL_DOCUMENT" not in request["prompt"]
     assert request["prompt"].index("TASK_INPUT") < request["prompt"].index("TASK_TEMPLATE")
-    await runtime.update_settings({"context_layout": {"order": DEFAULT_LAYOUT}})
-    before = runtime.store.export()
-    trial = await runtime.prepare_trial_request(request)
-    assert (
-        trial["prompt"] == request["prompt"] and trial["system_prompt"] == request["system_prompt"]
-    )
-    assert runtime.store.export() == before
-    raw = await runtime.prepare_trial_request(
-        {**request, "prompt_mode": "raw", "prompt": "RAW_USER", "system_prompt": "RAW_SYSTEM"}
-    )
-    assert raw["prompt"] == "RAW_USER" and raw["system_prompt"] == "RAW_SYSTEM"
 
 
 def test_source_modules_group_separately_without_splitting_evidence():
@@ -343,31 +332,6 @@ async def test_disabled_modules_and_empty_blocks_remain_absent_after_role_moves(
     actual = json.dumps(provider.calls, ensure_ascii=False)
     assert "HIDDEN_MEMORY" not in actual and "HIDDEN_NEWS" not in actual
     assert "【角色补充资料】" not in actual and "【世界设定】" not in actual
-
-
-async def test_composed_trial_calls_only_model_with_frozen_layout(world):
-    runtime, manager, provider = world
-    layout = moved(DEFAULT_LAYOUT, "task.material", "system", "anchor.system")
-    await runtime.update_settings({"context_layout": {"order": layout}})
-    draft = await runtime.prepare_request(
-        "memory.reflect", "memory", "EXTRACT_MEMORY", {"document": "DOCUMENT_SENTINEL"}, PRIVATE
-    )
-    await runtime.update_settings({"context_layout": {"order": DEFAULT_LAYOUT}})
-
-    async def generate(chat_provider_id, **kwargs):
-        return await provider.text_chat(**kwargs)
-
-    runtime.host.context.llm_generate = generate
-    before = runtime.store.export()
-    result = await runtime.test_request(draft)
-    assert result["test_only"] and len(provider.calls) == 1
-    assert "DOCUMENT_SENTINEL" in provider.calls[0]["system_prompt"]
-    assert "DOCUMENT_SENTINEL" not in provider.calls[0]["prompt"]
-    after = runtime.store.export()
-    before = [row for row in before if row["namespace"] != "debug_records"]
-    after = [row for row in after if row["namespace"] != "debug_records"]
-    assert after == before and not manager.rows
-    runtime.host.context.send_message.assert_not_called()
 
 
 @pytest.mark.parametrize("begin", [False, True])

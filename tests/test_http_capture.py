@@ -628,7 +628,7 @@ async def test_independent_usage_and_selected_target_match_actual_http(
             occurred_at=1800000000 + i,
         )
     before = runtime.store.export()
-    request = await runtime.build_test_request("social.message", scope)
+    request = await runtime.prepare_request("social.message", "social", "写消息", {}, scope)
     assert runtime.store.export() == before
     assert runtime.host.context.send_message.await_count == 0
     sources = {row["block_id"]: row for row in request["sources"]}
@@ -637,8 +637,9 @@ async def test_independent_usage_and_selected_target_match_actual_http(
     await runtime.update_settings(
         {"context_usage": {"limits": {"memory.self": 0, "memory.recent": 0}}}
     )
-    trial = await runtime.prepare_trial_request(request)
-    await call_background(real_world, prompt=trial["prompt"], system_prompt=trial["system_prompt"])
+    await call_background(
+        real_world, prompt=request["prompt"], system_prompt=request["system_prompt"]
+    )
     raw = wire_server.records[0]["request_body"]
     assert raw.count("INDEPENDENT_PROFILE_") == 2
     assert raw.count("LATEST_SOURCE_") == 3
@@ -653,8 +654,8 @@ async def test_independent_usage_and_selected_target_match_actual_http(
     assert scope not in raw
     for identifier in ("speaker", "memory", "memory.recent"):
         assert raw.count("【" + BLOCK_NAMES[identifier] + "】") == 1
-    assert BLOCK_NAMES["speaker"] in trial["system_prompt"]
-    assert BLOCK_NAMES["speaker"] not in trial["prompt"]
+    assert BLOCK_NAMES["speaker"] in request["system_prompt"]
+    assert BLOCK_NAMES["speaker"] not in request["prompt"]
     assert "→" not in raw
     assert runtime.host.context.send_message.await_count == 0
 

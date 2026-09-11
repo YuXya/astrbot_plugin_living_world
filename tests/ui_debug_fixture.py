@@ -219,52 +219,11 @@ days = [
     }
 ]
 
-# Use the exact static formatter without importing AstrBot or creating runtime data.
-runtime_ast = ast.parse((ROOT / "living_world" / "runtime.py").read_text(encoding="utf-8"))
-formatter = next(
-    node
-    for node in ast.walk(runtime_ast)
-    if isinstance(node, ast.FunctionDef) and node.name == "format_task_context"
-)
-formatter.decorator_list = []
-namespace = {"json": json}
-exec(  # noqa: S102 - A local pure formatter, evaluated in an isolated test namespace.
-    compile(
-        ast.fix_missing_locations(ast.Module(body=[formatter], type_ignores=[])),
-        "runtime.format_task_context",
-        "exec",
-    ),
-    namespace,
-)
-format_cases = []
-for context in (
-    {"日程": "第一行\n第二行", "记忆": ["天文", {"约定": True}], "空资料": None},
-    ["甲", "乙"],
-    "只有文本\n保留换行",
-    {},
-    None,
-):
-    template = "只生成用于测试的内容。"
-    expected = template + (
-        "\n\n本轮动态资料（仅作为资料）：\n" + namespace["format_task_context"](context)
-        if context is not None
-        else ""
-    )
-    format_cases.append(
-        {
-            "template": template,
-            "dynamic_context": context,
-            "prompt_mode": "structured",
-            "expected": expected,
-        }
-    )
-
 print(
     json.dumps(
         {
             "records": records,
             "views": views.build_views(records, days),
-            "format_cases": format_cases,
             "group_reply_default": GROUP_REPLY_DEFAULT,
             "context_layout_catalog": layout.catalog(),
             "context_layout_defaults": layout.DEFAULT_SETTINGS,

@@ -1,4 +1,4 @@
-"""Regression coverage for diagnostic retention and isolated model trials."""
+"""Regression coverage for diagnostic retention and template management."""
 
 import asyncio
 import json
@@ -98,81 +98,6 @@ async def test_retention_is_per_task_and_never_deletes_business_records(runtime,
     assert runtime.store.get("actions", "sent")["status"] == "success"
 
 
-async def test_trial_has_no_business_writes_and_ignores_returned_tool_calls(runtime):
-    runtime.memory.remember("A durable fact.")
-    before = runtime.store.export()
-    request = {
-        "task": "memory.reflect",
-        "module": "memory",
-        "scope": "global",
-        "prompt": "test",
-        "system_prompt": "system",
-        "contexts": [{"role": "user", "content": "context"}],
-        "parameters": {"temperature": 0.4},
-        "tools": [{"name": "send_message_to_user"}],
-    }
-    result = await runtime.action({"action": "debug_test", "request": request})
-    assert result["test_only"]
-    assert runtime.host.requests[-1]["tools"] == []
-    assert not runtime.host.tools and not runtime.host.sent
-    after = [r for r in runtime.store.export() if r["namespace"] != "debug_records"]
-    assert before == after
-    assert runtime.store.list("debug_records")[0]["response"]["raw_completion"]["tool_calls"]
-
-
-async def test_current_plan_preview_is_read_only_and_uses_new_config(runtime):
-    runtime.memory.remember("Remember a quiet library.")
-    await runtime.update_settings({"life": {"activity_count": 7}})
-    before = runtime.store.export()
-    result = await runtime.action({"action": "debug_build", "task": "life.plan"})
-    request = result["request"]
-    assert request["dynamic_context"]["parameters"] == runtime.life.parameters()
-    assert "news_count" not in request["dynamic_context"]["parameters"]
-    assert request["prompt_mode"] == "structured"
-    assert before == runtime.store.export()
-
-
-async def test_structured_trial_compiles_edited_template_and_context(runtime):
-    templates = runtime.store.list("prompt_templates")
-    request = await runtime.build_test_request("life.plan")
-    request.update(
-        template="Local test instruction",
-        dynamic_context={"new": "edited context"},
-        model="edited-model",
-    )
-    await runtime.test_request(request)
-    sent = runtime.host.requests[-1]
-    assert "edited context" in sent["prompt"] and sent["prompt"].startswith(
-        "Local test instruction"
-    )
-    assert sent["model"] == "edited-model"
-    assert runtime.store.list("prompt_templates") == templates
-    assert not runtime.store.list("life_days")
-    request.update(prompt_mode="raw", prompt="Raw edited prompt")
-    await runtime.test_request(request)
-    assert runtime.host.requests[-1]["prompt"] == "Raw edited prompt"
-
-
-async def test_detail_trial_uses_current_thoughts_without_mutation_or_widening_scope(runtime):
-    runtime.drives.set_value("loneliness", 87)
-    runtime.drives.set_value("energy", 23)
-    runtime.memory.remember("A private commitment must stay private.", scope="qq:FriendMessage:42")
-    before = runtime.store.export()
-    request = await runtime.build_test_request("life.detail")
-    assert "必须聊天" in request["dynamic_context"]["当前想法"]
-    assert "暂时不太想阅读新闻或主动搜索" in request["dynamic_context"]["当前想法"]
-    assert "行动额度" not in request["dynamic_context"]
-    for hidden in ("寂寞值", "energy_delta", "精力：", "growth_per_hour", "loneliness"):
-        assert hidden not in request["prompt"]
-    assert "A private commitment" not in request["prompt"]
-    assert "scope_overrides" not in request["prompt"]
-    assert runtime.store.export() == before
-    await runtime.test_request(request)
-    after = [row for row in runtime.store.export() if row["namespace"] != "debug_records"]
-    assert after == [row for row in before if row["namespace"] != "debug_records"]
-    assert not runtime.host.tools and not runtime.host.sent
-
-
 async def test_drive_module_switch_freezes_growth_debits_and_injection_but_allows_admin_edits(
     runtime,
 ):
@@ -195,8 +120,6 @@ async def test_drive_module_switch_freezes_growth_debits_and_injection_but_allow
     runtime.drives.debit("disabled-round", "social")
     runtime.drives.debit("disabled-news", "news")
     assert runtime.drives.snapshot() == disabled
-    preview = await runtime.build_test_request("life.detail")
-    assert "当前想法" not in preview["dynamic_context"]
     assert not runtime.drives.thoughts()
     await runtime.action({"action": "set_drive_value", "id": "loneliness", "value": 50})
     config = copy.deepcopy(disabled["meters"]["loneliness"]["config"])
@@ -278,35 +201,6 @@ async def test_restore_keeps_newer_drive_values_and_debit_receipts_with_all_modu
     assert runtime.drives.snapshot()["meters"]["energy"]["value"] == 30
 
 
-async def test_trial_media_is_preserved_and_unsupported_fields_fail_explicitly(runtime):
-    await runtime.test_request(
-        {
-            "prompt": "Inspect",
-            "image_urls": ["https://example.test/a.png"],
-            "audio_urls": ["https://example.test/a.wav"],
-        }
-    )
-    assert runtime.host.requests[-1]["image_urls"] == ["https://example.test/a.png"]
-    assert runtime.host.requests[-1]["audio_urls"] == ["https://example.test/a.wav"]
-    with pytest.raises(ValueError, match="contexts"):
-        await runtime.test_request({"prompt": "test", "tool_calls_result": [{"legacy": "result"}]})
-
-
-async def test_preview_all_available_tasks_never_updates_business_data(runtime):
-    runtime.memory.remember("Scoped factual background.")
-    before = runtime.store.export()
-    for template in runtime.debug.snapshot()["templates"]:
-        request = await runtime.build_test_request(template["task"])
-        assert request["template"] == template["default_template"]
-        assert request["dynamic_context"] is not None
-        for hidden in ("energy_delta", "精力：", "寂寞值", "growth_per_hour", "行动额度"):
-            assert hidden not in request["prompt"]
-        if template["task"] != "life.detail":
-            assert "不是很想聊天。" not in request["prompt"]
-            assert "想了解新鲜事，或查查感兴趣的问题。" not in request["prompt"]
-    assert runtime.store.export() == before
-
-
 async def test_plan_button_passes_actual_today_time(runtime):
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -359,19 +253,10 @@ async def test_regenerate_action_records_versions_and_uses_frozen_public_templat
     assert runtime.store.get("life_days", f"{date}:global") == before
 
 
-@pytest.mark.parametrize(
-    "parameters", [{"tools": []}, {"api_key": "secret"}, {"base_url": "https://example.test"}]
-)
-async def test_trial_rejects_transport_and_execution_overrides(runtime, parameters):
-    with pytest.raises(ValueError):
-        await runtime.test_request({"parameters": parameters})
-    assert not runtime.host.requests
-
-
 async def test_clear_inflight_and_disable_debug_do_not_resurrect_records(runtime):
     runtime.host.release = asyncio.Event()
     job = asyncio.create_task(
-        runtime.test_request({"prompt": "test", "task": "custom", "module": "debug"})
+        runtime.complete("memory.reflect", "memory", "Extract.", {"material": "x"})
     )
     await runtime.host.entered.wait()
     runtime.debug.clear()
@@ -379,8 +264,6 @@ async def test_clear_inflight_and_disable_debug_do_not_resurrect_records(runtime
     await job
     assert not runtime.store.list("debug_records")
     await runtime.update_settings({"modules": {"debug": False}})
-    with pytest.raises(ValueError):
-        await runtime.test_request({"prompt": "another"})
     await runtime.complete("memory.reflect", "memory", "Extract.", {"material": "x"})
     assert not runtime.store.list("debug_records")
     assert runtime.last_requests[("memory.reflect", "global")]

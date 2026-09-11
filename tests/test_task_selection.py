@@ -275,7 +275,7 @@ async def test_v2_migration_keeps_global_baseline_and_archives_task_orders_idemp
         await migrated.stop()
 
 
-async def test_preparing_trial_and_calling_do_not_strengthen_without_usefulness_feedback(
+async def test_preparing_and_calling_do_not_strengthen_without_usefulness_feedback(
     world,
 ):
     runtime, manager, provider = world
@@ -303,14 +303,6 @@ async def test_preparing_trial_and_calling_do_not_strengthen_without_usefulness_
         return await provider.text_chat(**kwargs)
 
     runtime.host.context.llm_generate = generate
-    trial = await runtime.prepare_trial_request(request)
-    assert business_state(runtime) == before
-    assert trial["context_selection"] == request["context_selection"]
-    await runtime.test_request(request)
-    after_trial = business_state(runtime)
-    assert [row for row in after_trial if row["namespace"] != "debug_records"] == [
-        row for row in before if row["namespace"] != "debug_records"
-    ]
     assert not manager.rows
     runtime.host.context.send_message.assert_not_called()
     await runtime._model_call(request)
@@ -445,25 +437,28 @@ async def test_explicit_plan_memories_deduplicate_selected_recent_memory(world):
 
 
 @pytest.mark.parametrize("task", ["life.revise", "memory.reflect"])
-async def test_generated_trial_draft_filters_memory_before_cross_category_deduplication(
-    world, task
-):
+async def test_business_request_filters_memory_before_cross_category_deduplication(world, task):
     runtime, _, provider = world
-    await runtime.update_settings({"context_layout": {"tasks": {task: ["memory"]}}})
-    runtime.memory.remember(
-        "SELECTED_TRIAL_KNOWLEDGE", stable=True, scope=PRIVATE, source_event_id="trial-shared"
+    await runtime.update_settings(
+        {
+            "context_layout": {"tasks": {task: ["memory"]}},
+            "context_usage": {"limits": {"memory.related": 0}},
+        }
     )
     runtime.memory.remember(
-        "UNSELECTED_TRIAL_EMOTION",
+        "SELECTED_KNOWLEDGE", stable=True, scope=PRIVATE, source_event_id="shared-event"
+    )
+    runtime.memory.remember(
+        "UNSELECTED_EMOTION",
         kind="emotional",
         scope="qq:FriendMessage:99",
-        source_event_id="trial-shared",
+        source_event_id="shared-event",
         important=True,
     )
     before = business_state(runtime)
-    request = await runtime.build_test_request(task, PRIVATE)
-    assert "SELECTED_TRIAL_KNOWLEDGE" in request_text(request)
-    assert "UNSELECTED_TRIAL_EMOTION" not in request_text(request)
+    request = await runtime.prepare_request(task, task.split(".")[0], "TASK", {}, PRIVATE)
+    assert "SELECTED_KNOWLEDGE" in request_text(request)
+    assert "UNSELECTED_EMOTION" not in request_text(request)
     assert business_state(runtime) == before and not provider.calls
 
 

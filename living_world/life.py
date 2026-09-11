@@ -464,7 +464,7 @@ class LifeService(ActionLedger):
             raise ValueError("正在重新生成日程，请等待本次完成")
         now = self._now()
         if day and day != str(now.date()):
-            raise ValueError("只能重新生成今天的日程；其他日期请使用调试试跑")
+            raise ValueError("只能重新生成今天的日程")
         if scope != "global":
             raise ValueError("正式日程只能在全局场合重新生成")
         self.regenerating = True
@@ -755,7 +755,7 @@ class LifeService(ActionLedger):
             return result
 
     def detail_request(self, activity, instruction="", now=None):
-        """Build the same read-only, scope-filtered material for production and dry runs."""
+        """Build read-only, scope-filtered material for activity refinement."""
         now, scope = self._now(now), activity["scope"]
         selection = resolve_selection(self.runtime.settings, "life.detail")
         day = date.fromisoformat(activity["date"])

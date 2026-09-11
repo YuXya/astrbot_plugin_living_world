@@ -162,7 +162,7 @@ class DebugService:
             records,
             self.runtime.store.list("life_days") + self.runtime.store.list("life_day_history"),
         )
-        return {"records": records, "view": views[0]}
+        return {"view": views[0]}
 
     @diagnostic_write
     def begin(
@@ -295,7 +295,7 @@ class DebugService:
             "status": "success",
             "task": task,
             "template": template,
-            "text": "只保存此模板文本；测试上下文不会自动写入模板",
+            "text": "只保存此模板文本；本轮临时资料不会自动写入模板",
         }
 
     def reset_template(self, task):

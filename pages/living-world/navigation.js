@@ -1,7 +1,7 @@
 // Stable routes shared by menus, legacy links and context source targets.
 export const PAGES = {
   overview: { label: "今日概览", tabs: { current: "当前概览", recent: "近期动态" } },
-  context: { label: "上下文与提示词", tabs: { layout: "上下文排序", usage: "上下文用量", templates: "提示词模板", trial: "模型试跑", calls: "调用记录" } },
+  context: { label: "上下文与提示词", tabs: { layout: "上下文排序", usage: "上下文用量", templates: "提示词模板", calls: "调用记录" } },
   character: { label: "角色与状态", tabs: { profile: "角色与世界", state: "生活状态", drives: "内在状态", events: "经历记录" } },
   schedule: { label: "日程与行动", tabs: { timeline: "日程与执行", settings: "生成与细化设置", archives: "日程档案" } },
   chat: { label: "聊天与对象", tabs: { targets: "聊天白名单", reply: "回复与插话", limits: "发送限制", deliveries: "发送记录" } },

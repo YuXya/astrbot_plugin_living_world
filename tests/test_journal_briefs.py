@@ -1,12 +1,10 @@
 """Full archives feed unified extraction; historical briefs are never reactivated."""
 
 import asyncio
-import json
 
 import pytest
 
 from test_journal import memory, world as world
-from living_world.prompts import PROMPTS
 
 
 def archive(world, *, key="old", text="已经存档的日记全文", scope="global"):
@@ -92,8 +90,6 @@ async def test_inflight_extraction_cannot_resurrect_deleted_or_disabled_archive(
         assert len(world.store.list("memory_jobs")) == 1
 
 
-
-
 async def test_extraction_transaction_rolls_back_memory_if_completion_marker_fails(
     world, monkeypatch
 ):
@@ -112,22 +108,3 @@ async def test_extraction_transaction_rolls_back_memory_if_completion_marker_fai
     assert world.store.get("journals", entry["id"]) == entry
     assert world.store.list("memories") == []
     assert len(world.store.list("memory_jobs")) == 1
-
-
-async def test_trial_memory_extraction_does_not_modify_archives_or_memories(world):
-    entry = archive(world)
-    before = world.store.export()
-    request = await world.prepare_request(
-        "memory.reflect",
-        "memory",
-        PROMPTS["memory.reflect"],
-        {"material": entry["text"], "materials": [{"text": entry["text"]}]},
-    )
-    world.host.responses["memory.reflect"] = json.dumps(
-        {"memories": [{"judgment": "试跑结果", "evidence": entry["text"]}]}, ensure_ascii=False
-    )
-    await world.test_request(request)
-    ignored = {"llm_calls", "test_drafts", "test_requests", "debug_records", "model_test_drafts"}
-    assert [row for row in world.store.export() if row["namespace"] not in ignored] == [
-        row for row in before if row["namespace"] not in ignored
-    ]
