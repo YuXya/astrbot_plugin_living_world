@@ -868,8 +868,12 @@ class Runtime:
             "schedule_end",
         )
         plan_changed = any(old["life"][key] != proposed["life"][key] for key in plan_keys)
-        if patch and set(patch) == {"life"}:
-            # Freeze today's settings atomically; outline changes do not run maintenance.
+        if (
+            patch
+            and set(patch) <= {"life", "social"}
+            and set(patch.get("social", {})) <= {"cooldown_minutes"}
+        ):
+            # Schedule and cooldown saves do not run maintenance or cancel ongoing work.
             with self.store.transaction():
                 if plan_changed:
                     self.life.freeze_parameters()

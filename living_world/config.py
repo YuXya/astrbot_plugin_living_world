@@ -103,9 +103,6 @@ DEFAULTS = {
     "social": {
         "target_count": 1,
         "cooldown_minutes": 60,
-        "daily_limit": 5,
-        "quiet_start": "23:00",
-        "quiet_end": "08:00",
         "interjection_interval_minutes": 30,
     },
     "drives": copy.deepcopy(DRIVE_DEFAULTS),
@@ -157,6 +154,7 @@ def settings_from(patch=None):
             raise TypeError(f"{section} 必须是对象")
     result["context_usage"] = validate_usage(result["context_usage"])
     result["context_layout"] = validate_layout_settings(result["context_layout"])
+    result["social"] = {key: result["social"][key] for key in DEFAULTS["social"]}
     integer(result["social"]["target_count"], 1, 20, "每轮抽选目标数")
     result["social"]["target_count"] = 1
     result["memory"] = memory_settings(result["memory"])
@@ -208,15 +206,11 @@ def settings_from(patch=None):
     for name in MODULES:
         if not isinstance(result["modules"][name], bool):
             raise TypeError("模块开关必须为布尔值")
-    for name in ("quiet_start", "quiet_end"):
-        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(result["social"][name])):
-            raise ValueError("免打扰时间格式必须为 HH:MM")
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(result["life"]["daily_plan_time"])):
         raise ValueError("日程生成时间格式必须为 HH:MM")
     schedule_range(result["life"])
     bounds = {
         ("social", "target_count"): (1, 20),
-        ("social", "daily_limit"): (0, 1000),
         ("social", "cooldown_minutes"): (0, 10080),
         ("social", "interjection_interval_minutes"): (1, 1440),
         ("life", "tick_seconds"): (10, 3600),

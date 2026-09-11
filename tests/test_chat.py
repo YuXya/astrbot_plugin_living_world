@@ -157,7 +157,7 @@ async def world(tmp_path):
         {
             "persona_id": "student",
             "sessions": [{"umo": PRIVATE}, {"umo": "qq:GroupMessage:100"}],
-            "social": {"quiet_start": "00:00", "quiet_end": "00:00"},
+            "life": {"schedule_start": "00:00", "schedule_end": "24:00"},
         }
     )
     yield runtime, manager, provider

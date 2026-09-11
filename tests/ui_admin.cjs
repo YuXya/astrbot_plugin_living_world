@@ -6,7 +6,7 @@ module.exports = async (page, go, contract) => {
   const field = (name) => page.locator(`[name="${name}"]`);
   const click = (name) => page.getByRole("button", { name, exact: true }).click();
   const refresh = () => click("刷新数据");
-  const save = async (label) => { await click(label); await page.getByText("设置已保存并应用，已有记录继续保留", { exact: true }).waitFor(); };
+  const save = async (label) => { await click(label); await page.getByText(label === "保存日程设置" ? "日程设置已保存；同对象冷却立即生效，生成时间、活动数和范围默认次日生效，今天可手动重新生成" : "设置已保存并应用，已有记录继续保留", { exact: true }).waitFor(); };
   const posted = () => page.evaluate(() => window.calls.findLast((call) => call.endpoint === "settings" && call.method === "POST").body);
   const screenshotDir = path.resolve(__dirname, "../cache/ui-refactor"); fs.mkdirSync(screenshotDir, { recursive: true });
   const shot = async (name) => { await page.evaluate(() => window.scrollTo(0, 0)); await page.screenshot({ path: path.join(screenshotDir, name + ".png"), fullPage: true }); };
@@ -21,7 +21,7 @@ module.exports = async (page, go, contract) => {
   const menus = {
     overview: ["current", "recent"], context: ["layout", "usage", "templates", "calls"],
     character: ["profile", "state", "drives", "events"], schedule: ["timeline", "settings", "archives"],
-    chat: ["targets", "reply", "limits", "deliveries"], sources: ["settings", "records", "manual", "runs"],
+    chat: ["targets", "reply", "deliveries"], sources: ["settings", "records", "manual", "runs"],
     memory: ["records", "settings", "journals"], system: ["models", "modules", "backup", "maintenance"],
   };
   assert.equal(await page.locator("#navigation a").count(), 8);
@@ -73,9 +73,9 @@ module.exports = async (page, go, contract) => {
   await go("character", "profile"); await field("character.profile").fill("角色资料草稿 <img src=x onerror=window.profileXss=1>");
   await go("chat", "reply"); await field("reply.group_prompt").fill("回复草稿"); await field("reply.private_prompt").fill("私聊草稿"); await field("reply.proactive_prompt").fill("主动聊天草稿"); await field("social.interjection_interval_minutes").fill("45");
   for (const key of ["group_prompt", "private_prompt", "proactive_prompt"]) assert.equal(await field(`reply.${key}`).getAttribute("maxlength"), "8000");
-  await go("chat", "limits"); await field("social.cooldown_minutes").fill("75");
-  await save("保存发送限制");
-  let patch = await posted(); assert.deepEqual(Object.keys(patch), ["social"]); assert.equal(Object.hasOwn(patch.social, "interjection_interval_minutes"), false);
+  await go("schedule", "settings"); await field("social.cooldown_minutes").fill("75");
+  await save("保存日程设置");
+  let patch = await posted(); assert.deepEqual(Object.keys(patch).sort(), ["life", "social"]); assert.deepEqual(patch.social, { cooldown_minutes: 75 });
   await go("chat", "reply"); assert.equal(await field("reply.group_prompt").inputValue(), "回复草稿");
   await page.evaluate(() => { window.failNext = true; }); await click("保存回复与插话设置");
   await page.getByText("测试来源暂时不可用", { exact: true }).waitFor(); await refresh();
@@ -115,8 +115,8 @@ module.exports = async (page, go, contract) => {
   assert.equal(await field("social.target_count").count(), 0);
   await field("targets.selection").selectOption("qq:FriendMessage:42"); await click("检查会话与历史");
   await page.getByText("会话检查完成；没有调用模型或发送消息", { exact: true }).waitFor();
-  await go("chat", "limits");
-  await page.getByText("每轮抽选 1 个目标", { exact: false }).waitFor();
+  await go("schedule", "settings");
+  await page.getByText("一轮主动聊天固定一个对象", { exact: false }).waitFor();
   assert.equal(await field("social.target_count").count(), 0);
   await go("sources", "settings"); await field("source.settings").selectOption("news");
   await field("name").fill("第一个来源草稿"); await field("source-array.news.selection").selectOption("rss-1"); await field("name").fill("第二个来源草稿");

@@ -136,15 +136,10 @@ class SocialService:
         else:
             return f"会话类型：一对一私聊\n目标名字：{name}\n接收范围：这位私聊对象。"
 
-    def _quiet(self, now: datetime) -> bool:
-        config = self.runtime.settings.get("social", {})
-        start, end = str(config.get("quiet_start", "23:00")), str(config.get("quiet_end", "08:00"))
-        if start == end:
-            return False
-        value = now.strftime("%H:%M")
-        return start <= value < end if start < end else value >= start or value < end
-
     def _rate_reason(self, scope: str, now: datetime) -> str:
+        cooldown_seconds = self._number("cooldown_minutes", 60) * 60
+        if cooldown_seconds <= 0:
+            return ""
         target = destination(scope)
         attempts = [
             row
@@ -154,9 +149,7 @@ class SocialService:
             and row.get("attempted", True)
         ]
         times = [_parsed_time(row["created_at"]).astimezone(now.tzinfo) for row in attempts]
-        if sum(at.date() == now.date() for at in times) >= self._number("daily_limit", 5):
-            return "daily_limit"
-        if times and (now - max(times)).total_seconds() < self._number("cooldown_minutes", 60) * 60:
+        if times and (now - max(times)).total_seconds() < cooldown_seconds:
             return "cooldown"
         return ""
 
@@ -182,8 +175,6 @@ class SocialService:
         now = self._now()
         if self.runtime.life.schedule_window(now)["sleeping"]:
             return SLEEP_NOTICE
-        if self._quiet(now):
-            return "quiet_hours"
         return self._rate_reason(scope, now)
 
     def _draw(self, candidates: list[dict], count: int) -> list[dict]:

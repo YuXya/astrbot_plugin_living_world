@@ -26,7 +26,6 @@ PAGES = {
         {
             "targets": "聊天白名单",
             "reply": "回复与插话",
-            "limits": "发送限制",
             "deliveries": "发送记录",
         },
     ),

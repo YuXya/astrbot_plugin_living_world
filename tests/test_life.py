@@ -341,14 +341,14 @@ async def test_disabled_and_failed_actions_release_only_unstarted_reservations()
         if kind == "search":
             assert runtime.consume(kind, payload)
             raise ValueError("Search unavailable")
-        return {"status": "skipped", "reason": "quiet_hours"}
+        return {"status": "skipped", "reason": "cooldown"}
 
     runtime.execute_action = execute
     await service.tick(NOW)
     states = runtime.store.get("activities", rows[0]["id"])["actions"]
     assert states["news"]["execution"]["reason"] == "module_disabled"
     assert states["search"]["execution"]["status"] == "failed"
-    assert states["social"]["execution"]["reason"] == "quiet_hours"
+    assert states["social"]["execution"]["reason"] == "cooldown"
     assert {k: v["started"] for k, v in action_counts(service).items()} == {
         "news": 0,
         "search": 1,

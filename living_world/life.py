@@ -876,9 +876,9 @@ class LifeService(ActionLedger):
                 f"{names[k]}{'已启用' if self.runtime.enabled('proactive' if k == 'social' else k) else '已关闭，不得安排'}"
                 for k in ACTION_ORDER
             )
-            + f"。聊天免打扰 {social.get('quiet_start', '23:00')}—{social.get('quiet_end', '08:00')}；"
+            + f"。同对象冷却 {social.get('cooldown_minutes', 60)} 分钟；"
             + f"日程范围 {window['schedule_start']}—{window['schedule_end']}，范围外睡梦中，停止主动聊天和群聊插话；"
-            + "对象在实际执行时由白名单抽取，并再次检查冷却及发送限制。",
+            + "对象在实际执行时由白名单抽取，并再次检查同对象冷却及日程范围。",
         }
         if self.runtime.enabled("state"):
             state = self.state()

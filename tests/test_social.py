@@ -11,6 +11,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from living_world.config import DEFAULTS
+from living_world.life import LifeService
+from living_world.schedule_time import SLEEP_NOTICE
 from living_world.social import SocialService, destination
 from living_world.store import Store
 
@@ -55,14 +57,8 @@ class Runtime:
         self.settings = copy.deepcopy(DEFAULTS)
         self.settings["modules"].update({"proactive": True, "interjection": True})
         self.settings["sessions"] = [{"umo": GROUP, "weight": 1}, {"umo": FRIEND, "weight": 1}]
-        self.settings["social"].update(
-            {
-                "quiet_start": "00:00",
-                "quiet_end": "00:00",
-                "cooldown_minutes": 0,
-                "daily_limit": 100,
-            }
-        )
+        self.settings["social"]["cooldown_minutes"] = 0
+        self.life = LifeService(self)
         self.host = Host()
         self.allowed = True
         self.model_calls = []
@@ -223,7 +219,7 @@ class SocialTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "module_disabled")
         self.assertEqual(self.runtime.model_calls, [])
 
-    async def test_cooldown_and_daily_limit_are_shared_by_group_aliases(self):
+    async def test_cooldown_is_shared_by_group_aliases_and_expires(self):
         alias_a, alias_b = "qq:GroupMessage:1_100", "qq:GroupMessage:2_100"
         self.runtime.settings["sessions"] = [{"umo": alias_a}, {"umo": alias_b}]
         self.runtime.settings["social"]["cooldown_minutes"] = 60
@@ -231,17 +227,19 @@ class SocialTests(unittest.IsolatedAsyncioTestCase):
         result = await self.social.send(target_scope=alias_b, action_id="two")
         self.assertEqual(result["reason"], "cooldown")
         self.now += timedelta(minutes=61)
-        self.runtime.settings["social"]["daily_limit"] = 1
         result = await self.social.send(target_scope=alias_b, action_id="three")
-        self.assertEqual(result["reason"], "daily_limit")
-        self.assertEqual(len(self.runtime.host.sent), 1)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(self.runtime.host.sent), 2)
 
-    async def test_quiet_hours_cross_midnight_and_end_at_configured_boundary(self):
-        self.runtime.settings["social"].update(quiet_start="23:00", quiet_end="08:00")
+    async def test_autonomous_hours_follow_the_schedule_boundaries(self):
         self.now = self.now.replace(hour=1)
-        self.assertEqual((await self.social.send(target_scope=GROUP))["reason"], "quiet_hours")
+        self.assertEqual((await self.social.send(target_scope=GROUP))["reason"], SLEEP_NOTICE)
         self.now = self.now.replace(hour=8)
         self.assertEqual((await self.social.send(target_scope=GROUP))["status"], "success")
+        self.now = self.now.replace(hour=23)
+        self.assertEqual((await self.social.send(target_scope=GROUP))["status"], "success")
+        self.now = (self.now + timedelta(days=1)).replace(hour=0)
+        self.assertEqual((await self.social.send(target_scope=GROUP))["reason"], SLEEP_NOTICE)
 
     async def test_same_action_cannot_send_again_after_service_restart(self):
         first = await self.social.send(target_scope=GROUP, action_id="persistent-action")
@@ -273,9 +271,9 @@ class SocialTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.store.list("deliveries")[0]["status"], "unknown")
         result = await self.service().send(target_scope=GROUP, action_id="cancelled")
         self.assertEqual(result["reason"], "already_attempted")
-        self.runtime.settings["social"]["daily_limit"] = 1
+        self.runtime.settings["social"]["cooldown_minutes"] = 60
         result = await self.service().send(target_scope=GROUP, action_id="new-attempt")
-        self.assertEqual(result["reason"], "daily_limit")
+        self.assertEqual(result["reason"], "cooldown")
         self.assertEqual(len(self.runtime.host.sent), 1)
 
     async def test_transport_rejection_is_failed_and_same_action_never_retries(self):
@@ -286,15 +284,15 @@ class SocialTests(unittest.IsolatedAsyncioTestCase):
         await self.service().send(target_scope=GROUP, action_id="rejected")
         self.assertEqual(len(self.runtime.host.sent), 1)
 
-    async def test_transport_exception_is_unknown_and_counts_towards_limit(self):
+    async def test_transport_exception_is_unknown_and_starts_cooldown(self):
         self.runtime.host.send_error = OSError("connection closed")
-        self.runtime.settings["social"]["daily_limit"] = 1
+        self.runtime.settings["social"]["cooldown_minutes"] = 60
         result = await self.social.send(target_scope=GROUP, action_id="unknown")
         self.assertEqual(result["status"], "failed")
         self.assertIn("发送结果未确认", result["text"])
         self.assertEqual(self.runtime.store.list("deliveries")[0]["status"], "unknown")
         self.assertEqual(
-            (await self.social.send(target_scope=GROUP, action_id="next"))["reason"], "daily_limit"
+            (await self.social.send(target_scope=GROUP, action_id="next"))["reason"], "cooldown"
         )
 
     async def test_model_failure_does_not_send_or_retry_action(self):
@@ -318,8 +316,8 @@ class SocialTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.runtime.model_calls), 1)
         self.assertEqual(self.runtime.host.sent, [])
 
-    async def test_concurrent_contacts_share_one_budget(self):
-        self.runtime.settings["social"]["daily_limit"] = 1
+    async def test_concurrent_contacts_share_one_cooldown(self):
+        self.runtime.settings["social"]["cooldown_minutes"] = 60
         results = await asyncio.gather(
             self.social.send(target_scope=GROUP, action_id="one"),
             self.social.send(target_scope=GROUP, action_id="two"),
@@ -431,7 +429,7 @@ class RuntimeSocialBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     "persona_id": "student",
                     "sessions": [{"umo": FRIEND, "weight": 1}, {"umo": GROUP, "weight": 0}],
                     "modules": {"proactive": True},
-                    "social": {"quiet_start": "00:00", "quiet_end": "00:00"},
+                    "life": {"schedule_start": "00:00", "schedule_end": "24:00"},
                 }
             )
             result = await runtime.execute_action(

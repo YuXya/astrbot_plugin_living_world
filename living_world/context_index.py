@@ -155,9 +155,9 @@ INDEX = {
     ),
     "task.limits": entry(
         "告知本次可用能力和执行限制。",
-        "模块启停状态、白名单聊天的免打扰及发送限制。",
+        "模块启停状态、日程起止范围、白名单及同对象冷却。",
         target("模块开关", "system", "modules"),
-        target("发送限制", "chat", "limits"),
+        target("生成与细化设置", "schedule", "settings"),
     ),
     "task.thoughts": entry(
         "让活动细化参考当前阶段的自然语言想法。",

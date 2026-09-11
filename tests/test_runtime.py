@@ -85,7 +85,7 @@ async def runtime(tmp_path):
         {
             "persona_id": "student",
             "sessions": [{"umo": PRIVATE}, {"umo": GROUP}],
-            "social": {"quiet_start": "00:00", "quiet_end": "00:00"},
+            "life": {"schedule_start": "00:00", "schedule_end": "24:00"},
         }
     )
     yield runtime
@@ -322,7 +322,7 @@ async def test_shutdown_cancels_inflight_actions_before_closing_store(runtime):
         {"social": {"target_count": 0}},
         {"sessions": [{"umo": "1234"}]},
         {"sessions": [{"umo": PRIVATE, "weight": float("nan")}]},
-        {"social": {"quiet_start": "25:00"}},
+        {"social": {"cooldown_minutes": -1}},
     ],
 )
 def test_invalid_config_is_rejected(patch):

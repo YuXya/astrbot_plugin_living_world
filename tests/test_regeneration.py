@@ -385,7 +385,7 @@ async def test_actual_result_totals_survive_regeneration_and_deduplicate_history
     async def execute(kind, payload, scope, action_id):
         runtime.actions.append((kind, payload, scope, action_id))
         if kind == "social":
-            return {"status": "skipped", "reason": "quiet_hours"}
+            return {"status": "skipped", "reason": "cooldown"}
         assert runtime.consume(kind, payload)
         return {"status": "success" if kind == "news" else "failed", "reason": "fixture"}
 

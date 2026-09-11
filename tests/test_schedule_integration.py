@@ -198,7 +198,7 @@ async def configured_runtime(path, host, clock):
             "modules": {"news": True, "search": True, "proactive": True},
             "models": {"default": "test-model"},
             "sessions": [{"umo": GROUP, "enabled": True, "weight": 1}],
-            "social": {"quiet_start": "00:00", "quiet_end": "00:00", "cooldown_minutes": 0},
+            "social": {"cooldown_minutes": 0},
             "news": {
                 "sources": [
                     {"id": "fixture-news", "name": "Fixture news", "url": FEED, "enabled": True}
@@ -435,17 +435,13 @@ async def test_one_selected_target_consumes_one_attempt_even_on_failure(tmp_path
         await runtime.stop()
 
 
-@pytest.mark.parametrize("blocking", ["quiet_hours", "no_targets", "changed_before_generation"])
+@pytest.mark.parametrize("blocking", ["cooldown", "no_targets", "changed_before_generation"])
 async def test_chat_skipped_before_message_generation_does_not_debit_loneliness(tmp_path, blocking):
     host, clock = ActionHost(), [DAY.replace(hour=6)]
     runtime = await configured_runtime(tmp_path / "world.sqlite", host, clock)
     try:
         await prepare_first_detail(runtime, host, clock, ("social",))
-        if blocking == "quiet_hours":
-            await runtime.update_settings(
-                {"social": {"quiet_start": "08:00", "quiet_end": "10:00"}}
-            )
-        elif blocking == "no_targets":
+        if blocking == "no_targets":
             await runtime.update_settings({"sessions": []})
         else:
             checks = 0
@@ -453,7 +449,7 @@ async def test_chat_skipped_before_message_generation_does_not_debit_loneliness(
             async def changed_control(scope, interjection=False):
                 nonlocal checks
                 checks += 1
-                return "" if checks == 1 else "cooldown"
+                return "" if blocking == "changed_before_generation" and checks == 1 else "cooldown"
 
             runtime.social._control_reason = changed_control
         await runtime.life.tick()
